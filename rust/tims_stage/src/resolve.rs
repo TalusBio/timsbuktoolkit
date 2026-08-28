@@ -21,13 +21,13 @@ use timscentroid::{
 
 #[derive(Debug)]
 pub enum Resolved {
-    /// A prebuilt `.idx` (local or remote) — load directly, no reader dispatch.
+    /// A prebuilt `.idx` (local or remote) -- load directly, no reader dispatch.
     Idx { loc: StorageLocation },
     /// A raw vendor artifact (local path or `s3://…`). Handed to
     /// [`crate::load::load_raw`], which sniffs the reader and manifest-stages
     /// remote inputs. Carries the canonical URI verbatim.
     Raw { uri: String },
-    /// A tarred `.d` container — extracted to a tempdir first, then read as a
+    /// A tarred `.d` container -- extracted to a tempdir first, then read as a
     /// local `.d`. (Bruker-specific transport.)
     Tar { spec: SourceSpec },
 }
@@ -62,7 +62,7 @@ pub fn resolve(uri: &str) -> Result<Resolved, StageError> {
     }
 
     // No sidecar. `.tar` is a container (extract first); everything else is a
-    // raw artifact handed to the reader registry via `load_raw` — no vendor
+    // raw artifact handed to the reader registry via `load_raw` -- no vendor
     // shape decided here.
     match (shape.loc, shape.name) {
         (_, NameKind::Raw) => Ok(Resolved::Raw {

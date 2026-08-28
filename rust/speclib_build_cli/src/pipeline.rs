@@ -63,7 +63,7 @@ async fn flush_batch(
         return Ok(());
     }
 
-    // Koina/Prosit accepts UNIMOD notation — convert our short form [U:N] → [UNIMOD:N]
+    // Koina/Prosit accepts UNIMOD notation -- convert our short form [U:N] → [UNIMOD:N]
     let inputs: Vec<PredictionInput> = batch
         .iter()
         .map(|item| PredictionInput {
@@ -159,7 +159,7 @@ pub async fn run(config: &SpeclibBuildConfig) -> Result<(), Box<dyn std::error::
                 .any(|c| matches!(c, 'U' | 'B' | 'J' | 'Z' | 'X'))
             {
                 tracing::warn!(
-                    "Protein {} contains non-standard amino acids (U/B/J/Z/X) — affected peptides will be skipped",
+                    "Protein {} contains non-standard amino acids (U/B/J/Z/X) -- affected peptides will be skipped",
                     prot.description,
                 );
             }
@@ -211,7 +211,7 @@ pub async fn run(config: &SpeclibBuildConfig) -> Result<(), Box<dyn std::error::
     };
 
     if base_peptides.is_empty() {
-        return Err("No peptides after digestion/dedup — nothing to do".into());
+        return Err("No peptides after digestion/dedup -- nothing to do".into());
     }
 
     // ── Phase 2: Set up prediction ──────────────────────────────────────────

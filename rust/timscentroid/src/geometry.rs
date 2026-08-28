@@ -53,7 +53,7 @@ pub enum RingShape {
         mz_lo: (f64, f64),
         mz_hi: (f64, f64),
     },
-    /// Generic polygon fallback. Not expected on current instruments —
+    /// Generic polygon fallback. Not expected on current instruments --
     /// loading one fires a single-shot `tracing::warn!` asking the user
     /// to report the ring shape so we can extend the classifier.
     Polygon(Polygon<f64>),

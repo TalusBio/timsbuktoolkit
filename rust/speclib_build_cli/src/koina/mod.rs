@@ -91,7 +91,7 @@ impl KoinaClient {
 
             let status = resp.status();
 
-            // Client errors (4xx) — no point retrying.
+            // Client errors (4xx) -- no point retrying.
             if status.is_client_error() {
                 let body = resp.text().await.unwrap_or_default();
                 return Err(format!(
@@ -111,7 +111,7 @@ impl KoinaClient {
                 });
             }
 
-            // 5xx or other non-success — record and retry.
+            // 5xx or other non-success -- record and retry.
             last_err = format!("Koina request failed with status {status}");
         }
 

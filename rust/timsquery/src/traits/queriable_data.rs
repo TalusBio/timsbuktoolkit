@@ -18,7 +18,7 @@ use timscentroid::rt_mapping::RTIndex;
 /// Data needed to build a query against the index.
 ///
 /// Exposes exactly what `QueryRanges::from_query_data` and per-aggregator
-/// `add_query` impls read — scalars for range building + iterators for
+/// `add_query` impls read -- scalars for range building + iterators for
 /// precursor and fragment m/z windows. A fully immutable view, implemented
 /// by `Target` as well as by aggregators that carry their own
 /// query scalars.
@@ -34,7 +34,7 @@ pub trait HasQueryData<FH: KeyLike> {
     fn rt_seconds(&self) -> f32;
     fn iter_precursors(&self) -> impl Iterator<Item = (i8, f64)> + '_;
     /// Borrowed label + copied mz. Named `iter_fragments` (not `_refs`)
-    /// since the mz is Copy — the `_refs` name would mislead readers.
+    /// since the mz is Copy -- the `_refs` name would mislead readers.
     fn iter_fragments<'a>(&'a self) -> impl Iterator<Item = (&'a FH, f64)> + 'a
     where
         FH: 'a;

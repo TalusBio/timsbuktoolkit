@@ -81,7 +81,7 @@ impl std::fmt::Display for MlpFoldError {
             } => write!(
                 f,
                 "fold {fold}: the train slice is EMPTY, so all {ncols} lane columns are \
-                 vacuously dead — this is a zero-row fold, not a dead feature set"
+                 vacuously dead -- this is a zero-row fold, not a dead feature set"
             ),
             MlpFoldError::NoUsableColumns {
                 fold,
@@ -95,7 +95,7 @@ impl std::fmt::Display for MlpFoldError {
             MlpFoldError::NonFiniteScore { row, n_bad, scored } => write!(
                 f,
                 "the net produced a NON-FINITE logit for {n_bad} of {scored} scored rows (first \
-                 at dataset row {row}) — the weights or an activation diverged during training"
+                 at dataset row {row}) -- the weights or an activation diverged during training"
             ),
         }
     }
@@ -130,7 +130,7 @@ pub struct MlpFoldModel {
 
 #[cfg(test)]
 impl MlpFoldModel {
-    /// The transform fitted at `fit` time — the one `predict` uses.
+    /// The transform fitted at `fit` time -- the one `predict` uses.
     pub(crate) fn transform(&self) -> &ColumnTransform {
         &self.transform
     }
@@ -166,8 +166,8 @@ impl MlpFoldModel {
 ///
 /// **`_isna` companions have no lane of their own**, so each one's value is summed
 /// into the column it flags. For either metric the resulting number answers one
-/// question — how much this column matters, through its value AND through its
-/// missingness — which is the only reading that makes the two comparable.
+/// question -- how much this column matters, through its value AND through its
+/// missingness -- which is the only reading that makes the two comparable.
 fn fold_inputs_to_lanes(transform: &ColumnTransform, raw: &[f32]) -> Vec<f32> {
     // Every transformed input is either a standardized column or a companion, so
     // with the right length the loop below places all of them; a short/long
@@ -201,7 +201,7 @@ fn fold_inputs_to_lanes(transform: &ColumnTransform, raw: &[f32]) -> Vec<f32> {
 }
 
 /// One row in every `INNER_VAL_STRIDE` of `train` is carved off as the inner
-/// validation slice — 20%.
+/// validation slice -- 20%.
 ///
 /// Why a STRIDE and not a tail cut or a random sample:
 ///
@@ -211,7 +211,7 @@ fn fold_inputs_to_lanes(transform: &ColumnTransform, raw: &[f32]) -> Vec<f32> {
 ///    construction. A random sample would have to be seeded from somewhere, and
 ///    every seed source available here is already spoken for.
 ///  * **Class-proportional under any row ORDER.** The rescore path shuffles
-///    before building the matrix, so a tail cut would usually be fine there —
+///    before building the matrix, so a tail cut would usually be fine there --
 ///    but `FoldModel::fit` is handed whatever slice the caller has, and the
 ///    obvious unshuffled layout is targets-then-decoys, where a tail cut is a
 ///    single-class validation set and the stopping decision becomes nonsense. A
@@ -224,7 +224,7 @@ const INNER_VAL_STRIDE: usize = 5;
 /// `160` is `MIN_INNER_VAL_ROWS * INNER_VAL_STRIDE`: the floor is really on the
 /// SIZE OF THE VALIDATION SET, 32 rows. A held-out loss averaged over fewer
 /// rows than that is dominated by which rows landed in it, and a patience rule
-/// reading it stops on sampling noise rather than on the overfitting turn —
+/// reading it stops on sampling noise rather than on the overfitting turn --
 /// worse than not stopping at all. The 20% also costs training rows, which a
 /// small fold cannot spare.
 ///
@@ -235,7 +235,7 @@ const MIN_TRAIN_ROWS_FOR_INNER_VAL: usize = MIN_INNER_VAL_ROWS * INNER_VAL_STRID
 
 /// The floor on the number of rows the stopping decision is averaged over.
 ///
-/// It applies to EITHER source of those rows — the inner carve (via
+/// It applies to EITHER source of those rows -- the inner carve (via
 /// [`MIN_TRAIN_ROWS_FOR_INNER_VAL`], which is this times the stride) and the
 /// outer `val` slice a caller passes (via [`usable_val`]). The argument above is
 /// about the SIZE of the held-out set and says nothing about where it came from:
@@ -246,7 +246,7 @@ const MIN_TRAIN_ROWS_FOR_INNER_VAL: usize = MIN_INNER_VAL_ROWS * INNER_VAL_STRID
 const MIN_INNER_VAL_ROWS: usize = 32;
 
 /// The outer `val` slice if it is big enough to make a stopping decision on,
-/// otherwise nothing — see [`MIN_INNER_VAL_ROWS`].
+/// otherwise nothing -- see [`MIN_INNER_VAL_ROWS`].
 ///
 /// Returning an empty slice rather than a flag so the rest of `fit` has ONE
 /// notion of "is there a held-out set": an under-floor slice is indistinguishable
@@ -358,14 +358,14 @@ impl FoldModel for MlpFoldModel {
 
     /// `val` is the EARLY-STOPPING SLICE, and it is used as one whenever
     /// [`MlpConfig::early_stopping_patience`] is set. It reaches
-    /// [`ColumnTransform::apply`] and [`Mlp::eval_loss`] and nothing else — not
-    /// the transform FIT, not the optimizer, not the RNG — so the only thing it
+    /// [`ColumnTransform::apply`] and [`Mlp::eval_loss`] and nothing else -- not
+    /// the transform FIT, not the optimizer, not the RNG -- so the only thing it
     /// can move is which epoch's weights are kept, which is what early stopping
     /// means.
     ///
     /// # The `val = &[]` callers
     /// A caller that has no fold to spare may pass an empty slice. Rather than
-    /// silently training the full budget there, an inner slice is carved out of `train` — see
+    /// silently training the full budget there, an inner slice is carved out of `train` -- see
     /// [`inner_val_split`] for the rule and [`MIN_TRAIN_ROWS_FOR_INNER_VAL`] for
     /// when it declines to. Those rows are excluded from the optimizer and used
     /// only for the stopping decision.
@@ -377,26 +377,26 @@ impl FoldModel for MlpFoldModel {
     ///
     /// **The [`ColumnTransform`] is still fitted over ALL of `train`,
     /// inner-validation rows included.** Deliberate, and the choice worth
-    /// stating: those rows are train-fold rows — the outer partition does not
+    /// stating: those rows are train-fold rows -- the outer partition does not
     /// hold them out from this model, this function does, for a decision that
-    /// never leaves it — so including them breaks no leak property. What it buys
+    /// never leaves it -- so including them breaks no leak property. What it buys
     /// is that the cull set, the standardization moments and the imputation
     /// means do not move when the patience knob does: a config knob that changed
     /// WHICH LANE COLUMNS ARE ALIVE would change the importance sidecar and the
     /// [`MlpFoldError::NoUsableColumns`] failure mode along with it. The cost is
     /// that the inner-validation loss is very slightly optimistic, through
     /// label-free per-column moments that 80% of the same rows already
-    /// determine — second-order next to the epoch it is being used to choose.
+    /// determine -- second-order next to the epoch it is being used to choose.
     ///
     /// `fold` is NOT ignored: it is the only thing that distinguishes one
     /// fold's initialization from another's, via
     /// [`MlpConfig::rng_for_fold`]. Passing the same `fold` for every fold
-    /// would give every fold the same weight init and the same shuffle order —
+    /// would give every fold the same weight init and the same shuffle order --
     /// still leak-free, but the folds would be correlated in a way nothing
     /// downstream would notice.
     ///
-    /// Everything fitted here — the cull set, the standardization moments, the
-    /// imputation means, the weights — comes from `train` and only `train`.
+    /// Everything fitted here -- the cull set, the standardization moments, the
+    /// imputation means, the weights -- comes from `train` and only `train`.
     fn fit_with_progress<D: FoldDataset>(
         cfg: &MlpConfig,
         data: &D,
@@ -434,7 +434,7 @@ impl FoldModel for MlpFoldModel {
         }
 
         // Where the stopping decision gets measured. A big enough outer `val`
-        // slice is preferred whenever there is one — it costs no training rows —
+        // slice is preferred whenever there is one -- it costs no training rows --
         // and the inner carve is the fallback for the callers that pass `&[]`
         // (and for an outer slice under [`MIN_INNER_VAL_ROWS`], which is not a
         // set worth stopping on; see [`usable_val`]). With early stopping off
@@ -444,7 +444,7 @@ impl FoldModel for MlpFoldModel {
         if !val.is_empty() && val_rows.is_empty() {
             tracing::debug!(
                 "MLP fold {}: the outer validation slice has {} rows, under the {} a held-out \
-                 measurement needs — ignoring it, so this fit is exactly the `val = &[]` fit. \
+                 measurement needs -- ignoring it, so this fit is exactly the `val = &[]` fit. \
                  That falls back to the inner carve ONLY with early stopping on and enough \
                  train rows to carve from (too few rows logs just below); with early stopping \
                  off there is no carve and no stopping decision to make",
@@ -461,7 +461,7 @@ impl FoldModel for MlpFoldModel {
         if early_stopping && val_rows.is_empty() && inner_pos.is_empty() {
             tracing::debug!(
                 "MLP fold {}: {} train rows is under the {} needed to carve an inner \
-                 validation slice — training the full {} epoch budget with no early stopping",
+                 validation slice -- training the full {} epoch budget with no early stopping",
                 fold,
                 train.len(),
                 MIN_TRAIN_ROWS_FOR_INNER_VAL,
@@ -475,7 +475,7 @@ impl FoldModel for MlpFoldModel {
         let fit_rows: Vec<usize> = fit_pos.iter().map(|&p| train[p]).collect();
 
         // The held-out set, transformed through the TRAIN-fitted transform. It
-        // reaches `Mlp::eval_loss` and nothing else — no optimizer step, no
+        // reaches `Mlp::eval_loss` and nothing else -- no optimizer step, no
         // transform fit, no RNG draw.
         //
         // Streamed whenever early stopping is on: it is the stopping decision,
@@ -493,7 +493,7 @@ impl FoldModel for MlpFoldModel {
             None
         };
 
-        // Seeded from (config seed, fold index) alone — see the module docs.
+        // Seeded from (config seed, fold index) alone -- see the module docs.
         let mut rng = cfg.rng_for_fold(fold);
         let mut net = Mlp::feedforward(width, &cfg.hidden, &mut rng);
         let mut opt = Adam::new(cfg.lr).with_weight_decay(cfg.weight_decay);
@@ -573,7 +573,7 @@ impl FoldModel for MlpFoldModel {
 
     /// Score `rows` through the SAME transform that was fitted at `fit` time.
     ///
-    /// Nothing is refitted here — not the cull set, not the moments, not the
+    /// Nothing is refitted here -- not the cull set, not the moments, not the
     /// imputation means. A refit would make a row's score depend on the other
     /// rows it happened to be batched with, which is both a leak (the batch may
     /// contain rows the caller is holding out) and non-reproducible.
@@ -582,7 +582,7 @@ impl FoldModel for MlpFoldModel {
     /// needs a monotone ranking and the sigmoid is a monotone no-op on it.
     ///
     /// Every returned value is FINITE, or this is an
-    /// [`MlpFoldError::NonFiniteScore`] — see that variant for why the check lives
+    /// [`MlpFoldError::NonFiniteScore`] -- see that variant for why the check lives
     /// here and not downstream.
     fn predict<D: FoldDataset>(&self, data: &D, rows: &[usize]) -> Result<Vec<f64>, MlpFoldError> {
         let names = data.column_names();
@@ -808,7 +808,7 @@ mod test {
             assert!(
                 auc > best_raw + 0.05,
                 "seed {seed}: held-out AUC {auc} barely beats the best raw column \
-                 ({best_raw}) — the fit added nothing"
+                 ({best_raw}) -- the fit added nothing"
             );
         }
     }
@@ -1202,7 +1202,7 @@ mod test {
             assert_eq!(
                 model.transform().width(),
                 3,
-                "seed {seed}: three survivors and NO companion — a companion would mean the \
+                "seed {seed}: three survivors and NO companion -- a companion would mean the \
                  fit saw the column as missable, outside the clean-column diagnostic path"
             );
 

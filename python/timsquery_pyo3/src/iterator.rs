@@ -23,7 +23,7 @@ pub enum ToleranceSource {
 /// Lightweight result yielded by the streaming iterator.
 ///
 /// Owns materialized numpy arrays and metadata. The iterator's internal
-/// collector pool is never exposed — it reuses Rust-side buffers across chunks.
+/// collector pool is never exposed -- it reuses Rust-side buffers across chunks.
 #[pyclass(frozen)]
 pub struct PyChromatogramArrays {
     id: timsquery::models::OwnedSourceId,

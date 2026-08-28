@@ -15,8 +15,8 @@ Refs: `util/CallTimsQuery.java`, `ai/AIGear.java`, `dia/{PSMQuery,PSMQueryResult
 >
 > Two test modules pin the mechanically checkable parts against the literal
 > JSON in this document. If you edit a payload here, edit it there:
-> - `main.rs` (next to this file) — input (targets, tolerances)
-> - `timsquery_cli`'s `carafe_output_contract` module — output (result field
+> - `main.rs` (next to this file) -- input (targets, tolerances)
+> - `timsquery_cli`'s `carafe_output_contract` module -- output (result field
 >   names, `-a`/`-f` flag values, the `results.json` basename)
 
 ## CLI
@@ -38,9 +38,9 @@ Refs: `util/CallTimsQuery.java`, `ai/AIGear.java`, `dia/{PSMQuery,PSMQueryResult
 Binary path: `bin/timsquery/{windows,macos,linux}/timsquery_cli[.exe]`.
 
 **Fragile couplings** (most likely to break on a timsquery change):
-- Aggregator names are literals — rename breaks Carafe, no fallback.
-- `-o` is a dir; Carafe reads `<out_dir>/results.json` — basename must be exactly `results.json`.
-- Output parsed line-by-line — must be ndjson, one object per line.
+- Aggregator names are literals -- rename breaks Carafe, no fallback.
+- `-o` is a dir; Carafe reads `<out_dir>/results.json` -- basename must be exactly `results.json`.
+- Output parsed line-by-line -- must be ndjson, one object per line.
 - Exit 0 = success; nonzero logged, no retry.
 
 ## Tolerances (`-t`)
@@ -53,13 +53,13 @@ Binary path: `bin/timsquery/{windows,macos,linux}/timsquery_cli[.exe]`.
   "quad":     { "absolute": [quad, quad] }
 }
 ```
-`ms` unit key is dynamic on Carafe's side (`itolu`, currently `ppm`), but timsquery only accepts `ppm`/`da` (and the `Ppm`/`Absolute` spellings) — any other unit fails to deserialize. Each value is `[low, high]`. A negative `low` is valid and means the window sits entirely above the target mass. Defaults: itol 15, mobility 3.0, quad 0.1, rt_win 0.1 (spectra) / `CParameter.rt_win` (xic).
+`ms` unit key is dynamic on Carafe's side (`itolu`, currently `ppm`), but timsquery only accepts `ppm`/`da` (and the `Ppm`/`Absolute` spellings) -- any other unit fails to deserialize. Each value is `[low, high]`. A negative `low` is valid and means the window sits entirely above the target mass. Defaults: itol 15, mobility 3.0, quad 0.1, rt_win 0.1 (spectra) / `CParameter.rt_win` (xic).
 
 ### `ms` window derivation (`itol` / `itol_shift`)
 
 The `ms` window is `[itol - itol_shift, itol + itol_shift]`, built from two independent inputs:
 
-- **`itol`** = `CParameter.itol` — the configured fragment-ion tolerance (default 15). Static per run.
+- **`itol`** = `CParameter.itol` -- the configured fragment-ion tolerance (default 15). Static per run.
 - **`itol_shift`** = per-run **median observed m/z error**, a data-driven calibration offset measured before the query (`AIGear.java`, search `error_shift`):
   - Carafe collects MS1 and MS2 mass errors from already-matched ions, takes the median of each (`ms1_error_shift`, `ms2_error_shift`).
   - If precursor and fragment units match (`CParameter.tolu` == `CParameter.itolu`): `itol_shift = max(ms1_error_shift, ms2_error_shift)`.
@@ -71,7 +71,7 @@ timsquery interprets the pair as `[light_magnitude, heavy_magnitude]`: `[2, 7]` 
 - signed error window = `[itol_shift - itol, itol_shift + itol]`
 - light magnitude = `itol - itol_shift`, heavy magnitude = `itol + itol_shift`
 
-Example: `itol` 15, `itol_shift` +2 → `[13, 17]` = "13 ppm light to 17 ppm heavy" = a ±15 ppm window centered on the +2 ppm systematic offset. This is the intended behavior — the offset shifts the window's center, `itol` sets its half-width.
+Example: `itol` 15, `itol_shift` +2 → `[13, 17]` = "13 ppm light to 17 ppm heavy" = a ±15 ppm window centered on the +2 ppm systematic offset. This is the intended behavior -- the offset shifts the window's center, `itol` sets its half-width.
 
 ## Targets (`-e`, `psm_query.json`)
 
@@ -85,7 +85,7 @@ JSON **array** of:
 
 ## Results (`-o`, `<out_dir>/results.json`)
 
-**ndjson** — one object per line, one line per `id`. Parsed `JSON.parseObject(line, …)`, keyed by `id`.
+**ndjson** -- one object per line, one line per `id`. Parsed `JSON.parseObject(line, …)`, keyed by `id`.
 (`.json` name is misleading; it is not a JSON array.)
 
 ### spectrum-aggregator → `PSMQueryResult`

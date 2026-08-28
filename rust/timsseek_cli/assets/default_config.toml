@@ -1,6 +1,6 @@
 # timsseek default configuration.
 #
-# Every section is optional unless explicitly noted — omitted sections fall back
+# Every section is optional unless explicitly noted -- omitted sections fall back
 # to the values shown here. Unknown fields are rejected to catch typos early.
 #
 # Dump this file at any time with:
@@ -10,7 +10,7 @@
 #
 # The CLI also accepts JSON configs; TOML is preferred for hand-authored ones.
 
-## Input spectral library (optional — `--speclib-uri` overrides this).
+## Input spectral library (optional -- `--speclib-uri` overrides this).
 # [input]
 # type = "speclib"
 # uri = "path/to/library.msgpack.zst"
@@ -21,16 +21,16 @@
 chunk_size = 20000
 
 ## Decoy generation strategy.
-## "if_missing"  — generate ±12 Da mass-shift decoys when the library has none
-## "always"      — always generate decoys (replace any existing ones)
-## "never"       — trust the library's decoy labels
+## "if_missing"  -- generate ±12 Da mass-shift decoys when the library has none
+## "always"      -- always generate decoys (replace any existing ones)
+## "never"       -- trust the library's decoy labels
 decoy_strategy = "if_missing"
 
 ## Rescore model applied in Phase 5 (`--rescore-model` overrides this).
-## "gbm"        — cross-validated gradient-boosted trees
-## "lda"        — Sage-style shrinkage LDA on the linear lane
-## "hybrid"     — cross-fit LDA score folded into the GBM feature frame
-## "mlp"        — small MLP on the full lane (default; same features as "gbm")
+## "gbm"        -- cross-validated gradient-boosted trees
+## "lda"        -- Sage-style shrinkage LDA on the linear lane
+## "hybrid"     -- cross-fit LDA score folded into the GBM feature frame
+## "mlp"        -- small MLP on the full lane (default; same features as "gbm")
 ##
 ## Runtime and sensitivity differences are scale- and dataset-dependent; benchmark
 ## representative inputs rather than relying on a fixed multiplier.
@@ -80,7 +80,7 @@ min_rt_tolerance_minutes = 0.5
 calibration_query_rt_window_minutes = 0.083333336   # 5 seconds (5 / 60)
 
 
-## Output directory (optional — `--output-uri` overrides this).
+## Output directory (optional -- `--output-uri` overrides this).
 # [output]
 # uri = "./results"
 

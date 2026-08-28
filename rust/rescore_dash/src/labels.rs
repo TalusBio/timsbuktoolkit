@@ -109,7 +109,7 @@ impl Labels {
     }
 }
 
-/// One title per `(column, transform)`, the discriminant score last — it is
+/// One title per `(column, transform)`, the discriminant score last -- it is
 /// titled like a feature because it is stored and queried like one.
 fn build_titles(view: &RescoreView<'_>) -> Vec<String> {
     view.feature_names
@@ -124,7 +124,7 @@ fn build_titles(view: &RescoreView<'_>) -> Vec<String> {
 ///
 /// Two exclusions at two steps, neither a subset of the other: `dropped` is what
 /// the transform refused, `outside range` what survived it and then fell outside
-/// the axis. Kept short — the panel is under half the terminal width and its
+/// the axis. Kept short -- the panel is under half the terminal width and its
 /// border truncates the rest; run-level facts go to [`Labels::basis`].
 fn build_subtitles(slots: &[Slot], n_sampled: usize) -> Vec<String> {
     let pct = |n: u32| {
@@ -270,7 +270,7 @@ mod tests {
     /// The subtitle has to fit the histogram panel, which is under half of a
     /// terminal's width; anything longer is silently cut off by the border it is
     /// drawn on. `log10` rejects the non-positive half, and the subtitle is the
-    /// only place that says so — a histogram that silently shrank would read as
+    /// only place that says so -- a histogram that silently shrank would read as
     /// "those rows do not exist".
     #[test]
     fn subtitles_fit_a_narrow_panel_and_report_what_a_transform_refused() {

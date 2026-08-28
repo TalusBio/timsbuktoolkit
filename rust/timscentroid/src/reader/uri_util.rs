@@ -13,7 +13,7 @@ use http::uri::PathAndQuery;
 ///
 /// The `parse`/`from_parts` panics are effectively unreachable: `base` already
 /// parsed as a `Uri`, and callers only ever append literal path segments
-/// (`analysis.tdf`, `.scan`) to an already-valid, already-encoded path — so the
+/// (`analysis.tdf`, `.scan`) to an already-valid, already-encoded path -- so the
 /// result is always a valid URI path. A panic here means a caller passed an
 /// unencoded segment, which is a bug, not runtime input.
 fn with_path(base: &Uri, new_path: &str) -> Uri {
@@ -26,7 +26,7 @@ fn with_path(base: &Uri, new_path: &str) -> Uri {
     Uri::from_parts(parts).expect("reassembled URI is valid")
 }
 
-/// Append `/segment` to the URI path — a child within a directory URI.
+/// Append `/segment` to the URI path -- a child within a directory URI.
 /// `s3://bkt/sample.d` + `analysis.tdf` → `s3://bkt/sample.d/analysis.tdf`.
 pub fn child(base: &Uri, segment: &str) -> Uri {
     let path = base.path().trim_end_matches('/');
@@ -40,7 +40,7 @@ pub fn with_suffix(base: &Uri, suffix: &str) -> Uri {
     with_path(base, &format!("{path}{suffix}"))
 }
 
-/// Replace the last path segment with `name` — a co-located sibling artifact.
+/// Replace the last path segment with `name` -- a co-located sibling artifact.
 /// `.../a/foo.wiff` + `bar.data` → `.../a/bar.data`.
 pub fn sibling(base: &Uri, name: &str) -> Uri {
     let path = base.path().trim_end_matches('/');

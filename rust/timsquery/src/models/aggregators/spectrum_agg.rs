@@ -23,11 +23,11 @@ use std::ops::{
 };
 
 /// Inline-capacity target matching `Target`'s precursor/fragment
-/// label TinyVecs — typical peptide ≤13 fragments / ≤3 precursors stays
+/// label TinyVecs -- typical peptide ≤13 fragments / ≤3 precursors stays
 /// stack-resident.
 const SPEC_INLINE_CAP: usize = 13;
 
-// TODO: rename to `SpectralAccumulator` — struct holds query scalars +
+// TODO: rename to `SpectralAccumulator` -- struct holds query scalars +
 // label/mz lists alongside the accumulated intensities. "Collector" name
 // predates the Query/Accumulator split.
 #[derive(Debug, Clone, Serialize)]
@@ -38,7 +38,7 @@ pub struct SpectralCollector<T: KeyLike, V: Default + ValueLike> {
     pub rt_seconds: f32,
     pub precursor_mono_mz: f64,
     pub precursor_charge: u8,
-    /// Cached from `Target::precursor_mz_limits()` — skips
+    /// Cached from `Target::precursor_mz_limits()` -- skips
     /// negative-isotope labels, do NOT recompute from mono_mz + charge.
     pub precursor_mz_limits: (f64, f64),
     // Labels + mzs: arrays carry only intensities, so we need separate storage.
@@ -74,7 +74,7 @@ impl<T: KeyLike, V: ValueLike + Default> SpectralCollector<T, V> {
         self.reset_with_overrides(eg, None, None);
     }
 
-    /// Reset with optional rt/mobility overrides — replaces
+    /// Reset with optional rt/mobility overrides -- replaces
     /// `item.query.clone().with_rt_seconds(r).with_mobility(m)` at callers.
     pub fn reset_with_overrides(
         &mut self,

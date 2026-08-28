@@ -44,7 +44,7 @@ pub struct CentroidingConfig {
     /// after which the centroiding will stop early (instead of going
     /// through all peaks, which will very likely be noise).
     /// A number ~200 seems to work well in practice. **`0` disables
-    /// early-stop** — the whole frame is clustered and only `max_peaks`
+    /// early-stop** -- the whole frame is clustered and only `max_peaks`
     /// can truncate it. Disabling is the right choice under a tight
     /// `mz_ppm_tol`, where most peaks are singletons and early-stop would
     /// otherwise clip real signal (see `IndexingCentroidingConfig`).
@@ -67,7 +67,7 @@ impl Default for CentroidingConfig {
 /// MS1 and MS2 are centroided independently: MS1 favors precursor m/z
 /// precision (peak counts are small, so a tight merge is cheap), while MS2
 /// keeps a tight m/z merge with early-stop disabled and a moderate
-/// `max_peaks` cap — the setting that preserves fragment signal without the
+/// `max_peaks` cap -- the setting that preserves fragment signal without the
 /// peak-count explosion of a full raw pass.
 ///
 /// Use [`IndexingCentroidingConfig::uniform`] to apply one config to both
@@ -100,7 +100,7 @@ impl Default for IndexingCentroidingConfig {
                 max_peaks: 50_000,
                 mz_ppm_tol: 1.0,
                 im_pct_tol: 3.0,
-                early_stop_iterations: 0, // disabled — see field doc
+                early_stop_iterations: 0, // disabled -- see field doc
             },
         }
     }

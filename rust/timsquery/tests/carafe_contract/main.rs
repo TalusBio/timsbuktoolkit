@@ -149,7 +149,7 @@ fn carafe_tolerance_spellings_deserialize() {
 }
 
 /// When Carafe's calibration offset exceeds the half-width the low edge goes
-/// negative — a window sitting entirely above the target mass. This already
+/// negative -- a window sitting entirely above the target mass. This already
 /// worked; the test pins it so a future "both edges must be positive" check
 /// cannot be added without failing. `mz_range`'s invariant is `low + high >= 0`.
 #[test]

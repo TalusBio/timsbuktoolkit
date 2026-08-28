@@ -1,4 +1,4 @@
-//! `#[derive(ScoreBlock)]` — projects a "score block" struct's fields into its
+//! `#[derive(ScoreBlock)]` -- projects a "score block" struct's fields into its
 //! Parquet surface (the `ScoreBlock` trait's `column_schema`/`columns`), the
 //! set-level ML feature-name walks (also on the trait), and the two ML feature
 //! *value* lanes, which are INHERENT `[f64; N]` methods sized by inherent
@@ -8,7 +8,7 @@
 //!
 //! The lane values are inherent, not trait methods, on purpose: `fn f(&self) ->
 //! [f64; Self::LEN]` in a trait needs unstable `generic_const_exprs`, while the
-//! same signature on a concrete type is stable — and inherent consts compose
+//! same signature on a concrete type is stable -- and inherent consts compose
 //! (`Fields::LINEAR_LEN = A::LINEAR_LEN + B::LINEAR_LEN`), which is what lets
 //! the whole feature matrix be a compile-time width.
 //!
@@ -162,7 +162,7 @@ impl Scalar {
         format_ident!("{name}")
     }
 
-    /// The scalar's own type, as tokens (e.g. `f32`) — used to reconstruct a
+    /// The scalar's own type, as tokens (e.g. `f32`) -- used to reconstruct a
     /// field's type for the generated `sample()`'s `BlockFixture` turbofish.
     fn type_tokens(self) -> TokenStream {
         match self {
@@ -193,7 +193,7 @@ enum FieldShape {
 }
 
 impl FieldShape {
-    /// The field's type, as tokens — `f32`/`f64`/... for a scalar,
+    /// The field's type, as tokens -- `f32`/`f64`/... for a scalar,
     /// `[f32; N]` for an array (reassembled from the parsed `len`).
     fn type_tokens(&self) -> TokenStream {
         match self {
@@ -297,7 +297,7 @@ enum FieldKind {
         feature: Option<(Vec<GeneratorSpec>, Lane)>,
     },
     /// `#[block]`: the field's own type is a `ScoreBlock`, so every walk
-    /// DELEGATES to it — widths sum its consts, lane arrays splice its arrays
+    /// DELEGATES to it -- widths sum its consts, lane arrays splice its arrays
     /// in, and the column/name walks call straight through.
     Block { ty: Type },
 }
@@ -390,8 +390,8 @@ fn collect_fields(input: &DeriveInput) -> Result<Vec<Field>> {
 }
 
 /// Emits the `SchemaSink`/`ColSink` calls shared by `column_schema` and
-/// `columns` (every field is a parquet column — or, for `#[block]`, a whole
-/// run of them — feature-routed or not).
+/// `columns` (every field is a parquet column -- or, for `#[block]`, a whole
+/// run of them -- feature-routed or not).
 fn schema_and_column_calls(fields: &[Field]) -> (Vec<TokenStream>, Vec<TokenStream>) {
     let mut schema_calls = Vec::with_capacity(fields.len());
     let mut column_calls = Vec::with_capacity(fields.len());
@@ -432,7 +432,7 @@ fn schema_and_column_calls(fields: &[Field]) -> (Vec<TokenStream>, Vec<TokenStre
 /// One feature lane's codegen: the width const's terms, the statements that
 /// fill the `[f64; LEN]` value array, and the set-level name pushes.
 struct LaneCode {
-    /// Summands of the lane's `LEN` const — `1usize` per scalar generator,
+    /// Summands of the lane's `LEN` const -- `1usize` per scalar generator,
     /// the array's own length expression (verbatim, so a const path like
     /// `NUM_MS2_IONS` stays a const path) per array generator, and the nested
     /// block's own `LEN` const per `#[block]` field.
@@ -494,7 +494,7 @@ fn lane_code(fields: &[Field], lane: Lane) -> Result<LaneCode> {
                     let value = generator.apply(scalar.to_f64_expr(ident));
                     // One name, computed once here, used by the name walk; the
                     // value walk is positional, so it cannot name anything
-                    // differently — there is nothing to name.
+                    // differently -- there is nothing to name.
                     let feat_name = format!("{name}{}", generator.name_suffix());
                     code.len_terms.push(quote! { 1usize });
                     code.fills.push(quote! {
@@ -561,7 +561,7 @@ fn lane_methods(code: &LaneCode, len_const: Ident, method: Ident) -> TokenStream
         }
     };
     quote! {
-        /// This lane's feature count — the sum of one per scalar generator and
+        /// This lane's feature count -- the sum of one per scalar generator and
         /// `N` per `[f32; N]` generator, so the lane's width is a compile-time
         /// constant that composes into the whole matrix's width.
         pub const #len_const: usize = 0usize #( + #len_terms )*;
@@ -603,7 +603,7 @@ fn sample_field_calls(fields: &[Field]) -> Vec<TokenStream> {
 /// (not `#[cfg(test)]`): it is reachable in a normal (non-test) build because
 /// `ScoringFields::sample` is used from another crate's test module
 /// (`timsseek_cli`), compiled against timsseek's normal build. Unit-testable
-/// without a proc-macro context — see `tests` below.
+/// without a proc-macro context -- see `tests` below.
 pub(crate) fn derive_score_block(input: DeriveInput) -> Result<TokenStream> {
     let fields = collect_fields(&input)?;
     let name = &input.ident;
@@ -677,7 +677,7 @@ pub(crate) fn derive_score_block(input: DeriveInput) -> Result<TokenStream> {
 /// `[f32; N]` (`N` may be any const expression; it is emitted verbatim). A
 /// field of any other type must be a `#[block]`.
 ///
-/// # `#[block]` — delegation
+/// # `#[block]` -- delegation
 ///
 /// A field marked `#[block]` is itself a `ScoreBlock`, and every walk
 /// DELEGATES to it rather than projecting the field: the width consts sum
@@ -689,8 +689,8 @@ pub(crate) fn derive_score_block(input: DeriveInput) -> Result<TokenStream> {
 /// with parquet column order and ML lane order both following the declaration
 /// order.
 ///
-/// A `#[block]` field is in BOTH lanes — which of its own features land in
-/// which lane is its own type's business — so `#[feat(...)]` on a `#[block]`
+/// A `#[block]` field is in BOTH lanes -- which of its own features land in
+/// which lane is its own type's business -- so `#[feat(...)]` on a `#[block]`
 /// field is rejected. Leaf, `#[block]`, and un-annotated fields may be freely
 /// mixed in one struct; each contributes its run of columns/features at its
 /// declaration position.
@@ -721,14 +721,14 @@ pub(crate) fn derive_score_block(input: DeriveInput) -> Result<TokenStream> {
 ///
 /// `linear = true` is the **default**: a plain `#[feat(raw)]` field goes to the
 /// LINEAR lane (the monotone-transform lane LDA reads). The LDA lane is
-/// therefore **opt-out**, not opt-in — write `linear = false` to route a field
+/// therefore **opt-out**, not opt-in -- write `linear = false` to route a field
 /// to the NONLINEAR lane instead (the tree/GBM lane, which needs no monotone
 /// transforms). A field is in exactly one lane; all of its generators go there
 /// together.
 ///
 /// ## Array fields
 ///
-/// `[f32; N]` fields accept only `raw` and `isna` — any other generator is a
+/// `[f32; N]` fields accept only `raw` and `isna` -- any other generator is a
 /// compile error pointing at the generator token. They fan out to one feature
 /// per element, `{field}_0 .. {field}_{N-1}` (and `{field}_{i}_isna` for
 /// `isna`), matching the `{field}_{i}` naming their Parquet columns already
@@ -738,8 +738,8 @@ pub(crate) fn derive_score_block(input: DeriveInput) -> Result<TokenStream> {
 ///
 /// Four `ScoreBlock` trait methods:
 ///
-/// - `column_schema(&mut SchemaSink)` — Parquet field dtypes/nullability
-/// - `columns(&self, &mut ColSink)` — Parquet values
+/// - `column_schema(&mut SchemaSink)` -- Parquet field dtypes/nullability
+/// - `columns(&self, &mut ColSink)` -- Parquet values
 /// - `linear_feature_names(&mut NameSink)` / `nonlinear_feature_names(&mut NameSink)`
 ///
 /// and, on an INHERENT impl, the lane value surface:
@@ -753,16 +753,16 @@ pub(crate) fn derive_score_block(input: DeriveInput) -> Result<TokenStream> {
 /// compile-time constant that composes: a set of blocks sums their consts to
 /// get the whole feature matrix's width, with no runtime length bookkeeping.
 ///
-/// The name walk stays dynamic (`NameSink`) — an array field's `{field}_{i}`
+/// The name walk stays dynamic (`NameSink`) -- an array field's `{field}_{i}`
 /// fan-out is a loop over a const *path*, which no macro can unroll.
 ///
 /// A lane's value array and its name walk are emitted from the same single
 /// pass over the field list, so entry `j` of the array is always the feature
-/// named `j` — they cannot desync.
+/// named `j` -- they cannot desync.
 ///
 /// Plus a public inherent `fn sample_default() -> Self` on the struct, filling
-/// every leaf field from `BlockFixture::fixture()` — a fixed, finite, non-zero
-/// constant per type — and every `#[block]` field from its own
+/// every leaf field from `BlockFixture::fixture()` -- a fixed, finite, non-zero
+/// constant per type -- and every `#[block]` field from its own
 /// `sample_default()`. It is deliberately not `#[cfg(test)]`; see
 /// `derive_score_block`.
 ///
@@ -780,7 +780,7 @@ pub(crate) fn derive_score_block(input: DeriveInput) -> Result<TokenStream> {
 ///     /// LINEAR lane, features `ion_err_0 .. ion_err_5`.
 ///     #[feat(raw)]
 ///     pub ion_err: [f32; 6],
-///     /// Parquet column only — no feature.
+///     /// Parquet column only -- no feature.
 ///     pub n_cycles: u32,
 /// }
 /// ```
@@ -937,7 +937,7 @@ mod tests {
     /// `#[block]` DELEGATION: a composed struct's widths are the sum of its
     /// blocks' own consts, its lane arrays splice the blocks' arrays in at a
     /// running cursor, and its column/name/fixture walks call straight
-    /// through — the six walks a composition of blocks needs, all off the one
+    /// through -- the six walks a composition of blocks needs, all off the one
     /// declaration order.
     #[test]
     fn block_fields_delegate_every_walk() {
@@ -950,7 +950,7 @@ mod tests {
         .unwrap();
         let ts = derive_score_block(di).unwrap().to_string();
         let f = flat(&ts);
-        // Widths SUM the blocks' own consts — no literal count.
+        // Widths SUM the blocks' own consts -- no literal count.
         assert!(
             f.contains("pubconstLINEAR_LEN:usize=0usize+<Identity>::LINEAR_LEN+<Rt>::LINEAR_LEN;"),
             "{ts}"
@@ -1027,7 +1027,7 @@ mod tests {
             )),
             "{ts}"
         );
-        // Name walk: same order — leaf name, delegated walk, leaf name.
+        // Name walk: same order -- leaf name, delegated walk, leaf name.
         assert!(
             f.contains(concat!(
                 r#"out.push("before");"#,
@@ -1079,8 +1079,8 @@ mod tests {
             ),
             "{ts}"
         );
-        // The `{field}_{i}` name fan-out stays a runtime loop — no macro can
-        // unroll a const path — but the format string itself is a literal.
+        // The `{field}_{i}` name fan-out stays a runtime loop -- no macro can
+        // unroll a const path -- but the format string itself is a literal.
         assert!(
             f.contains(r#"foriin0..NUM_MS2_IONS{out.push(&format!("arr_{i}"));}"#),
             "{ts}"

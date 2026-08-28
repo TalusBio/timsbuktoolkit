@@ -1,7 +1,7 @@
 //! An owned copy of everything a finished [`calibrt::CalibrationState`] holds
 //! that a panel draws: the grid it fit on, and the fit's products.
 //!
-//! `weights` are `f32` for storage and display only — every metric is computed
+//! `weights` are `f32` for storage and display only -- every metric is computed
 //! from the `f64` values on the state, never from this downcast copy.
 
 use calibrt::{
@@ -17,7 +17,7 @@ pub struct FitRecording {
     weights: Vec<f32>,
     suppressed: Vec<bool>,
     /// See [`calibrt::CalibrationState::path_indices`]. The `bins` capacity is a
-    /// hint, not a bound — weight ties can push the survivor count past it.
+    /// hint, not a bound -- weight ties can push the survivor count past it.
     path_indices: Vec<usize>,
     /// See [`calibrt::CalibrationState::dp_range`].
     dp_range: std::ops::Range<usize>,
@@ -37,7 +37,7 @@ impl FitRecording {
             },
             weights: vec![0.0; bins * bins],
             suppressed: vec![false; bins * bins],
-            // Capacity hint only — see the field doc comment.
+            // Capacity hint only -- see the field doc comment.
             path_indices: Vec::with_capacity(bins),
             dp_range: 0..0,
             curve: None,
@@ -131,7 +131,7 @@ mod tests {
         // `col_of`/`row_of` would pass unnoticed without this one. Weight 0.5
         // is too light to be a row/column max next to the diagonal's weight-8
         // entry at row 7 and weight-3 entry at col 2, so it is suppressed and
-        // does not disturb the path/curve length assertions below — it only
+        // does not disturb the path/curve length assertions below -- it only
         // needs to show up in the raw weight grid.
         s.update(std::iter::once((
             LibraryRT(2.5),
@@ -159,7 +159,7 @@ mod tests {
         assert_eq!(rec.curve().unwrap().points().len(), 10);
     }
 
-    /// Nothing has been fit, so nothing is outstanding — Phase 1 draws an empty
+    /// Nothing has been fit, so nothing is outstanding -- Phase 1 draws an empty
     /// Fit tab before the first fit runs.
     #[test]
     fn a_recording_with_no_fit_reads_as_empty() {
@@ -201,7 +201,7 @@ mod tests {
         s.fit();
         assert!(
             !FitRecording::from_state(&s).is_suppressed(1, 1),
-            "A survives alone in its row/col on the second fit — a stale bit \
+            "A survives alone in its row/col on the second fit -- a stale bit \
              from the first fit must not linger"
         );
     }
@@ -255,7 +255,7 @@ mod tests {
                 rec.ridge().len()
             ),
             (10, 10, 10),
-            "the refit's own entries only — 13 of each would mean the first \
+            "the refit's own entries only -- 13 of each would mean the first \
              fit's leaked through"
         );
     }

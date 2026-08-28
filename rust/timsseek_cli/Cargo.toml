@@ -49,7 +49,7 @@ track-alloc = ["alloc_track/enabled"]
 # Dev-only calibration fit dashboard (TIMSSEEK_CALIB_DASHBOARD=1). Opt-in;
 # build with `--features calib-dashboard`.
 calib-dashboard = ["dep:calib_dash"]
-# S3 is default (see above). GCS/Azure stay opt-in — add when actually needed.
+# S3 is default (see above). GCS/Azure stay opt-in -- add when actually needed.
 aws = ["tims_stage/aws", "timscentroid/aws"]
 gcp = ["tims_stage/gcp", "timscentroid/gcp"]
 azure = ["tims_stage/azure", "timscentroid/azure"]

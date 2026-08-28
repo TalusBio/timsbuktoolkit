@@ -54,7 +54,7 @@ result = index.query_chromatogram(eg, tolerance)
 result.fragment_intensities   # shape (n_fragments, n_cycles), dtype float32
 result.precursor_intensities  # shape (n_precursors, n_cycles), dtype float32
 
-result.fragment_labels        # [(label, mz), ...] — row order matches the array
+result.fragment_labels        # [(label, mz), ...] -- row order matches the array
 result.precursor_labels       # [(isotope_offset, mz), ...]
 result.rt_range_ms            # (start_ms, end_ms)
 result.num_cycles             # number of RT points
@@ -79,7 +79,7 @@ Avoid repeated allocations by reusing a `ChromatogramResult` across queries.
 The internal `Vec<f32>` capacity grows to the largest elution group and stays there.
 
 ```python
-result = index.query_chromatogram(eg1, tolerance)   # first query — allocates
+result = index.query_chromatogram(eg1, tolerance)   # first query -- allocates
 
 index.query_chromatogram_into(result, eg2, tolerance)  # reuses allocation
 index.query_chromatogram_into(result, eg3, tolerance)  # same allocation
@@ -89,11 +89,11 @@ index.query_chromatogram_into(result, eg3, tolerance)  # same allocation
 
 For large-scale workloads, stream elution groups from any Python iterator.
 Internally uses chunked rayon parallelism and reuses collector allocations
-across chunks — after the first chunk, allocations settle and only `memcpy`
+across chunks -- after the first chunk, allocations settle and only `memcpy`
 into numpy remains.
 
 ```python
-# Any iterable works — generator, list, map, etc.
+# Any iterable works -- generator, list, map, etc.
 eg_iter = (make_eg(row) for row in dataframe.itertuples())
 
 # Shared tolerance
@@ -113,7 +113,7 @@ for arrays in index.query_chromatograms_iter(eg_iter, tol_iter, chunk_size=256):
 ```
 
 `ChromatogramArrays` is a lightweight frozen object that owns its numpy arrays.
-The iterator's internal collector pool is never exposed — it just keeps reusing
+The iterator's internal collector pool is never exposed -- it just keeps reusing
 the same Rust-side buffers across chunks.
 
 ## Spectral queries
@@ -122,8 +122,8 @@ the same Rust-side buffers across chunks.
 
 ```python
 result = index.query_spectrum(eg, tolerance)
-result.precursor_intensities   # list[float] — one total intensity per precursor
-result.fragment_intensities    # list[float] — one total intensity per fragment
+result.precursor_intensities   # list[float] -- one total intensity per precursor
+result.fragment_intensities    # list[float] -- one total intensity per fragment
 result.precursor_labels        # list[(isotope_offset, mz)]
 result.fragment_labels         # list[(label, mz)]
 result.id                      # int
@@ -141,9 +141,9 @@ result.id                # int
 ```
 
 Each stats tuple contains:
-- `weight` — total accumulated intensity
-- `mean_mz` — intensity-weighted mean m/z (NaN if no peaks found)
-- `mean_mobility` — intensity-weighted mean ion mobility in 1/K0 (NaN if no peaks found)
+- `weight` -- total accumulated intensity
+- `mean_mz` -- intensity-weighted mean m/z (NaN if no peaks found)
+- `mean_mobility` -- intensity-weighted mean ion mobility in 1/K0 (NaN if no peaks found)
 
 ## Tolerance reference
 
@@ -172,10 +172,10 @@ tol = tol.with_quad(tq.PyQuadTolerance.absolute(0.2, 0.2))
 ## Lazy vs eager loading
 
 ```python
-# Eager (default): loads entire index into memory — faster queries
+# Eager (default): loads entire index into memory -- faster queries
 index = tq.PyTimsIndex("experiment.d")
 
-# Lazy: loads from cached .idx on demand — faster startup, lower memory
+# Lazy: loads from cached .idx on demand -- faster startup, lower memory
 index = tq.PyTimsIndex("experiment.d.idx", prefer_lazy=True)
 
 index.is_lazy  # bool
@@ -186,7 +186,7 @@ index.is_lazy  # bool
 ```python
 index.num_cycles          # total MS1 cycles in the acquisition
 index.rt_range_ms         # (start_ms, end_ms)
-index.rt_values_ms        # list[int] — RT in ms for every cycle index
+index.rt_values_ms        # list[int] -- RT in ms for every cycle index
 
 # Convert between seconds and cycle indices
 idx = index.rt_seconds_to_cycle_index(300.0)   # nearest cycle index
@@ -211,18 +211,18 @@ rt_axis = np.array(index.rt_values_ms, dtype=np.float32) / 1000.0  # seconds
 
 ## Roadmap
 
-- [x] **Aggregator reuse** — `query_chromatogram_into` reuses a `ChromatogramCollector`
+- [x] **Aggregator reuse** -- `query_chromatogram_into` reuses a `ChromatogramCollector`
       allocation across queries, avoiding repeated allocation.
-- [x] **SpectralCollector** — `query_spectrum` (summed f32) and `query_mz_mobility`
+- [x] **SpectralCollector** -- `query_spectrum` (summed f32) and `query_mz_mobility`
       (intensity-weighted mean m/z + mobility) per ion.
-- [ ] **PointIntensityAggregator** — single scalar total intensity per elution group.
-- [ ] **IonAnnot key type** — support `IonAnnot` fragment labels alongside `usize`,
+- [ ] **PointIntensityAggregator** -- single scalar total intensity per elution group.
+- [ ] **IonAnnot key type** -- support `IonAnnot` fragment labels alongside `usize`,
       enabling richer annotation round-trips between Python and Rust.
-- [ ] **Zero-copy array access** — return numpy views backed by Rust-owned memory
+- [ ] **Zero-copy array access** -- return numpy views backed by Rust-owned memory
       instead of copying, for large-scale workloads.
-- [x] **CycleToRTMapping exposure** — `rt_seconds_to_cycle_index`, `cycle_index_to_rt_ms`,
+- [x] **CycleToRTMapping exposure** -- `rt_seconds_to_cycle_index`, `cycle_index_to_rt_ms`,
       `rt_values_ms`, `num_cycles`, `rt_range_ms` on `PyTimsIndex`.
-- [ ] **Library file I/O** — read DIA-NN / Spectronaut libraries directly into
+- [ ] **Library file I/O** -- read DIA-NN / Spectronaut libraries directly into
       lists of `PyElutionGroup`, removing boilerplate on the Python side.
-- [x] **Streaming queries** — `query_chromatograms_iter` streams from any Python
+- [x] **Streaming queries** -- `query_chromatograms_iter` streams from any Python
       iterator with chunked rayon parallelism and internal collector reuse.

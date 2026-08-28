@@ -96,7 +96,7 @@ pub struct MobilityData {
     pub mobility_range: (f64, f64),
     /// 2x tolerance window (the actual query range)
     pub wide_mobility_range: (f64, f64),
-    /// Monotonically increasing counter — used to reset plot zoom on new data.
+    /// Monotonically increasing counter -- used to reset plot zoom on new data.
     pub generation: u64,
 }
 
@@ -126,7 +126,7 @@ enum ChromatogramState {
     Computed {
         cache_key: (u64, Tolerance, SmoothingMethod),
     },
-    /// Computation failed for this combination — prevents infinite retry
+    /// Computation failed for this combination -- prevents infinite retry
     Failed {
         cache_key: (u64, Tolerance, SmoothingMethod),
         error: String,
@@ -143,7 +143,7 @@ pub struct ComputedState {
     reference_lines: HashMap<String, (f64, Color32)>,
     ms2: Ms2State,
     mobility: MobilityState,
-    /// Reusable allocation — not reset between elution groups.
+    /// Reusable allocation -- not reset between elution groups.
     scratch: ScratchBuffers,
 }
 
@@ -424,7 +424,7 @@ impl ComputedState {
 
         let trace_scorer = scratch
             .trace_scorer
-            // Viewer is interactive, not a hot path — a conservative
+            // Viewer is interactive, not a hot path -- a conservative
             // default capacity is fine; realloc on outliers is free.
             .get_or_insert_with(|| TraceScorer::new(num_cycles, 16));
 

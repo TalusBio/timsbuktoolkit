@@ -98,7 +98,7 @@ pub fn run(
         pass2,
     } = run_with(&mut scorer, extraction, rt_mapper)?;
     // Traces and the window-global apex evidence are already computed, so each
-    // extra `score_at` is just the cycle-local feature block — the sweep is
+    // extra `score_at` is just the cycle-local feature block -- the sweep is
     // O(cycles * window), not O(cycles^2). Cycles that fail to score give 0.
     let landscape = (0..n_cycles)
         .map(|c| {
@@ -157,7 +157,7 @@ mod tests {
         let res = run(&data.extraction, &p.rt_mapper()).unwrap();
 
         assert_eq!(res.landscape.len(), p.n_cycles);
-        // On a clean peak the reported main score IS the landscape maximum —
+        // On a clean peak the reported main score IS the landscape maximum --
         // i.e. the scored apex is the best cycle in the window, not just a
         // cycle the landscape happens to agree with.
         let best = res

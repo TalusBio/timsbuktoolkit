@@ -578,7 +578,7 @@ mod carafe_output_contract {
     /// Invariants 2 and 3, on the bytes rather than the type.
     ///
     /// The singular/plural split across the two modes (`precursor_mz` vs
-    /// `precursor_mzs`) is deliberate — two schemas, not a typo.
+    /// `precursor_mzs`) is deliberate -- two schemas, not a typo.
     #[test]
     fn spectrum_results_are_ndjson_with_the_contract_field_names() {
         // Two records with distinct ids: framing must not depend on there

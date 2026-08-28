@@ -91,7 +91,7 @@ mod imp {
     static COUNT: AtomicU64 = AtomicU64::new(0);
     static LIVE: AtomicU64 = AtomicU64::new(0);
     static PEAK: AtomicU64 = AtomicU64::new(0);
-    /// Number of `on_dealloc` calls whose size exceeded observed `LIVE` —
+    /// Number of `on_dealloc` calls whose size exceeded observed `LIVE` --
     /// i.e. accounting drift (layout mismatch, custom allocator bug, etc.).
     /// Reported by [`report_snapshot_diff`]; nonzero means numbers are suspect.
     static DEALLOC_UNDERFLOWS: AtomicU64 = AtomicU64::new(0);
@@ -124,7 +124,7 @@ mod imp {
     pub(crate) fn on_dealloc(size: usize) {
         let s = size as u64;
         // Atomic saturating sub. Drift (curr < s) means the inner allocator
-        // reported mismatched layouts — accounting is already wrong, so we
+        // reported mismatched layouts -- accounting is already wrong, so we
         // clamp LIVE to 0, bump DEALLOC_UNDERFLOWS, and let report_snapshot_diff
         // surface it. Cannot panic/log from the hook: both may allocate and
         // recurse into this function. The debug_assert catches drift in tests;
@@ -189,7 +189,7 @@ mod imp {
         let drift = DEALLOC_UNDERFLOWS.load(Ordering::Relaxed);
         if drift > 0 {
             eprintln!(
-                "[alloc] WARNING: {drift} dealloc underflow(s) observed — live/peak numbers above are suspect."
+                "[alloc] WARNING: {drift} dealloc underflow(s) observed -- live/peak numbers above are suspect."
             );
         }
     }

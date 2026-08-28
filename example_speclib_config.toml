@@ -2,7 +2,7 @@
 #
 # Reference configuration for speclib_build.
 # CLI flags override any value set here.
-# All fields are optional — omit a section or key to use the compiled-in default.
+# All fields are optional -- omit a section or key to use the compiled-in default.
 
 # ── Output ────────────────────────────────────────────────────────────────────
 # Path for the output spectral library (msgpack + zstd).
@@ -41,9 +41,9 @@ max = 4
 # ── Decoys ────────────────────────────────────────────────────────────────────
 [decoys]
 # Decoy generation strategy.
-#   none         — no decoys (target-only library)
-#   reverse      — reverse the amino-acid sequence
-#   edge_mutate  — mutate N- and C-terminal residues
+#   none         -- no decoys (target-only library)
+#   reverse      -- reverse the amino-acid sequence
+#   edge_mutate  -- mutate N- and C-terminal residues
 strategy = "none"
 
 # ── Prediction ────────────────────────────────────────────────────────────────

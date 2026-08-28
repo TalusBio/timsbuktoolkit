@@ -27,7 +27,7 @@ pub struct BatchMetrics {
 /// spaced points in `x_range`.
 ///
 /// Samples where either curve is out of bounds are skipped rather than counted
-/// as zero — counting them would dilute the mean toward zero exactly when the
+/// as zero -- counting them would dilute the mean toward zero exactly when the
 /// curves disagree most about their domain, which is the opposite of the signal
 /// wanted here.
 pub fn curve_delta(
@@ -124,7 +124,7 @@ mod tests {
     }
 
     /// Both signs of the same offset. The delta is a *magnitude*, so a curve
-    /// that moved down by 2 must report the same 2 as one that moved up by 2 —
+    /// that moved down by 2 must report the same 2 as one that moved up by 2 --
     /// without the `.abs()`, the downward direction reports `max = 0` (the
     /// running max never rises above its 0.0 seed) and a negative mean.
     #[test]
@@ -159,7 +159,7 @@ mod tests {
     /// 0.0 (which would read as "the curves agree").
     #[test]
     fn samples_outside_both_curves_are_skipped() {
-        // (b's x range, x range sampled, expected delta — None for NaN)
+        // (b's x range, x range sampled, expected delta -- None for NaN)
         let cases = [
             ((0.0, 5.0), (0.0, 10.0), Some(3.0)),
             ((20.0, 25.0), (0.0, 5.0), None),

@@ -41,7 +41,7 @@ use std::sync::Arc;
 ///
 /// Approximate, and not pinned by a test. A clipped axis bound is `log10` of a
 /// discrete order statistic, so on a spiky column the sample and the whole data
-/// can pick neighbouring values and slide every bin — a swing far wider than
+/// can pick neighbouring values and slide every bin -- a swing far wider than
 /// the sampling error itself, and one that moves with the draw. Any bound
 /// asserted here would be measuring the seed.
 pub const DEFAULT_SAMPLE: usize = 250_000;
@@ -96,9 +96,9 @@ const PP_CURVE_POINTS: usize = 200;
 
 /// Upper q-value bounds the FDR curve can be drawn over, widest first.
 ///
-/// Every one of these gets its own `Q_CURVE_POINTS` grid — see
+/// Every one of these gets its own `Q_CURVE_POINTS` grid -- see
 /// [`curves::qvalue_curves`] for why a zoom cannot just be a slice of the wide
-/// curve — which is affordable because they share one sort.
+/// curve -- which is affordable because they share one sort.
 const Q_ZOOMS: [f64; 4] = [1.0, 0.1, 0.05, 0.01];
 
 /// Which of [`Q_ZOOMS`] the FDR tab opens on.
@@ -140,7 +140,7 @@ impl Slot {
 
 /// One stored histogram, borrowed from the dashboard's count store.
 ///
-/// The panel never owns or builds one of these — [`precompute_column`] fills
+/// The panel never owns or builds one of these -- [`precompute_column`] fills
 /// the counts at init and [`Dashboard::hist`] slices into them.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct HistView<'a> {
@@ -234,7 +234,7 @@ pub struct Dashboard {
 impl Dashboard {
     /// Materialize everything the TUI shows.
     ///
-    /// `sample` is the pass-B row count — [`DEFAULT_SAMPLE`] unless the caller
+    /// `sample` is the pass-B row count -- [`DEFAULT_SAMPLE`] unless the caller
     /// has a reason. At or above `view.n_rows()` every row is taken in order,
     /// which makes the histograms, clip ranges and per-feature AUCs exact
     /// rather than sampled.
@@ -320,7 +320,7 @@ impl Dashboard {
         column * SLOTS_PER_COLUMN + local_slot(t.index(), usize::from(clip))
     }
 
-    /// The stored histogram for a column. Pure indexing — this is the whole of
+    /// The stored histogram for a column. Pure indexing -- this is the whole of
     /// what a redraw does.
     pub(crate) fn hist(&self, column: usize, t: Axis, clip: bool) -> HistView<'_> {
         let slot = self.slot_index(column, t, clip);
@@ -420,8 +420,8 @@ fn all_rows_tables(view: &RescoreView<'_>) -> AllRows {
 }
 
 /// Deterministic mixed LCG. Two runs over the same data must show the same
-/// histograms — a sample that moved between runs would be indistinguishable
-/// from a bug — and this crate carries no `rand` dependency.
+/// histograms -- a sample that moved between runs would be indistinguishable
+/// from a bug -- and this crate carries no `rand` dependency.
 struct Lcg(u64);
 
 impl Lcg {
@@ -685,7 +685,7 @@ pub(crate) mod tests {
     use super::*;
     use crate::view::ThresholdRow;
 
-    /// A synthetic run. THE definition of what test rows look like — the
+    /// A synthetic run. THE definition of what test rows look like -- the
     /// alternating labels, the perfectly-separating score and the
     /// target/decoy q-values are asserted against from two modules, so they
     /// get one home rather than a copy in each.
@@ -805,7 +805,7 @@ pub(crate) mod tests {
 
     /// Zooming has to re-grid, not re-slice. Every zoom keeps a full
     /// `Q_CURVE_POINTS` grid over its own range, and the y axis rescales with
-    /// it — a `q <= 0.01` panel still scaled to the q = 1 target count would
+    /// it -- a `q <= 0.01` panel still scaled to the q = 1 target count would
     /// draw the part being zoomed into flat against the axis.
     #[test]
     fn zooming_the_fdr_curve_regrids_and_rescales() {
@@ -898,7 +898,7 @@ pub(crate) mod tests {
     /// Both sampling regimes, on a column whose value *is* its row index.
     ///
     /// At or above the run size every row is taken in order, which is what makes
-    /// small runs — and most of these tests — exact rather than approximate.
+    /// small runs -- and most of these tests -- exact rather than approximate.
     #[test]
     fn gather_sample_takes_every_row_or_a_random_draw_across_the_whole_run() {
         let f = fixture(10_000, &[("a", &|i, _| i as f64)]);
@@ -1085,7 +1085,7 @@ pub(crate) mod tests {
 
     /// The unclipped axis comes from pass A's exact all-rows values, and the
     /// sample is a subset of those rows, so nothing sampled can fall outside
-    /// it — for any transform, including the two that are not monotone.
+    /// it -- for any transform, including the two that are not monotone.
     #[test]
     fn nothing_sampled_ever_falls_outside_the_unclipped_axis() {
         let f = fixture(

@@ -111,7 +111,7 @@ struct QueryRanges {
 ///
 /// The combined gate: mobility is only searchable when BOTH the run index and
 /// the library carry a TIMS 1/K0 axis. If either side is `Absent`/`Unsupported`
-/// the axis is unrestricted — this is what prevents the H2 trap where a TIMS run
+/// the axis is unrestricted -- this is what prevents the H2 trap where a TIMS run
 /// against a no-IM library would filter the 1/K0 window around a library sentinel
 /// and silently return zero IDs.
 ///
@@ -170,7 +170,7 @@ impl QueryRanges {
 
     /// Compute query ranges with RT intersection (for ChromatogramCollector's
     /// pre-scoped rt_range_ms window). Returns None if the RT ranges don't
-    /// intersect — caller early-exits.
+    /// intersect -- caller early-exits.
     fn from_query_data_with_rt_intersection<FH: KeyLike>(
         query: &impl crate::traits::queriable_data::HasQueryData<FH>,
         tolerance: &Tolerance,
@@ -242,7 +242,7 @@ impl<FH: KeyLike> QueriableData<PointIntensityAggregator<FH>> for IndexedTimstof
                 self.rt_ms_to_cycle_index(rt)
             });
 
-        // Copy iterators to stack before the closures — can't borrow aggregator
+        // Copy iterators to stack before the closures -- can't borrow aggregator
         // immutably (for the iterator) and mutably (for `.intensity +=`) at once.
         let prec_mzs: tinyvec::TinyVec<[f64; 16]> =
             aggregator.iter_precursors().map(|(_, mz)| mz).collect();

@@ -188,10 +188,10 @@ rt = "Unrestricted"
 
     /// Template sanity guard. `default_config()` now *is* a parse of the
     /// embedded template, so a template-vs-literal comparison would be
-    /// tautological — but a malformed or silently-edited template would
+    /// tautological -- but a malformed or silently-edited template would
     /// otherwise only blow up at runtime.
     ///
-    /// No literal values are pinned here — those live in the template. The
+    /// No literal values are pinned here -- those live in the template. The
     /// `[calibration]` comparison is not a value check either: the template
     /// spells every calibration field out, so this is the only thing tying it
     /// to `CalibrationConfig::default()` (the `mz_sigma` 1.5→3.0 drift was

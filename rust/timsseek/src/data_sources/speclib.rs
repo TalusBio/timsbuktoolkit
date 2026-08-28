@@ -158,7 +158,7 @@ impl ReferenceEG {
     }
 }
 
-/// Strip mod annotations — anything inside `(...)` or `[...]` — from a
+/// Strip mod annotations -- anything inside `(...)` or `[...]` -- from a
 /// sequence, leaving the bare residue string. The native format ships one
 /// (modified) sequence per precursor; the arena's composition-isotope path
 /// needs the stripped residues.
@@ -188,7 +188,7 @@ pub struct LoadReport {
 /// Finalize a freshly-narrowed lazy `ReferenceLibrary` arena: apply the decoy
 /// strategy, seal, run the whole-library parse gate + averagine tally, and set
 /// `caps.sequence_features`. This is the single shared tail of the DEFAULT
-/// `.speclib` load (see `speclib_data_flow.md`) — the memory-optimized path
+/// `.speclib` load (see `speclib_data_flow.md`) -- the memory-optimized path
 /// that avoids the 9 GB peak RSS of the fully-materialized target+2-decoy
 /// expansion.
 ///
@@ -315,7 +315,7 @@ impl SpeclibFormat {
     pub fn detect_from_extension(path: &Path) -> Option<Self> {
         let path_str = path.to_string_lossy().to_lowercase();
 
-        // Accept both `.zst` and `.zstd` — DIA-NN/user pipelines use either.
+        // Accept both `.zst` and `.zstd` -- DIA-NN/user pipelines use either.
         if path_str.ends_with(".msgpack.zst") || path_str.ends_with(".msgpack.zstd") {
             Some(SpeclibFormat::MessagePackZstd)
         } else if path_str.ends_with(".msgpack") {
@@ -926,7 +926,7 @@ mod tests {
         let lib = expect_lazy(&speclib);
 
         // Check that isotope intensities are normalized (M0 should be 1.0),
-        // for every flat entry (targets AND decoy variants — the envelope is
+        // for every flat entry (targets AND decoy variants -- the envelope is
         // computed per-target and shared across variants, see
         // `decoy_variant_reuses_target_intensities` in reference_library.rs).
         for q in lib.iter() {
@@ -976,7 +976,7 @@ mod tests {
         assert_eq!(n_decoys, 4, "Should have 4 decoy entries (2 per target)");
 
         // Each target index (== decoy_group in the old materialized scheme)
-        // should have exactly 3 flat variants (1 target + 2 decoys) — this is
+        // should have exactly 3 flat variants (1 target + 2 decoys) -- this is
         // guaranteed structurally by `ReferenceLibrary::item_at`'s `t,+,-`
         // packing, so assert it directly rather than re-deriving groups.
         let n_target_indices = lib.geom.n_rows();
@@ -1290,7 +1290,7 @@ mod tests {
     }
 
     /// The Mzpaf arena WITHOUT the intensity sidecar (`frag_intens: None`) is
-    /// the TSV/parquet/Skyline bridge shape — scoring is intensity-driven, so
+    /// the TSV/parquet/Skyline bridge shape -- scoring is intensity-driven, so
     /// narrowing it to a `ReferenceLibrary` must be an `Err` (the branch that
     /// causes the disclosed DIA-NN/Skyline regression).
     #[test]

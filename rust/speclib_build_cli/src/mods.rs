@@ -315,7 +315,7 @@ mod tests {
 
     #[test]
     fn test_expand_variable_mods_respects_fixed_mods() {
-        // Sequence already has a fixed C[U:4] — variable M should still work.
+        // Sequence already has a fixed C[U:4] -- variable M should still work.
         let var_m = Modification::parse("M[U:35]").unwrap();
         let sequence = "PEPTMC[U:4]IDMEK";
         let results = expand_variable_mods(sequence, &[var_m], 1);

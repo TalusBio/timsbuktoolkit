@@ -20,11 +20,11 @@ Run any with `--help` for the full flag list.
 | Feature | Crate | Effect | Use case | Enable |
 |---------|-------|--------|----------|--------|
 | `parallel` / `rayon` | `timsseek_cli` / `timsseek` | Rayon parallel scoring | Default; fastest wall-time | On by default |
-| `instrumentation` | `timsseek_cli` / `timsseek` | `tracing-profile` perfetto spans | Perf tracing. **Requires `--no-default-features`** — the perfetto backend captures only the main thread, so rayon worker spans are dropped entirely. Run serial or traces for the hot path are empty. | `--features instrumentation --no-default-features` |
+| `instrumentation` | `timsseek_cli` / `timsseek` | `tracing-profile` perfetto spans | Perf tracing. **Requires `--no-default-features`** -- the perfetto backend captures only the main thread, so rayon worker spans are dropped entirely. Run serial or traces for the hot path are empty. | `--features instrumentation --no-default-features` |
 | `track-alloc` | `timsseek_cli` | Global allocator tracking via `alloc_track` | Binary prints per-phase allocation deltas to stderr: `[alloc] <phase> d_bytes=... d_live=... churn=... peak=... hist=...`. Detect churn + memory regressions. Dev-only; do not ship. | `--features track-alloc` |
 | `dashboard` | `timsseek_cli` / `rescore_dash` | Ratatui TUI of a rescoring run: score separation, per-feature histograms, FDR and calibration curves | Interactive dev inspection. Dev-only; also needs `TIMSSEEK_RESCORE_DASHBOARD` at runtime (below). | `--features dashboard` |
-| `calib-dashboard` | `timsseek_cli` | Pulls in `calib_dash`, wiring an interactive terminal dashboard into Phase 1/2 of RT calibration | Step through Phase 1 prescore batches, watch the calibration curve/DP path converge, inspect the Phase 2 fit and derived tolerances. Does nothing on its own — also requires `TIMSSEEK_CALIB_DASHBOARD=1` at runtime (see Env vars). Dev-only; do not ship. | `--features calib-dashboard` |
-| `query-instr` | `timscentroid` | Per-peak atomic counters in `IndexedPeakGroup::for_each_peak` | Filter-funnel shape + pass rates. ~10× wall-time inflation — funnel counts only, not timing. | `-p timscentroid --features query-instr` |
+| `calib-dashboard` | `timsseek_cli` | Pulls in `calib_dash`, wiring an interactive terminal dashboard into Phase 1/2 of RT calibration | Step through Phase 1 prescore batches, watch the calibration curve/DP path converge, inspect the Phase 2 fit and derived tolerances. Does nothing on its own -- also requires `TIMSSEEK_CALIB_DASHBOARD=1` at runtime (see Env vars). Dev-only; do not ship. | `--features calib-dashboard` |
+| `query-instr` | `timscentroid` | Per-peak atomic counters in `IndexedPeakGroup::for_each_peak` | Filter-funnel shape + pass rates. ~10× wall-time inflation -- funnel counts only, not timing. | `-p timscentroid --features query-instr` |
 | `aws` / `gcp` / `azure` | `timscentroid` | `object_store` cloud backends | Read `.d` / speclib from cloud | `--features aws` (etc.) |
 
 ## Env vars
@@ -44,13 +44,13 @@ Not shown by `--help`. Read directly via `std::env::var` / `var_os`.
 
 `task --list-all` enumerates everything. Non-obvious ones:
 
-- `task test`, `task fmt`, `task clippy` — `task fmt` runs nightly rustfmt + ruff. Do not use `cargo fmt` (stable silently drops nightly-only opts).
-- `task speclib:build -- <args>` — wrapper around `speclib_build`.
-- `task speclib:local-koina` / `task speclib:stop-koina` — local Koina docker. First run downloads all models (~10-30 min).
-- `task docker` — cross-builds linux/amd64 images.
+- `task test`, `task fmt`, `task clippy` -- `task fmt` runs nightly rustfmt + ruff. Do not use `cargo fmt` (stable silently drops nightly-only opts).
+- `task speclib:build -- <args>` -- wrapper around `speclib_build`.
+- `task speclib:local-koina` / `task speclib:stop-koina` -- local Koina docker. First run downloads all models (~10-30 min).
+- `task docker` -- cross-builds linux/amd64 images.
 - `task license_check`, `task todos`, `task bumpver`, `task build_python`.
 
-Per-crate: `rust/timsseek/Taskfile.yml` adds a watch loop (`task timsseek`) — rebuild + test + fmt + clippy on source change.
+Per-crate: `rust/timsseek/Taskfile.yml` adds a watch loop (`task timsseek`) -- rebuild + test + fmt + clippy on source change.
 
 ## S3 staging
 

@@ -420,7 +420,7 @@ impl IndexedTimstofPeaks {
 ///
 /// Four length-aligned columns carried together as a single value. Fields
 /// are private so the "all columns same length" invariant can't be broken
-/// by a direct push to one column — callers go through `push`, which
+/// by a direct push to one column -- callers go through `push`, which
 /// advances all four in lockstep.
 #[derive(Debug, Default, Clone, serde::Serialize, serde::Deserialize)]
 pub struct PeakColumns<T: RTIndex> {
@@ -456,7 +456,7 @@ impl<T: RTIndex> PeakColumns<T> {
         self.cycle_index.reserve(n);
     }
 
-    /// Atomic row append — all four columns advance together.
+    /// Atomic row append -- all four columns advance together.
     #[inline]
     pub fn push(&mut self, mz: f32, intensity: f32, mobility: MobInt, cycle_index: T) {
         self.mz.push(mz);
@@ -475,7 +475,7 @@ impl<T: RTIndex> PeakColumns<T> {
         }
     }
 
-    /// Consume into raw column Vecs. Private — drops the bundled invariant;
+    /// Consume into raw column Vecs. Private -- drops the bundled invariant;
     /// used only by the AoS sort round-trip inside this module.
     fn into_parts(self) -> (Vec<f32>, Vec<f32>, Vec<MobInt>, Vec<T>) {
         (self.mz, self.intensity, self.mobility, self.cycle_index)
@@ -892,7 +892,7 @@ pub fn dump_for_each_peak_funnel(label: &str) {
     }
 }
 
-/// Zero the funnel counters — call between phases so each phase's dump
+/// Zero the funnel counters -- call between phases so each phase's dump
 /// shows its own contribution, not cumulative. No-op when `query-instr`
 /// is disabled.
 pub fn reset_for_each_peak_funnel() {
@@ -971,7 +971,7 @@ fn check_bucket_sorted_heuristic_aos<T: RTIndex>(
 ) -> bool {
     // 1. max mz of each bucket <= min mz of the next bucket
     // 2. each bucket is sorted by cycle_index (fully checked on bucket 0,
-    //    first/last only on later buckets — cheap heuristic)
+    //    first/last only on later buckets -- cheap heuristic)
     let mut last_max = f32::MIN;
     let buckets_ordered = peaks.chunks(bucket_size).all(|bucket| {
         let curr_min = bucket
@@ -1046,7 +1046,7 @@ fn apply_mob_mask<const N: usize>(
 /// Per-bucket inner scan for `for_each_peak`. `mz_filter = Unrestricted` means
 /// "the whole bucket is known to be inside the query mz range, skip the per-peak
 /// mz compare". With `#[inline(always)]` + the `OptionallyRestricted` split at
-/// each call site, LLVM specializes two code paths — one that branches on mz per
+/// each call site, LLVM specializes two code paths -- one that branches on mz per
 /// peak, one that doesn't.
 ///
 /// Each filter reads only the column it needs (mz or mobility). The full
@@ -1122,7 +1122,7 @@ fn scan_bucket_slice<T, F>(
 impl<T: RTIndex> IndexedPeakGroup<T> {
     /// Query peaks based on m/z, rt, and im ranges.
     ///
-    /// Returns an iterator of owned `IndexedPeak<T>` — peaks are materialized
+    /// Returns an iterator of owned `IndexedPeak<T>` -- peaks are materialized
     /// from the SoA columns on demand.
     pub fn query_peaks(
         &self,
@@ -1134,7 +1134,7 @@ impl<T: RTIndex> IndexedPeakGroup<T> {
     }
 
     /// Callback-style peak scan. Mirrors `query_peaks` but fuses the
-    /// consumer body into the inner bucket loop — no
+    /// consumer body into the inner bucket loop -- no
     /// `Iterator::next` call boundary per peak. Per the flamegraph,
     /// `QueryPeaksIterator::next` takes ~63% of wall at
     /// `RAYON_NUM_THREADS=1`; inlining the consumer via `#[inline]`
@@ -1213,7 +1213,7 @@ impl<T: RTIndex> IndexedPeakGroup<T> {
                 bucket_size
             );
         }
-        // Cheap but worth it — <40ms even on Hela.
+        // Cheap but worth it -- <40ms even on Hela.
         assert!(peaks.iter().all(|x| x.intensity >= 0.0));
         let max_cycle = T::new(cycle_to_rt_ms.len() as u32 - 1);
         assert!(peaks.iter().all(|x| x.cycle_index <= max_cycle));
@@ -1769,7 +1769,7 @@ mod tests {
     }
 
     /// The matched-peak set returned by `for_each_peak` (the production query
-    /// path) must NOT depend on `bucket_size` — bucketing is an index-layout
+    /// path) must NOT depend on `bucket_size` -- bucketing is an index-layout
     /// detail, not a filter. Regression guard for a bucket-boundary bug where
     /// `query_bucket_range` used `end() <= mz_range.start()` and dropped peaks
     /// at exactly the query's (inclusive) lower m/z bound. Stresses duplicated

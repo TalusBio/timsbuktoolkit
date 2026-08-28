@@ -70,7 +70,7 @@ pub struct RandomPeaks {
     pub hit_precursors: bool,
     /// Interferents per cycle; when > 0 this overrides `count` as
     /// `round(density_per_cycle * n_cycles * hardness)`, so interferent DENSITY
-    /// (not absolute count) stays fixed as the window widens — a fixed count in
+    /// (not absolute count) stays fixed as the window widens -- a fixed count in
     /// a wide window is an artificially easy task.
     pub density_per_cycle: f32,
     /// Multiplier (>=1) to deliberately over-load interferents above realistic
@@ -672,8 +672,8 @@ mod tests {
         let (half, full) = (peak(0), peak(1));
 
         // Both rows co-elute at the same realized (off-grid) apex with the same
-        // width, so every shape term — peak height scale, the gaussian, the
-        // sub-cycle sampling loss — is common to both and cancels in the ratio.
+        // width, so every shape term -- peak height scale, the gaussian, the
+        // sub-cycle sampling loss -- is common to both and cancels in the ratio.
         // What survives is exactly the obs_scale ratio, computed WITHOUT
         // reproducing any of the generator's own arithmetic.
         assert!(full > 0.0, "reference fragment must carry signal: {full}");

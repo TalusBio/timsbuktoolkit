@@ -12,9 +12,9 @@ Streaming chromatogram extraction from timsTOF data.
 
 This example demonstrates the three query modes in timsquery_pyo3:
 
-  1. Single query           — one elution group at a time
-  2. Aggregator reuse       — reuse allocations across sequential queries
-  3. Streaming iterator     — iterator-in, iterator-out with chunked parallelism
+  1. Single query           -- one elution group at a time
+  2. Aggregator reuse       -- reuse allocations across sequential queries
+  3. Streaming iterator     -- iterator-in, iterator-out with chunked parallelism
 
 Usage:
     uv run examples/streaming_example.py <path_to_experiment.d>
@@ -106,7 +106,7 @@ def main():
     print(f"  loaded in {time.perf_counter() - t0:.2f}s  ({index})")
 
     # ------------------------------------------------------------------
-    # Set up tolerances — narrow search window
+    # Set up tolerances -- narrow search window
     # ------------------------------------------------------------------
     tolerance = tq.PyTolerance(
         mz=tq.PyMzTolerance.ppm(10.0, 10.0),

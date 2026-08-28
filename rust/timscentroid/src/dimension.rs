@@ -13,7 +13,7 @@
 /// and take the mobility-less fallback path.
 #[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub enum MobilityKind {
-    /// TIMS 1/K0 — the only searchable kind (current behavior).
+    /// TIMS 1/K0 -- the only searchable kind (current behavior).
     Ook0,
     /// No IM axis (mzML, no-IM library); the stored scalar is a sentinel.
     Absent,

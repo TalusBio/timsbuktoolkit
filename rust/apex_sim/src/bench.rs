@@ -423,7 +423,7 @@ pub struct ScorePopulations {
 
 /// Score `n_seed_pairs` matched present/absent realizations (varying only the
 /// seed). Each pair shares a seed, so the "absent" twin has IDENTICAL noise +
-/// interferents — only the real peak differs.
+/// interferents -- only the real peak differs.
 pub fn score_populations(base: &SimParams, n_seed_pairs: usize) -> ScorePopulations {
     let map = base.rt_mapper();
     let mut scorer = TraceScorer::new(base.n_cycles, base.real_fragments.len().max(1));

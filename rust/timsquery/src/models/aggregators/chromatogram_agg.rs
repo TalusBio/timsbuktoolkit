@@ -19,7 +19,7 @@ use timscentroid::rt_mapping::{
 };
 use timscentroid::utils::TupleRange;
 
-// TODO: rename to `ChromatogramAccumulator` — struct carries query scalars
+// TODO: rename to `ChromatogramAccumulator` -- struct carries query scalars
 // (id, mobility_ook0, etc.) alongside the accumulated chromatograms, but the
 // "Collector" name dates from when it owned a full Target. The query
 // and accumulator roles are now structurally separated; a rename would match.
@@ -32,17 +32,17 @@ pub struct ChromatogramCollector<T: KeyLike, V: ArrayElement + ValueLike> {
     pub precursor_mono_mz: f64,
     pub precursor_charge: u8,
     /// Cached from `Target::precursor_mz_limits()` at reset
-    /// (skips negative-isotope labels — do not derive from mono_mz + charge alone).
+    /// (skips negative-isotope labels -- do not derive from mono_mz + charge alone).
     pub precursor_mz_limits: (f64, f64),
 
-    // mz_order inside each array IS the (key, mz) list we need for iteration —
+    // mz_order inside each array IS the (key, mz) list we need for iteration --
     // labels/mzs are NOT duplicated on the collector.
     pub precursors: MzMajorIntensityArray<i8, V>,
     pub fragments: MzMajorIntensityArray<T, V>,
     pub rt_range_ms: TupleRange<u32>,
 
     /// MS1 peaks written into any precursor chromatogram cell during the
-    /// most recent `add_query`. Informational only — downstream fast-path
+    /// most recent `add_query`. Informational only -- downstream fast-path
     /// decisions key off `n_fragment_peaks_added`.
     pub n_precursor_peaks_added: u64,
 
@@ -115,7 +115,7 @@ impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
     }
 
     /// Like `try_reset_with` but lets callers override `rt_seconds` / `mobility_ook0`
-    /// without rebuilding the source eg — replaces the `eg.clone().with_rt_seconds(..)`
+    /// without rebuilding the source eg -- replaces the `eg.clone().with_rt_seconds(..)`
     /// and `eg.clone().with_mobility(..)` clone-then-mutate pattern.
     pub fn try_reset_with_overrides(
         &mut self,

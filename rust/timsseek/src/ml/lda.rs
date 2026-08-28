@@ -6,7 +6,7 @@
 //!
 //! Features are z-standardized before the fit (Fisher LDA is scale-invariant,
 //! but the `lambda * I` term is not), and non-finite values are imputed to the
-//! column mean, i.e. 0 post-standardization — LDA cannot take missing natively.
+//! column mean, i.e. 0 post-standardization -- LDA cannot take missing natively.
 
 use crate::ml::cv::{
     FoldDataset,
@@ -19,8 +19,8 @@ use crate::utils::maybe_par::chunked_fold_reduce;
 /// rescue a rank-deficient one.
 pub(crate) const DEFAULT_SHRINKAGE: f64 = 1e-2;
 
-/// Row-chunk size for the parallel reductions. Fixed so chunk boundaries — and
-/// therefore the summation order of the partial accumulators — are identical
+/// Row-chunk size for the parallel reductions. Fixed so chunk boundaries -- and
+/// therefore the summation order of the partial accumulators -- are identical
 /// across runs, keeping the fit bitwise-deterministic despite parallelism.
 const CHUNK_ROWS: usize = 65_536;
 
@@ -44,7 +44,7 @@ impl LdaModel {
     ///
     /// `fit_matrix`, not `fit`: the [`FoldModel`] impl below also has a
     /// 5-argument `fit` on this same type, and the two were distinguishable only
-    /// by argument TYPES — `(&[f64], usize, usize, &[bool], f64)` against
+    /// by argument TYPES -- `(&[f64], usize, usize, &[bool], f64)` against
     /// `(&LdaConfig, &D, usize, &[usize], &[usize])`. Calling the wrong one is a
     /// type error rather than a silent bug, but a reader at a call site could not
     /// tell which was meant, and the arities matched only by coincidence (the
@@ -344,7 +344,7 @@ impl FoldModel for LdaModel {
             .collect())
     }
 
-    /// `|coef|` — the discriminant weights live in standardized space, so their
+    /// `|coef|` -- the discriminant weights live in standardized space, so their
     /// magnitudes are directly comparable across columns.
     ///
     /// NEVER `NAN`, i.e. never "unreported" under the
@@ -355,7 +355,7 @@ impl FoldModel for LdaModel {
     ///
     /// A column that is constant, or has no finite value at all, standardizes
     /// to all-zeros and therefore solves to exactly `0.0`. That zero is a
-    /// RESULT, not a gap, and it reaches the sidecar — "this feature is dead in
+    /// RESULT, not a gap, and it reaches the sidecar -- "this feature is dead in
     /// this fold" is one of the more useful things the sidecar can say.
     fn importance(&self) -> Vec<f32> {
         let out: Vec<f32> = self.coef.iter().map(|c| c.abs() as f32).collect();

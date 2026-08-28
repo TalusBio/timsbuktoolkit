@@ -1,4 +1,4 @@
-//! Identity family — peptide + precursor metadata. Hand-written because it is
+//! Identity family -- peptide + precursor metadata. Hand-written because it is
 //! irreducibly mixed-dtype (`Peptide`, `bool`, `f64`, `u32`, `u8`, `f32`); you
 //! never add a *score* here.
 
@@ -25,7 +25,7 @@ pub struct Identity {
     /// opaque and unserializable: the row orders the q-value tie-break without
     /// a caller-supplied id reaching the sort, and the group is only ever
     /// compared. The ids a reader wants are resolved from the arena at the
-    /// writer — see [`crate::scoring::parquet_writer`].
+    /// writer -- see [`crate::scoring::parquet_writer`].
     #[serde(skip)]
     pub row: RowIdx,
     #[serde(skip)]
@@ -40,7 +40,7 @@ impl Identity {
     /// Hand-written twin of what `#[derive(ScoreBlock)]` emits: no identity
     /// field is a linear-lane feature.
     pub const LINEAR_LEN: usize = 0;
-    /// `precursor_mz_round5`, `precursor_charge`, `precursor_mobility` — the
+    /// `precursor_mz_round5`, `precursor_charge`, `precursor_mobility` -- the
     /// context features. `is_target` is Parquet-only, as are the ids the writer
     /// resolves from `row`.
     pub const NONLINEAR_LEN: usize = 3;
@@ -60,7 +60,7 @@ impl Identity {
     /// Whether two results compete: same decoy group, same charge.
     ///
     /// Defined in terms of [`Self::competition_key`], so sorting by that key
-    /// always leaves competing results adjacent — the predicate and the sort
+    /// always leaves competing results adjacent -- the predicate and the sort
     /// order cannot drift apart.
     pub fn competes_with(&self, other: &Self) -> bool {
         self.competition_key() == other.competition_key()
@@ -134,8 +134,8 @@ impl ScoreBlock for Identity {
 mod tests {
     use super::*;
 
-    /// The two halves of the nonlinear lane — the per-record value array and
-    /// the set-level name walk — must agree on count, order, and which value
+    /// The two halves of the nonlinear lane -- the per-record value array and
+    /// the set-level name walk -- must agree on count, order, and which value
     /// sits under which name. Hand-written here (the derive can't check this
     /// block), so this is the only place the pairing is asserted.
     #[test]

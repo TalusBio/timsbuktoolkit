@@ -2,9 +2,9 @@
 source: rust/calib_dash/src/ui.rs
 expression: "render_snapshot(&mut app, 100, 30)"
 ---
- SCRUBBED — retained frame 3/5, batch 17 (not live; `>` returns to now)                             
-    ┌ Fit — observed RT (s) ↑ vs library RT (s) → ───────────────────────────────────────────── b0 ┐
-    │ Showing: none — density only                                                                 │
+ SCRUBBED -- retained frame 3/5, batch 17 (not live; `>` returns to now)                            
+    ┌ Fit -- observed RT (s) ↑ vs library RT (s) → ──────────────────────────────────────────── b0 ┐
+    │ Showing: none -- density only                                                                │
     │                                                                                  ████████████│
   15┤                                                                                  ████████████│
     │                                                                      ▄▄▄▄▄▄▄▄▄▄▄▄████████████│

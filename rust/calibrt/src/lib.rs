@@ -119,7 +119,7 @@ impl CalibrationCurve {
 
         // Find the partition point; first element >= x_val.
         let i = self.points.partition_point(|p| p.library < x_val);
-        // Clamp to [1, slopes.len()] — partition_point can return 0 when x_val == first_x
+        // Clamp to [1, slopes.len()] -- partition_point can return 0 when x_val == first_x
         let i = i.max(1).min(self.slopes.len());
         Ok(ObservedRTSeconds(self.predict_with_index(x_val, i)))
     }
@@ -173,7 +173,7 @@ pub struct RidgeMeasurement {
 }
 
 /// Everything a consumer reports about a fit's [`RidgeMeasurement`]s, folded in
-/// the one place the arithmetic is written — the dashboard, the search's derived
+/// the one place the arithmetic is written -- the dashboard, the search's derived
 /// tolerances and the CLI's log line all read this rather than each summing the
 /// slice their own way.
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -220,7 +220,7 @@ impl RidgeSummary {
     }
 }
 
-/// Serializable snapshot of calibration data — points + config.
+/// Serializable snapshot of calibration data -- points + config.
 /// Used for save/load. Does not include the fitted curve (reconstructed on load).
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct CalibrationSnapshot {
@@ -233,7 +233,7 @@ pub struct CalibrationSnapshot {
 /// writer and the reader's gate cannot disagree.
 pub const CALIBRATION_FORMAT_VERSION: &str = "v3";
 
-/// JSON v3 calibration file format — shared between CLI and viewer.
+/// JSON v3 calibration file format -- shared between CLI and viewer.
 ///
 /// `calibration` is the grid's own snapshot and the only record of the fit: the
 /// curve and the ridge widths are recomputed by refitting it, so the file cannot
@@ -246,11 +246,11 @@ pub struct SavedCalibration<R = serde_json::Value> {
     pub version: String,
     pub rt_range_seconds: [f64; 2],
     pub calibration: CalibrationSnapshot,
-    /// The uniform RT tolerance. Every writer has one — it is what a query falls
+    /// The uniform RT tolerance. Every writer has one -- it is what a query falls
     /// back to where the grid measured no ridge.
     pub rt_tolerance_minutes: f32,
     /// What a search measured beyond the curve. `None` for a writer that measures
-    /// no residuals — zeros there would read as "measured, and tight".
+    /// no residuals -- zeros there would read as "measured, and tight".
     ///
     /// The path is named because a bare `default` would demand `R: Default`.
     #[serde(default = "Option::default")]
@@ -288,8 +288,8 @@ impl<R> SavedCalibration<R> {
 
     /// Parse a calibration file and check its provenance. The `Option<String>`
     /// is a reason to distrust the file, not an error: a calibration is only
-    /// valid for the run it was fit on, and `raw_rt_range` — the RT span of the
-    /// run it is about to be used on — is the one cheap way to catch the wrong
+    /// valid for the run it was fit on, and `raw_rt_range` -- the RT span of the
+    /// run it is about to be used on -- is the one cheap way to catch the wrong
     /// file. `None` there means nothing verifies it, which also warns.
     pub fn read(
         path: &std::path::Path,
@@ -318,7 +318,7 @@ impl<R> SavedCalibration<R> {
     fn provenance_warning(&self, raw_rt_range: Option<[f64; 2]>) -> Option<String> {
         let Some(raw) = raw_rt_range else {
             return Some(
-                "No raw RT range to check the calibration against — nothing verifies it was \
+                "No raw RT range to check the calibration against -- nothing verifies it was \
                  fit on this run"
                     .to_string(),
             );
@@ -332,7 +332,7 @@ impl<R> SavedCalibration<R> {
         }
         Some(format!(
             "Calibration RT range [{:.1}, {:.1}]s overlaps the raw file's [{:.1}, {:.1}]s by \
-             {:.0}% — it may have been fit on a different run",
+             {:.0}% -- it may have been fit on a different run",
             self.rt_range_seconds[0],
             self.rt_range_seconds[1],
             raw[0],
@@ -357,7 +357,7 @@ pub struct GridGeom {
 pub struct CalibrationState {
     grid: grid::Grid,
     path_indices: Vec<usize>,
-    /// The DP-chosen segment within [`Self::path_indices`] — see
+    /// The DP-chosen segment within [`Self::path_indices`] -- see
     /// [`Self::dp_range`].
     dp_range: std::ops::Range<usize>,
     /// Survivors of suppression, refilled per fit. Sized at `bins`, which is a
@@ -409,7 +409,7 @@ impl CalibrationState {
     ///
     /// The geometry is derived *here*, by `point_ranges`, rather than passed in:
     /// a caller that supplies the acquisition RT range instead would clamp an
-    /// iRT-scaled library — whose RTs fall entirely outside it — into one edge
+    /// iRT-scaled library -- whose RTs fall entirely outside it -- into one edge
     /// column. Every calibrant weighs [`CALIBRANT_WEIGHT`].
     ///
     /// On `Err` the previous fit is left alone: a later, larger point set may well
@@ -497,7 +497,7 @@ impl CalibrationState {
         self.clear_fit();
     }
 
-    /// Re-point `self` at a new geometry and clear the previous fit — see
+    /// Re-point `self` at a new geometry and clear the previous fit -- see
     /// `grid::Grid::reconfigure` for what stays allocated.
     pub fn reconfigure(
         &mut self,
@@ -534,7 +534,7 @@ impl CalibrationState {
     }
 
     /// The assembled path as row-major grid indices, one per point, from the
-    /// grid's own arithmetic — so an overlay never has to re-derive them and risk
+    /// grid's own arithmetic -- so an overlay never has to re-derive them and risk
     /// landing in a different cell.
     pub fn path_indices(&self) -> &[usize] {
         &self.path_indices
@@ -561,7 +561,7 @@ impl CalibrationState {
     /// Everything needed to rebuild an equal state: the points, and the grid
     /// geometry they were binned under. Refitting a snapshot under its own
     /// `(grid_size, lookback)` reproduces the curve, so this is the state's
-    /// persistent form — see [`Self::from_snapshot`].
+    /// persistent form -- see [`Self::from_snapshot`].
     pub fn snapshot(&self) -> CalibrationSnapshot {
         CalibrationSnapshot {
             points: self
@@ -828,7 +828,7 @@ mod ridge_summary_tests {
     }
 
     /// A total ridge weight of 0.25 must report the half-width it measured, not
-    /// a fraction of it. And a weightless column keeps its count and bounds —
+    /// a fraction of it. And a weightless column keeps its count and bounds --
     /// only the mean goes NaN, where a 0.0 would read as a perfectly tight
     /// ridge.
     #[test]
@@ -846,7 +846,7 @@ mod ridge_summary_tests {
 
     /// The two axes are bounded independently, a non-finite point drops out of
     /// both, and the three refusals are distinguishable: nothing left to bound
-    /// is `NoPoints`, while a single collapsed axis is `ZeroRange` — which is
+    /// is `NoPoints`, while a single collapsed axis is `ZeroRange` -- which is
     /// what a grid built from these ranges would have said anyway.
     #[test]
     fn point_ranges_bounds_both_axes_and_names_each_refusal() {
@@ -924,7 +924,7 @@ mod calibration_state_tests {
         s.update(pts1.iter().copied()).unwrap();
         s.fit();
 
-        // Same bins, a completely different (shifted, wider) range — the case
+        // Same bins, a completely different (shifted, wider) range -- the case
         // `reconfigure` exists to keep allocation-free.
         s.reconfigure(10, (100.0, 200.0), (100.0, 200.0)).unwrap();
         let pts2: Vec<_> = (0..10)

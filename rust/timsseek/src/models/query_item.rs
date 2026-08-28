@@ -25,7 +25,7 @@ pub fn linear_get<K: PartialEq, V: Copy>(entries: &[(K, V)], key: &K) -> Option<
 
 /// Rejection returned by [`ExpectedIntensities::try_from_pairs`] when the
 /// input contains a repeated fragment or precursor key. Keys are expected
-/// to be unique — `linear_get`/`remove_*` return only the first match and
+/// to be unique -- `linear_get`/`remove_*` return only the first match and
 /// silently masking a duplicate corrupts downstream scoring.
 #[derive(Debug, Clone)]
 pub struct DuplicateKeyError {
@@ -47,7 +47,7 @@ impl std::error::Error for DuplicateKeyError {}
 /// Stored as `TinyVec<[(K, f32); 13]>` per field: each entry keeps its key
 /// alongside the intensity for diagnostics and by-key lookup. For typical
 /// peptides (<=13 fragments / <=13 precursors) the backing storage is inline,
-/// so `clone()` is a stack memcpy and mutation is in-place swap-remove —
+/// so `clone()` is a stack memcpy and mutation is in-place swap-remove --
 /// zero heap allocations on the hot path.
 ///
 /// # Invariants
@@ -56,7 +56,7 @@ impl std::error::Error for DuplicateKeyError {}
 /// [`ExpectedIntensities::remove_fragment`]/`remove_precursor` return only
 /// the first match; a duplicate silently hides data. All construction paths
 /// go through [`ExpectedIntensities::try_from_pairs`] which enforces this.
-/// Direct struct-literal construction bypasses the check — avoid it outside
+/// Direct struct-literal construction bypasses the check -- avoid it outside
 /// tests where uniqueness is obvious.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExpectedIntensities<T: KeyLike + Default> {
@@ -155,7 +155,7 @@ impl<T: KeyLike + Default> ExpectedIntensities<T> {
     /// In-place copy from `other` reusing each TinyVec's current backing.
     /// For ≤13 entries this stays fully inline. For spilled buffers the
     /// heap allocation is reused when `other.len() <= self.capacity()`.
-    /// Prefer this over `*self = other.clone()` on the scoring hot path —
+    /// Prefer this over `*self = other.clone()` on the scoring hot path --
     /// the default `Clone::clone_from` drops the destination buffer
     /// before reallocating.
     pub fn clone_from_ref(&mut self, other: &Self)

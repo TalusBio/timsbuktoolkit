@@ -20,7 +20,7 @@ pub const UNKNOWN_AA: AminoAcid = AminoAcid(u8::MAX);
 
 /// Canonical output order for the 20-dim count vector:
 /// A C D E F G H I K L M N P Q R S T V W Y.
-/// Do not reorder — `FEATURE_NAMES` follows this.
+/// Do not reorder -- `FEATURE_NAMES` follows this.
 pub const CANONICAL_AA_INDICES: [usize; 20] = [
     0, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 15, 16, 17, 18, 19, 21, 22, 24,
 ];
@@ -70,7 +70,7 @@ pub enum Mod {
 pub struct ModEntry {
     /// Residue position. Sentinel values: `POS_N_TERM` (0xFF) / `POS_C_TERM` (0xFE).
     /// Otherwise a 0-based residue index, valid range `0..=253`. Sequences
-    /// longer than 254 residues cannot be represented — the parser rejects them
+    /// longer than 254 residues cannot be represented -- the parser rejects them
     /// in `parse_sequence` rather than truncating here.
     pub pos: u8,
     pub kind: Mod,
@@ -156,8 +156,8 @@ impl Serialize for Peptide {
 ///
 /// A hand-rolled byte walk handles the grammar `normalize_to_proforma` actually
 /// emits (bare residues, `[UNIMOD:n]`, `[+/-mass]`, N-/C-terminal forms). It
-/// returns `Some` ONLY for inputs it fully recognizes; anything else — named
-/// mods, cross-links, unexpected bytes — yields `None` and defers to the rustyms
+/// returns `Some` ONLY for inputs it fully recognizes; anything else -- named
+/// mods, cross-links, unexpected bytes -- yields `None` and defers to the rustyms
 /// parser, which stays the authority for what is valid. So the fast path can
 /// never accept something rustyms would reject, with one deliberate exception:
 /// it does not check that a `UNIMOD:n` id exists in the ontology (a
@@ -171,7 +171,7 @@ pub fn parse_sequence(normalized: &str) -> Option<ParsedSequence> {
 }
 
 /// Classify one bracket body (`UNIMOD:n` or a signed mass like `+15.995`) into a
-/// [`Mod`]. `None` for anything else — a named mod, an unsigned number, empty —
+/// [`Mod`]. `None` for anything else -- a named mod, an unsigned number, empty --
 /// which forces the rustyms fallback in [`parse_sequence`].
 fn classify_mod(body: &str) -> Option<Mod> {
     let body = body.trim();
@@ -185,7 +185,7 @@ fn classify_mod(body: &str) -> Option<Mod> {
 }
 
 /// Byte-walk parser for the `normalize_to_proforma` output grammar. `None` means
-/// "not recognized — defer to rustyms", never "definitively invalid" (that
+/// "not recognized -- defer to rustyms", never "definitively invalid" (that
 /// verdict is the fallback's). See [`parse_sequence`] for the contract.
 fn parse_sequence_fast(s: &str) -> Option<ParsedSequence> {
     let b = s.as_bytes();
@@ -301,7 +301,7 @@ fn modification_to_mod(m: &rustyms::sequence::Modification) -> Option<Mod> {
     };
     let simple = match m {
         Modification::Simple(s) => s,
-        _ => return None, // Cross-link / ambiguous — out of v1 scope
+        _ => return None, // Cross-link / ambiguous -- out of v1 scope
     };
     match simple.as_ref() {
         SimpleModificationInner::Mass(mass) => Some(Mod::Mass(mass.value as f32)),
@@ -341,8 +341,8 @@ fn replace_ascii_ci(haystack: &str, needle: &str, replacement: &str) -> String {
 
 /// Convert DIA-NN parenthesised UNIMOD mods to ProForma brackets: each
 /// case-insensitive `(unimod:` / `(u:` opener becomes `[UNIMOD:` and the single
-/// `)` that closes it becomes `]`. Any other paren — notably `)` inside a bracket
-/// mod name like `[Carbamidomethyl (C)]` — is left untouched.
+/// `)` that closes it becomes `]`. Any other paren -- notably `)` inside a bracket
+/// mod name like `[Carbamidomethyl (C)]` -- is left untouched.
 fn convert_paren_unimod(s: &str) -> String {
     let lower = s.to_ascii_lowercase();
     let mut out = String::with_capacity(s.len());
@@ -367,7 +367,7 @@ fn convert_paren_unimod(s: &str) -> String {
                         out.push(']');
                         i += rel + 1; // consume ')'
                     }
-                    // Malformed (no closer) — copy the remainder verbatim.
+                    // Malformed (no closer) -- copy the remainder verbatim.
                     None => {
                         out.push_str(rest);
                         i = s.len();
@@ -391,7 +391,7 @@ fn convert_paren_unimod(s: &str) -> String {
 /// A leading (N-terminal) mod is rewritten to `[UNIMOD:n]-SEQ` as ProForma
 /// requires. Pass-through for plain sequences.
 ///
-/// Off the hot path — allocates on every replacement, which is fine at load.
+/// Off the hot path -- allocates on every replacement, which is fine at load.
 pub fn normalize_to_proforma(raw: &str) -> String {
     let trimmed = raw.trim_matches('_');
     // Fast path: plain-AA sequences (no mod tags) skip the rewrite chain.
@@ -401,7 +401,7 @@ pub fn normalize_to_proforma(raw: &str) -> String {
 
     // DIA-NN writes mods in parentheses, e.g. `C(UniMod:4)`; ProForma needs
     // brackets, e.g. `C[UNIMOD:4]`. Convert each opener and ONLY its matching
-    // `)` (see `convert_paren_unimod`) — never a blanket `)` replace, which would
+    // `)` (see `convert_paren_unimod`) -- never a blanket `)` replace, which would
     // corrupt parens inside a bracket mod name, e.g. `C[Carbamidomethyl (C)]`.
     let s = convert_paren_unimod(trimmed);
 

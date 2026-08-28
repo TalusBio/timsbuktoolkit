@@ -2,8 +2,8 @@
 //!
 //! `load_raw` is the one place raw dispatch happens. It sniffs the URI via the
 //! reader registry, asks the chosen reader for its [`Manifest`] (the files it
-//! needs), materializes those — in place for local inputs, or by fetching
-//! exactly the declared files for remote ones — and calls `read`. Transport
+//! needs), materializes those -- in place for local inputs, or by fetching
+//! exactly the declared files for remote ones -- and calls `read`. Transport
 //! never guesses vendor shape: it fetches what the reader declared, by name.
 //!
 //! Lives in `tims_stage` (one crate above `timscentroid`, where the registry
@@ -84,7 +84,7 @@ pub fn load_raw(
         });
     }
 
-    // Local: canonicalize first so RELATIVE paths resolve — `local_uri`
+    // Local: canonicalize first so RELATIVE paths resolve -- `local_uri`
     // (sniff) and `local_in_place` (read) both require an absolute path. This
     // is the single place all entry points funnel through, so relative inputs
     // work uniformly (`read_index`, `load_index_auto`, the pyo3 binding, …).
@@ -257,7 +257,7 @@ mod tests {
         let dotd = src.path().join("sample.d");
         std::fs::create_dir(&dotd).unwrap();
         std::fs::write(dotd.join("analysis.tdf"), b"tdf").unwrap();
-        // analysis.tdf_bin intentionally absent — must error, not silently skip.
+        // analysis.tdf_bin intentionally absent -- must error, not silently skip.
 
         let backend = PerRunTempdir::new(StagingConfig::default()).unwrap();
         let err = stage_manifest(&backend, &dotd_manifest(&dotd)).unwrap_err();

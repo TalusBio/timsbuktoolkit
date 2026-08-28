@@ -39,7 +39,7 @@ impl Default for StagingConfig {
 
 /// RAII handle over a per-run tempdir + its inner `sample.d/` path.
 ///
-/// Callers MUST keep `StagedDotD` alive for as long as they use the path —
+/// Callers MUST keep `StagedDotD` alive for as long as they use the path --
 /// the tempdir is deleted on drop, and `AsRef<Path>` does not extend the
 /// borrow beyond the handle's lifetime. Do NOT store `&Path` derived from
 /// `as_ref()` past the end of the scope that holds the handle.
@@ -139,7 +139,7 @@ fn sweep_stale(root: &Path, age_hours: u64) -> Result<(), StageError> {
         let mtime = meta.modified().ok();
         if has_lock {
             // Live session. Only force-remove if it's very stale (2x threshold)
-            // AND still claims to be locked — best-effort for crashed runs.
+            // AND still claims to be locked -- best-effort for crashed runs.
             if let Some(mt) = mtime {
                 let hard_threshold = std::time::SystemTime::now()
                     .checked_sub(std::time::Duration::from_secs(age_hours * 2 * 3600))

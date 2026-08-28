@@ -281,7 +281,7 @@ fn parse_precursor_group(
     }
 
     // Fragments are every non-precursor row. Precursor (isotope) rows are
-    // ignored — downstream computes the isotope envelope from the peptide
+    // ignored -- downstream computes the isotope envelope from the peptide
     // sequence, matching the DIA-NN path.
     let fragment_rows: Vec<&SkylineLibraryRow> =
         rows.iter().filter(|r| !r.is_precursor_row()).collect();

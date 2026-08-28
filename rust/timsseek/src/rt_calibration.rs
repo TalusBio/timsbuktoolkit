@@ -30,7 +30,7 @@ use timsquery::models::tolerance::{
 const DEFAULT_RT_FLOOR_MINUTES: f32 = 0.5;
 
 /// The RT tolerance a ridge half-width implies, in minutes, floored at
-/// `floor_minutes` — the same [`FloorsTriplet::rt_minutes`] that
+/// `floor_minutes` -- the same [`FloorsTriplet::rt_minutes`] that
 /// [`DimensionErrors::derive_windows`] applies to the uniform fallback. The
 /// per-query search path and a single-number UI must both come through here, or
 /// the window a user is shown is not the window the search would open.
@@ -116,7 +116,7 @@ pub struct DerivedWindows {
     pub mobility_pct: (f32, f32),
 }
 
-/// `median ± n_sigma * 1.4826 * MAD`, floored — the `"mad_symmetric"` method
+/// `median ± n_sigma * 1.4826 * MAD`, floored -- the `"mad_symmetric"` method
 /// [`DerivationParams`] names. Robust to tails: equal to `mean ± n_sigma * stdev`
 /// for a Gaussian population, and it resists the outlier inflation that would
 /// widen a window around a handful of bad matches.
@@ -216,7 +216,7 @@ impl CalibrationResult {
         self.fallback
     }
 
-    /// The grid this was fit on — the source for the curve, the ridge widths and
+    /// The grid this was fit on -- the source for the curve, the ridge widths and
     /// the calibrant points.
     pub fn state(&self) -> &CalibratedGrid {
         &self.state
@@ -242,7 +242,7 @@ impl CalibrationResult {
         ridge_half_width_interp(self.state.ridge_widths(), library_rt.0)
     }
 
-    /// The fitted curve. Present for the lifetime of `self` — [`Self::new`]
+    /// The fitted curve. Present for the lifetime of `self` -- [`Self::new`]
     /// rejects a grid without one.
     fn curve(&self) -> &RTCalibration {
         self.state
@@ -321,7 +321,7 @@ impl CalibrationResult {
 
     /// Write the calibration where a viewer or the dashboard can read it.
     ///
-    /// The grid's snapshot is the record of the fit — a reader refits it to get
+    /// The grid's snapshot is the record of the fit -- a reader refits it to get
     /// the curve and the ridge widths back. Everything a search measured that the
     /// grid does not know goes in [`ResidualBlock`].
     pub fn save_json(
@@ -547,7 +547,7 @@ mod tests {
         assert_eq!((symmetric.median, symmetric.mad), (0.0, 1.0));
 
         // Offset by 10: the median rides along, so the window is not centred on
-        // zero — that offset is the systematic error the window has to cover.
+        // zero -- that offset is the systematic error the window has to cover.
         let offset = ErrorStats::from_slice(&[8.0, 9.0, 10.0, 11.0, 12.0]);
         assert_eq!((offset.median, offset.mad), (10.0, 1.0));
 
@@ -564,7 +564,7 @@ mod tests {
         // Expectations are literals, not the implementation's own expression: at
         // MAD 1 and 2 sigma the half-spread is 2 * 1.4826 = 2.9652.
         //
-        // The offset dimension's left bound lands under its floor — its median is
+        // The offset dimension's left bound lands under its floor -- its median is
         // further from zero than the spread, so the window does not reach back.
         assert_eq!(w.mz_ppm.0, params.floors.mz_ppm as f64);
         assert!((w.mz_ppm.1 - 12.9652).abs() < 1e-4, "{:?}", w.mz_ppm);

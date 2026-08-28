@@ -5,7 +5,7 @@ use calibrt::{
 };
 
 /// A degenerate range on *either* axis is an error. Both, because the two are
-/// separate checks in `grid::spans` — dropping the y one leaves the x case
+/// separate checks in `grid::spans` -- dropping the y one leaves the x case
 /// green.
 #[test]
 fn a_zero_range_on_either_axis_is_rejected() {

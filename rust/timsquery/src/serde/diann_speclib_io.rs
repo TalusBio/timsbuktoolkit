@@ -52,7 +52,7 @@ const PRODUCT_SIZE: usize = 12;
 
 /// Smallest plausible `Entry` on disk (peptide header + zero-fragment count +
 /// `dc` + entry_flags + proteotypic + pid_index + empty-name count). Used only
-/// to bound pre-allocation against a corrupt count prefix — never a parse gate.
+/// to bound pre-allocation against a corrupt count prefix -- never a parse gate.
 const MIN_ENTRY_BYTES: usize = 40;
 
 // --- Layer 1: decode ------------------------------------------------------
@@ -142,7 +142,7 @@ impl<'a> Cursor<'a> {
         self.take(n).map(|_| ())
     }
 
-    /// `vec<i32>`: `i32 count` + `count` contiguous i32 — skip.
+    /// `vec<i32>`: `i32 count` + `count` contiguous i32 -- skip.
     fn skip_vec_i32(&mut self) -> Result<(), TargetReadingError> {
         let n = self.read_count()?;
         self.skip_bytes(n * 4)
@@ -235,7 +235,7 @@ impl<'a> Peptide<'a> {
     }
 }
 
-/// `Peptide::read` — consume one peptide from `c` and return a view over its
+/// `Peptide::read` -- consume one peptide from `c` and return a view over its
 /// span. Works for both the target and (when `dc != 0`) the embedded decoy.
 fn read_peptide<'a>(c: &mut Cursor<'a>, version: i32) -> Result<Peptide<'a>, TargetReadingError> {
     let start = c.mark();
@@ -258,7 +258,7 @@ pub(crate) struct EntryView<'a> {
     had_file_decoy: bool,
 }
 
-/// `Entry::read` — a target `Peptide`, an optional embedded decoy, then the
+/// `Entry::read` -- a target `Peptide`, an optional embedded decoy, then the
 /// Entry-level fields.
 fn read_entry<'a>(
     c: &mut Cursor<'a>,
@@ -312,7 +312,7 @@ fn skip_entry(c: &mut Cursor, version: i32) -> Result<(), TargetReadingError> {
     let _proteotypic = c.read_i32()?;
     let _pid_index = c.read_i32()?;
     let name_len = c.read_count()?;
-    c.skip_bytes(name_len)?; // name bytes — skipped, decoded later in parallel
+    c.skip_bytes(name_len)?; // name bytes -- skipped, decoded later in parallel
     if version <= -3 {
         c.skip_bytes(12)?; // pg_qvalue, ptm_qvalue, site_conf
     }
@@ -362,7 +362,7 @@ impl SpecLib {
     }
 
     /// Memory-map a `.speclib` file, then parse the header. Avoids a ~file-sized
-    /// resident buffer — pages fault in on demand and are OS-reclaimable.
+    /// resident buffer -- pages fault in on demand and are OS-reclaimable.
     pub(crate) fn open_mmap(path: &Path) -> Result<Self, TargetReadingError> {
         let file = File::open(path).map_err(TargetReadingError::IoError)?;
         // SAFETY: read-only ingest. The library file is not written during load;
@@ -393,29 +393,29 @@ impl SpecLib {
         let _name = c.read_str()?;
         let _fasta_names = c.read_str()?;
 
-        // --- Section 1: proteins (Isoform[]) — walk & discard ---
+        // --- Section 1: proteins (Isoform[]) -- walk & discard ---
         let n_isoforms = c.read_count()?;
         for _ in 0..n_isoforms {
             skip_isoform(&mut c)?;
         }
 
-        // --- Section 2: protein_ids (PG[]) — keep only `ids` per group ---
+        // --- Section 2: protein_ids (PG[]) -- keep only `ids` per group ---
         let n_pg = c.read_count()?;
         let mut pg_ids = Vec::with_capacity(bounded_capacity(n_pg, c.remaining(), MIN_ENTRY_BYTES));
         for _ in 0..n_pg {
             pg_ids.push(read_pg_keep_ids(&mut c)?);
         }
 
-        // --- Sections 3-5: precursor / name / gene string dictionaries — discard ---
+        // --- Sections 3-5: precursor / name / gene string dictionaries -- discard ---
         for _ in 0..3 {
             skip_strings(&mut c)?;
         }
 
-        // --- Section 6: iRT range (2x f64) — discard (per-entry iRT present) ---
+        // --- Section 6: iRT range (2x f64) -- discard (per-entry iRT present) ---
         let _irt_min = c.read_f64()?;
         let _irt_max = c.read_f64()?;
 
-        // --- Section 7: entries — recorded, parsed lazily ---
+        // --- Section 7: entries -- recorded, parsed lazily ---
         let n_entries = c.read_count()?;
         let entries_start = c.mark();
 
@@ -441,7 +441,7 @@ impl SpecLib {
     ///
     /// Phase A (serial, allocation-free): walk the variable-length envelope
     /// recording each entry's start offset. Boundary finding is inherently
-    /// sequential — an entry's position depends on all prior entries' lengths.
+    /// sequential -- an entry's position depends on all prior entries' lengths.
     /// This is the ~1 core the format forces; it does no allocation or mapping.
     ///
     /// Phase B (parallel): each entry is re-parsed and mapped independently from
@@ -521,7 +521,7 @@ impl SpecLib {
     }
 }
 
-/// `Isoform::read` — read & discard.
+/// `Isoform::read` -- read & discard.
 fn skip_isoform(c: &mut Cursor) -> Result<(), TargetReadingError> {
     let _sp = c.read_i32()?;
     let size = c.read_count()?;
@@ -533,7 +533,7 @@ fn skip_isoform(c: &mut Cursor) -> Result<(), TargetReadingError> {
     c.skip_bytes(size * 4) // prec[size]
 }
 
-/// `PG::read` — keep only the `;`-joined `ids` string.
+/// `PG::read` -- keep only the `;`-joined `ids` string.
 fn read_pg_keep_ids(c: &mut Cursor) -> Result<String, TargetReadingError> {
     let size_p = c.read_count()?;
     let ids = c.read_str()?;
@@ -546,7 +546,7 @@ fn read_pg_keep_ids(c: &mut Cursor) -> Result<String, TargetReadingError> {
     Ok(ids)
 }
 
-/// `read_strings` — read & discard.
+/// `read_strings` -- read & discard.
 fn skip_strings(c: &mut Cursor) -> Result<(), TargetReadingError> {
     let n = c.read_count()?;
     for _ in 0..n {
@@ -564,14 +564,14 @@ fn bounded_capacity(count: usize, remaining_bytes: usize, min_record_bytes: usiz
 
 // --- Layer 3: map ---------------------------------------------------------
 
-/// Counts of fragments/records dropped during a decode — surfaced via `warn!`
+/// Counts of fragments/records dropped during a decode -- surfaced via `warn!`
 /// and returned for callers to assert on.
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SpeclibDecodeStats {
     /// Fragments flagged `ExcludeFromAssay` (`type & 0x80`). Kept (see
     /// [`map_entry`]); counted for reporting only.
     pub exclude_flagged: usize,
-    /// Fragments with a neutral loss (`loss != 0`) — `IonAnnot` cannot hold loss.
+    /// Fragments with a neutral loss (`loss != 0`) -- `IonAnnot` cannot hold loss.
     pub loss_dropped: usize,
     /// Fragments whose ion-type code or recovered series was unusable.
     pub unknown_ion_dropped: usize,
@@ -599,7 +599,7 @@ impl SpeclibDecodeStats {
     }
 }
 
-/// Strip DIA-NN mod annotations — anything inside `(...)` or `[...]` — leaving
+/// Strip DIA-NN mod annotations -- anything inside `(...)` or `[...]` -- leaving
 /// the bare residue string.
 fn strip_mods(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
@@ -655,7 +655,7 @@ fn append_arena(dst: &mut TargetColumns<IonAnnot>, mut src: TargetColumns<IonAnn
 
     // CSR offset arrays carry a leading 0; skip it and rebase the remainder onto
     // the running arena length. `try_from` mirrors the checked pushes in
-    // `TargetColumns` — an overflow fails loud rather than wrapping an offset.
+    // `TargetColumns` -- an overflow fails loud rather than wrapping an offset.
     dst.frag_off.extend(src.frag_off[1..].iter().map(|&o| {
         u32::try_from(o as usize + frag_base).expect("fragment arena exceeds u32 offset range")
     }));
@@ -721,7 +721,7 @@ fn map_entry(
     }
 
     // `name` (== transition_group_id) is `modified_peptide + charge`. Strip the
-    // exact known-charge decimal suffix — not "trailing digits" — so a
+    // exact known-charge decimal suffix -- not "trailing digits" -- so a
     // C-terminal mod ending in a digit is left intact.
     let charge = pep.charge();
     if charge < 1 || charge > u8::MAX as i32 {
@@ -758,7 +758,7 @@ fn map_entry(
 
     for f in pep.fragments() {
         // `type & 0x80` => ExcludeFromAssay: DIA-NN's non-quantifier transitions.
-        // They carry valid m/z + intensity and are kept — dropping them leaves
+        // They carry valid m/z + intensity and are kept -- dropping them leaves
         // ~3 fragments/precursor on real libraries, which starves cross-library
         // calibration matching (needs >=5 shared fragments). Counted only.
         if f.typ() & 0x80 != 0 {
@@ -788,7 +788,7 @@ fn map_entry(
         };
 
         // N-terminal (b/a/c): series = index; C-terminal (y/x/z): series =
-        // length - index (isotope arg is always 0 — a library fragment).
+        // length - index (isotope arg is always 0 -- a library fragment).
         let is_nterm = matches!(type_char, 'b' | 'a' | 'c');
         let series = if is_nterm {
             f.index() as i64
@@ -831,7 +831,7 @@ fn map_entry(
     }
 
     // (label, mz) pairs for the arena, with the parallel reference-intensity
-    // sidecar filled in the same order — dedup already collapsed duplicate
+    // sidecar filled in the same order -- dedup already collapsed duplicate
     // labels, so this order is what lands in `geom.frag_labels`.
     let mut frags: Vec<(IonAnnot, f64)> = Vec::with_capacity(kept.len());
     for &(ion, mz, height) in kept.iter() {
@@ -845,7 +845,7 @@ fn map_entry(
         precursor_mz: pep.mz() as f64,
         charge: charge as u8,
         // Library iRT is dimensionless here; keep it raw (no minute->second
-        // scaling) — Phase 1 RT tolerance is unrestricted.
+        // scaling) -- Phase 1 RT tolerance is unrestricted.
         rt_seconds: pep.i_rt(),
         mobility: pep.i_im(),
         frags: &frags,
@@ -879,7 +879,7 @@ pub fn parse_speclib_reader<R: Read>(reader: R) -> Result<ParsedSpeclib, TargetR
 
 /// Cheap sniff: extension is `.speclib` and the first 4 bytes are not the
 /// parquet magic `PAR1` (a `*.parquet.*.speclib` clash is handled by the parquet
-/// reader). No version check here — a too-new file must still sniff true so
+/// reader). No version check here -- a too-new file must still sniff true so
 /// `read` returns a real `UnsupportedSpeclibVersion` diagnostic.
 pub fn sniff_diann_speclib_library_file<T: AsRef<Path>>(path: T) -> bool {
     let path = path.as_ref();
@@ -912,16 +912,16 @@ pub fn read_diann_speclib_library_file<T: AsRef<Path>>(
     let path = path.as_ref();
     info!("Reading DIA-NN .speclib binary from {}", path.display());
 
-    // mmap the file (not an owned read) — pages fault in on demand, no
+    // mmap the file (not an owned read) -- pages fault in on demand, no
     // file-sized resident buffer.
     let (mut geom, frag_intens, stats, at_eof) = SpecLib::open_mmap(path)?.parse_parallel()?;
 
     if !at_eof {
         // A parse that doesn't land on EOF means the entries were misaligned
-        // (wrong field sizes / version gating) — the decoded library would be
+        // (wrong field sizes / version gating) -- the decoded library would be
         // silently corrupt. Fail loudly rather than return garbage.
         return Err(TargetReadingError::SpeclibParse(format!(
-            "parse did not land on EOF for {} — structural desync",
+            "parse did not land on EOF for {} -- structural desync",
             path.display()
         )));
     }
@@ -981,7 +981,7 @@ mod tests {
     }
 
     // All expected values below are sourced from `reference_parser.py` (an
-    // independent decoder), not from this reader — so the test is not circular.
+    // independent decoder), not from this reader -- so the test is not circular.
 
     #[test]
     fn test_sniff_diann_speclib() {

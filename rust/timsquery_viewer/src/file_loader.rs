@@ -84,7 +84,7 @@ impl FileLoader {
 
     /// Open a file dialog for a single raw data FILE (mzML / Thermo raw).
     /// `.d`/`.idx` are directories and need `open_raw_data_dialog`. The accepted
-    /// extensions come from the reader registry — the single source of truth for
+    /// extensions come from the reader registry -- the single source of truth for
     /// which raw file formats are compiled in.
     pub fn open_raw_data_file_dialog(&mut self) {
         let extensions = timscentroid::reader::ReaderRegistry::with_builtins().file_extensions();
@@ -160,7 +160,7 @@ impl FileLoader {
 /// and the reference intensities + isotope envelope come from the flyweight's
 /// `ExpectedIntensity` impl, which routes the envelope through
 /// `isotope_dist_or_averagine` (averagine fallback). There is no private
-/// isotope model here — the viewer shows exactly what the CLI scores.
+/// isotope model here -- the viewer shows exactly what the CLI scores.
 #[derive(Debug)]
 pub struct ElutionGroupData {
     inner: ReferenceLibrary,
@@ -258,7 +258,7 @@ impl ElutionGroupData {
         // arena flyweight exactly the way the scoring pipeline does
         // (`fill_scratch_from`). The precursor envelope comes from
         // `expected_precursor_envelope()`, which routes through
-        // `isotope_dist_or_averagine` — no `[1.0, 0.0, 0.0]` fallback.
+        // `isotope_dist_or_averagine` -- no `[1.0, 0.0, 0.0]` fallback.
         let q = self.item_at(index);
         let mut eg = Target::empty_like();
         fill_scratch_from(&mut eg, &q);
@@ -440,7 +440,7 @@ mod tests {
 
     /// The envelope the viewer DISPLAYS (obtained via `get_elem`, i.e. the
     /// flyweight's `expected_precursor_envelope`) must equal what the scoring
-    /// path computes via `isotope_dist_or_averagine` — NOT the deleted
+    /// path computes via `isotope_dist_or_averagine` -- NOT the deleted
     /// `[1.0, 0.0, 0.0]` fallback.
     #[test]
     fn displayed_envelope_matches_isotope_dist_or_averagine() {

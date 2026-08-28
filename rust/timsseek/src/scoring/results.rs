@@ -58,8 +58,8 @@ pub struct FinalizeInputs<'a> {
 /// same derive that projects a leaf block's `#[feat(...)]` scalars walks this
 /// list to emit the composed struct's Parquet columns/schema, its two lane
 /// value arrays and their name walks, and `sample_default`. Field order is
-/// load-bearing — parquet column order and the positional ML value vector both
-/// follow it — so folding every walk out of the one declaration order is what
+/// load-bearing -- parquet column order and the positional ML value vector both
+/// follow it -- so folding every walk out of the one declaration order is what
 /// makes them *impossible* to desync.
 ///
 /// The lane widths compose the same way the values do: `LINEAR_LEN` is the sum
@@ -207,7 +207,7 @@ impl FinalResult {
     }
 
     /// Value-free Parquet schema: scoring blocks (composition order), the
-    /// post-model meta block, then the ids — the same three blocks `emit_row`
+    /// post-model meta block, then the ids -- the same three blocks `emit_row`
     /// writes, in the same order.
     ///
     /// The ids are their own block because they are not on the result; the

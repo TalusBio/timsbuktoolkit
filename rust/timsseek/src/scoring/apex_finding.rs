@@ -142,7 +142,7 @@ pub struct ApexLocation {
 
 /// The result of the full scoring process (Phase 3): the apex-stage score
 /// blocks, plus the two bridge scalars (`joint_apex_cycle`, `retention_time_ms`
-/// — the latter drives the secondary-query RT). Assembled while the
+/// -- the latter drives the secondary-query RT). Assembled while the
 /// chromatogram buffers are live; moves into `ScoringFields` at finalize.
 #[derive(Debug, Clone, Copy)]
 pub struct ApexBlocks {
@@ -401,7 +401,7 @@ impl TraceScorer {
     }
 
     /// Stage B: Suggest best apex from precomputed traces.
-    /// Pure peak-pick on apex_profile — O(cycles). Truly cheap.
+    /// Pure peak-pick on apex_profile -- O(cycles). Truly cheap.
     /// Returns `apex_profile[max_loc]` as the ranking score.
     pub fn suggest_apex(
         &self,
@@ -436,7 +436,7 @@ impl TraceScorer {
     }
 
     /// Stage B': the window-global apex evidence. Cycle-invariant, so it is
-    /// computed ONCE per extraction and handed to [`Self::score_at`] — sweeping
+    /// computed ONCE per extraction and handed to [`Self::score_at`] -- sweeping
     /// `score_at` across cycles would otherwise redo four full-slice passes
     /// (2x argmax, 2x `area_uniqueness` total-sum) per cycle, making the sweep
     /// O(cycles^2). Needs `&mut self` only for `coel_scratch` reuse.
@@ -493,7 +493,7 @@ impl TraceScorer {
         let delta_second_next = cycle_val - second_next_val;
 
         // Unified apex source: Pass 2 scores at Pass 1's weighted-apex_profile
-        // location. `cycle` is `suggested.apex_cycle` (the weighted argmax) — the
+        // location. `cycle` is `suggested.apex_cycle` (the weighted argmax) -- the
         // single, best-validated apex finder. No re-location on a weaker profile.
         let effective_apex = cycle;
 
@@ -681,8 +681,8 @@ impl TraceScorer {
                 entry.1 /= pred_sqrt_sum;
             }
 
-            // One reciprocal per cycle, so the row loop below — which walks the
-            // cycle axis once per retained fragment — multiplies instead of
+            // One reciprocal per cycle, so the row loop below -- which walks the
+            // cycle axis once per retained fragment -- multiplies instead of
             // dividing. Zero stays zero, marking the cycles that finalize floors.
             let inv_sqrt_sum = &mut self.buffers.temp_inv_sqrt_sum;
             for (inv, &ss) in inv_sqrt_sum.iter_mut().zip(sqrt_sum.iter()) {

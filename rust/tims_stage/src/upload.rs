@@ -4,7 +4,7 @@
 //! small outputs** (result JSONs, parquet shards, run reports). For the
 //! default cap see [`DEFAULT_UPLOAD_CAP`]. To stream a large `.d` bundle
 //! instead, bundle it into a tar and use the staging pipeline in reverse
-//! (not yet implemented — avoid pointing `upload_file` at multi-GB payloads).
+//! (not yet implemented -- avoid pointing `upload_file` at multi-GB payloads).
 
 use crate::common::transport_err;
 use crate::error::StageError;

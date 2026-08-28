@@ -1,8 +1,8 @@
-//! Sequence-derived features (nonlinear lane, features-only — no Parquet
+//! Sequence-derived features (nonlinear lane, features-only -- no Parquet
 //! column).
 //!
 //! UNCONDITIONAL: always [`LEN`] features wide. A peptide with no parsed
-//! sequence emits `f64::NAN` for all of them rather than emitting nothing —
+//! sequence emits `f64::NAN` for all of them rather than emitting nothing --
 //! NaN is exactly what forust reads as "missing", and a fixed width is what
 //! lets this block's contribution to the feature matrix be a compile-time
 //! constant like every other block's. Emitted LAST, so these names stay at the

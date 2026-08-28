@@ -139,9 +139,9 @@ impl<T: KeyLike> Target<T> {
 
     /// In-place copy reusing Vec/TinyVec capacity. The `clear()` + `push`
     /// pattern preserves the destination's heap buffer capacity across
-    /// resets — after warm-up, zero alloc. Used by the isotope-offset
+    /// resets -- after warm-up, zero alloc. Used by the isotope-offset
     /// scratch in timsseek. `G` is any `QueryGeom` (e.g. the columnar
-    /// flyweight), not necessarily `Self` — the body reads `src` only
+    /// flyweight), not necessarily `Self` -- the body reads `src` only
     /// through trait methods.
     pub fn reset_from<G: crate::traits::QueryGeom<Label = T>>(&mut self, src: &G) {
         self.id.set_from(src.output_id());

@@ -191,7 +191,7 @@ impl<'a> QueryGeom for RefQuery<'a> {
 ///
 /// The two travel together because the scorer holds the run's raw-data index,
 /// not the library arena, so it cannot derive one from the other. Both are
-/// opaque, so neither can reach an output file or be confused with an id — the
+/// opaque, so neither can reach an output file or be confused with an id -- the
 /// writer resolves them against the arena at the end.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct RowHandles {
@@ -202,7 +202,7 @@ pub struct RowHandles {
 /// Arm-neutral identity accessors the scoring loop needs but that are NOT part
 /// of `QueryGeom` / `ExpectedIntensity`. Implemented by the `RefQuery`
 /// flyweight so the batch scoring loop stays generic (monomorphized,
-/// zero-heap) over the concrete type — see
+/// zero-heap) over the concrete type -- see
 /// `Scorer::{prescore,score_calibrated}_batch_impl`.
 pub trait ScoredIdentity {
     /// Whether this item is a target (vs a decoy variant).

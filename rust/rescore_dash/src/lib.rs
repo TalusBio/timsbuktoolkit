@@ -2,8 +2,8 @@
 //! target/decoy separation, FDR curve and decoy calibration.
 //!
 //! Two steps, deliberately separate. [`Dashboard::build`] materializes
-//! everything on screen from a [`RescoreView`] — see [`precompute`] for what is
-//! exact and what is sampled — and [`run`] opens the TUI over the result.
+//! everything on screen from a [`RescoreView`] -- see [`precompute`] for what is
+//! exact and what is sampled -- and [`run`] opens the TUI over the result.
 //! Splitting them lets the caller drop the feature matrix, gigabytes at a
 //! realistic library size, before the TUI blocks for as long as the user leaves
 //! it open.

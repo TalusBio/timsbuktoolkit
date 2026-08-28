@@ -1270,7 +1270,7 @@ impl ViewerApp {
             ScreenshotState::Countdown { deadline } => {
                 let now = Instant::now();
                 if now >= *deadline {
-                    // Deadline reached — capture at native resolution
+                    // Deadline reached -- capture at native resolution
                     ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(
                         egui::UserData::default(),
                     ));

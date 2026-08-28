@@ -246,7 +246,7 @@ impl GBMConfig {
     }
 }
 
-/// Label + score access for a scored record — everything
+/// Label + score access for a scored record -- everything
 /// [`CrossValidatedScorer`] needs from `T` once the feature matrix exists.
 pub(crate) trait FeatureLike {
     fn get_y(&self) -> f64;
@@ -407,7 +407,7 @@ pub(crate) trait FoldModel: Sized {
     ///
     /// # The NAN-vs-finite contract
     /// * `f32::NAN` means **"this model does not report a value for this
-    ///   column"** — the column is absent from the sidecar for this fold.
+    ///   column"** -- the column is absent from the sidecar for this fold.
     /// * Any FINITE value, **including `0.0`**, is a reported measurement and
     ///   reaches the sidecar as-is.
     ///
@@ -566,14 +566,14 @@ impl DataBuffer {
         }
     }
 
-    /// [`Self::fill_features_from`] plus the label channel — the TRAINING path.
+    /// [`Self::fill_features_from`] plus the label channel -- the TRAINING path.
     fn fill_from<D: FoldDataset>(&mut self, data: &D, rows: &[usize], ncols: usize) {
         self.fill_features_from(data, rows, ncols);
         self.response_buffer
             .extend(rows.iter().map(|&i| f64::from(!data.is_decoy(i))));
     }
 
-    /// Feature matrix only — valid after EITHER fill.
+    /// Feature matrix only -- valid after EITHER fill.
     fn features_as_matrix(&self) -> Matrix<'_, f64> {
         assert_eq!(self.fold_buffer.len(), self.nrows * self.ncols);
         let mat = Matrix::new(self.fold_buffer.as_slice(), self.nrows, self.ncols);
@@ -583,14 +583,14 @@ impl DataBuffer {
 
     /// Features + labels. Only valid after [`Self::fill_from`].
     ///
-    /// The assertion catches a features-only gather OF A NON-EMPTY ROW SET —
+    /// The assertion catches a features-only gather OF A NON-EMPTY ROW SET --
     /// [`Self::fill_features_from`] clears `response_buffer`, so the labels are
     /// missing while `nrows` is not, and this panics instead of handing out an
     /// empty response slice. It does NOT catch the zero-row case: with
     /// `nrows == 0` both sides are `0` and the two fills are indistinguishable
     /// here, so an empty gather returns an empty view either way. That is the
     /// shape `crossfit` produces (it passes `val = &[]`), and it is harmless
-    /// because that path uses [`Self::fill_from`] anyway — but the assertion is
+    /// because that path uses [`Self::fill_from`] anyway -- but the assertion is
     /// not what makes it safe.
     fn as_matrix(&self) -> FoldView<'_> {
         let mat = self.features_as_matrix();
@@ -656,7 +656,7 @@ impl FoldModel for GbmFoldModel {
         Ok(Self { booster, ncols })
     }
 
-    /// Features only — see [`DataBuffer::fill_features_from`] for why the label
+    /// Features only -- see [`DataBuffer::fill_features_from`] for why the label
     /// channel is not touched on the scoring path.
     fn predict<D: FoldDataset>(&self, data: &D, rows: &[usize]) -> Result<Vec<f64>, ForustError> {
         let mut buffer = DataBuffer::default();
@@ -665,7 +665,7 @@ impl FoldModel for GbmFoldModel {
     }
 
     /// forust reports only the columns it actually split on. Every other lane
-    /// is `NAN` — "not reported" — rather than `0.0`, because this model has no
+    /// is `NAN` -- "not reported" -- rather than `0.0`, because this model has no
     /// gain measurement for a column it never used. See the
     /// [`FoldModel::importance`] contract.
     fn importance(&self) -> Vec<f32> {
@@ -757,8 +757,8 @@ pub struct FeatureStat {
 /// `feature_stats` is in the dataset's own column order
 /// ([`FoldDataset::column_names`], i.e. the matrix's column order), one entry per
 /// column. `feature_importance` is sorted by importance DESCENDING (top features
-/// first), and carries only the columns the model reported a finite value for —
-/// see [`FoldModel::importance`] — so it is generally shorter than
+/// first), and carries only the columns the model reported a finite value for --
+/// see [`FoldModel::importance`] -- so it is generally shorter than
 /// `feature_stats` and in a different order.
 ///
 /// Descending because the two TSV sidecars `timsseek_cli` writes
@@ -778,10 +778,10 @@ pub type RescoreFeatureStats = Vec<FoldStats>;
 ///
 /// Partition-agnostic on purpose: `fold_rows[f]` is simply "the rows summarized
 /// under fold `f`" and `models[f]` is "the model whose importance is reported
-/// there". The two rescoring partitions in this crate disagree on both — the
+/// there". The two rescoring partitions in this crate disagree on both -- the
 /// [`CrossValidatedScorer`] fits on fold `f` and scores the others, while
 /// `qvalues::crossfit_lda` fits on everything BUT fold `f` and scores only fold
-/// `f` — and both are leak-free. Keeping this function ignorant of which one it
+/// `f` -- and both are leak-free. Keeping this function ignorant of which one it
 /// is handed is what lets the sidecar have one implementation without the two
 /// partitions being forced to converge.
 ///
@@ -1168,7 +1168,7 @@ impl<T: FeatureLike + Sync, M: FoldModel> CrossValidatedScorer<T, M> {
 
     /// Compute per-fold feature means + per-fold model importance.
     ///
-    /// The stats for fold `f` summarize `fold_rows[f]` — for THIS partition,
+    /// The stats for fold `f` summarize `fold_rows[f]` -- for THIS partition,
     /// the rows fold `f`'s model was TRAINED on. Folds with no fitted model
     /// (shouldn't happen post-fit) produce empty maps. See
     /// [`fold_feature_stats`], which the LDA cross-fit shares with a different
@@ -1184,7 +1184,7 @@ impl<T: FeatureLike + Sync, M: FoldModel> CrossValidatedScorer<T, M> {
     /// Test-only, and it exists for one assertion. The hybrid rescorers feed
     /// this scorer a column that was cross-fit under a DIFFERENT train/score
     /// split (`qvalues::crossfit`), and the two splits are only leak-free
-    /// together if they agree on the fold ASSIGNMENT — a disagreement is
+    /// together if they agree on the fold ASSIGNMENT -- a disagreement is
     /// invisible to this scorer's own cross-validation and shows up solely as an
     /// optimistic FDR. Exposing the partition lets
     /// `qvalues::crossfit_holds_out_exactly_the_rows_the_gbm_scorer_trains_on`
@@ -1481,7 +1481,7 @@ mod test {
     /// every other model: an LDA's `|coef|` of exactly 0.0 is a measurement of a
     /// dead or constant column, and silently deleting those rows removes
     /// exactly what an operator reads the sidecar to find. Both halves are
-    /// asserted — dropping the NAN alone would also pass if 0.0 were dropped
+    /// asserted -- dropping the NAN alone would also pass if 0.0 were dropped
     /// too, so the surviving zero is the load-bearing assertion.
     #[test]
     fn importance_nan_is_unreported_but_zero_is_a_value() {

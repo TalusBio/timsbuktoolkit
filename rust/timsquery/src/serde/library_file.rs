@@ -339,7 +339,7 @@ impl TargetTable {
     /// into the `frag_intens` sidecar so the timsseek bridge can score against
     /// them; sequences and the decoy flag are threaded into the arena too. When
     /// no extras were supplied (e.g. plain `IonAnnot` JSON, which only exercises
-    /// the extraction/geometry path), `frag_intens` stays `None` — matching the
+    /// the extraction/geometry path), `frag_intens` stays `None` -- matching the
     /// historical behavior where timsseek rejected that shape.
     fn from_elution_groups(egc: ElutionGroupCollection) -> Result<Self, TargetReadingError> {
         match egc {
@@ -561,7 +561,7 @@ pub fn read_targets<T: AsRef<Path>>(path: T) -> Result<TargetTable, TargetReadin
             }
         }
     }
-    // Dead default in practice (JsonReader always sniffs true) — a harmless
+    // Dead default in practice (JsonReader always sniffs true) -- a harmless
     // defensive fallback.
     Err(last_err.unwrap_or(TargetReadingError::UnableToParseElutionGroups))
 }

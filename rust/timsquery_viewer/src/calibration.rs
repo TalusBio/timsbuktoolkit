@@ -65,7 +65,7 @@ const CONTROL_STOP_REQUESTED: u8 = 2;
 // Configuration
 // ---------------------------------------------------------------------------
 
-/// How many scored elution groups between channel snapshots. The viewer's own —
+/// How many scored elution groups between channel snapshots. The viewer's own --
 /// it governs UI refresh, nothing the search does.
 const SNAPSHOT_INTERVAL: usize = 100;
 
@@ -313,7 +313,7 @@ impl ViewerCalibrationState {
     /// Stop and reset all state. Returns to Idle.
     pub fn reset(&mut self) {
         self.stop();
-        // Drop the receiver BEFORE joining — if the background thread is
+        // Drop the receiver BEFORE joining -- if the background thread is
         // blocked on tx.send(Done), dropping the receiver unblocks it.
         self.receiver = None;
         if let Some(handle) = self.thread_handle.take() {
@@ -395,7 +395,7 @@ impl ViewerCalibrationState {
     }
 
     /// Re-fit the curve to `self.snapshot_points`, on a grid the points themselves
-    /// span rather than the file's acquisition RT range — which would clamp an
+    /// span rather than the file's acquisition RT range -- which would clamp an
     /// iRT-scaled library, whose RTs fall entirely outside it, into one edge column.
     ///
     /// A geometry the points cannot support leaves the previous fit alone: a later
@@ -477,7 +477,7 @@ impl ViewerCalibrationState {
         let mut heap = CalibrantHeap::new(heap_capacity);
         let mut n_scored: usize = 0;
 
-        // Process in chunks — each chunk is parallelized via Rayon.
+        // Process in chunks -- each chunk is parallelized via Rayon.
         // Between chunks: merge heaps, send snapshot, check pause/stop.
         for chunk in indices.chunks(SNAPSHOT_INTERVAL) {
             // Check control flag between chunks.
@@ -498,13 +498,13 @@ impl ViewerCalibrationState {
                 }
             }
 
-            // Score chunk in parallel — per-thread TraceScorer + CalibrantHeap.
+            // Score chunk in parallel -- per-thread TraceScorer + CalibrantHeap.
             let chunk_heap: CalibrantHeap = chunk
                 .par_iter()
                 .fold(
                     || {
                         (
-                            // Viewer is interactive, not a hot path — a conservative
+                            // Viewer is interactive, not a hot path -- a conservative
                             // default capacity is fine; realloc on outliers is free.
                             TraceScorer::new(n_cycles, 16),
                             CalibrantHeap::new(heap_capacity),
@@ -593,7 +593,7 @@ impl ViewerCalibrationState {
     /// The points and their geometry come from the fitted grid, so a reader
     /// refits the same curve and the same ridge widths the viewer is showing.
     /// The residual statistics are the ones this file was loaded with, since the
-    /// viewer measures no residuals of its own — see [`Self::residuals`].
+    /// viewer measures no residuals of its own -- see [`Self::residuals`].
     pub fn save_to_file(
         &self,
         path: &std::path::Path,
@@ -876,7 +876,7 @@ impl ViewerCalibrationState {
                         let (grid_x_min, grid_x_max) = cs.grid_x_range();
                         let n_samples = 200;
 
-                        // Interpolated region (solid cyan) — within curve bounds
+                        // Interpolated region (solid cyan) -- within curve bounds
                         let interp_step = (curve_x_max - curve_x_min) / n_samples as f64;
                         let interp_pts: Vec<[f64; 2]> = (0..=n_samples)
                             .filter_map(|i| {
@@ -894,7 +894,7 @@ impl ViewerCalibrationState {
                             );
                         }
 
-                        // Extrapolated regions (dashed red) — beyond curve bounds
+                        // Extrapolated regions (dashed red) -- beyond curve bounds
                         // Clamp Y to grid range so extrapolation doesn't fly off
                         let (grid_y_min, grid_y_max) = cs.grid_y_range();
                         let extrap_color = egui::Color32::from_rgb(255, 100, 100);
@@ -1043,7 +1043,7 @@ impl ViewerCalibrationState {
     fn render_tolerance_suggestion(&mut self, ui: &mut egui::Ui, tolerance: &mut Tolerance) {
         let floor = self.search.min_rt_tolerance_minutes;
 
-        // The weight-averaged half-width gives the global tolerance — heavy
+        // The weight-averaged half-width gives the global tolerance -- heavy
         // columns count more.
         let ridge_stats = self.calibration_state.as_ref().and_then(|cs| {
             cs.curve()?; // ensure curve is fitted
@@ -1107,7 +1107,7 @@ impl ViewerCalibrationState {
 impl Drop for ViewerCalibrationState {
     fn drop(&mut self) {
         self.stop();
-        // Drop the receiver BEFORE joining — unblocks any tx.send(Done)
+        // Drop the receiver BEFORE joining -- unblocks any tx.send(Done)
         // in the background thread that would otherwise deadlock.
         self.receiver = None;
         if let Some(handle) = self.thread_handle.take() {

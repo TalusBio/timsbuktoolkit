@@ -4,7 +4,7 @@ use timsquery::{
     SpectralCollector,
 };
 
-/// Result of a spectral query — total summed intensity per ion.
+/// Result of a spectral query -- total summed intensity per ion.
 ///
 /// Each precursor/fragment gets a single f32 intensity value (summed
 /// across all matching peaks within the tolerance window).

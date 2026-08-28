@@ -18,7 +18,7 @@ pub trait DecoyShift {
 /// "b-ion count" feature). Implemented only by ion-annotated labels
 /// (`IonAnnot`); arbitrary string labels are `DecoyShift` but not
 /// `FragmentLabel`. NOTE: decoy m/z shifting is gated on `DecoyShift`, not this
-/// trait — a decoy variant computes its shift through `DecoyShift::decoy_shift_mz`,
+/// trait -- a decoy variant computes its shift through `DecoyShift::decoy_shift_mz`,
 /// which every label implements.
 // TODO(fragment-features): add series() accessor once a standalone series
 // enum exists (today series and ordinal are fused in `IonSeriesOrdinal`), and

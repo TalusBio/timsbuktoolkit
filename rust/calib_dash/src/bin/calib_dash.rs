@@ -1,9 +1,9 @@
-//! Standalone replay of a saved `calibration.json` — the RT calibration
+//! Standalone replay of a saved `calibration.json` -- the RT calibration
 //! dashboard without a live Phase 1 search behind it.
 //!
 //! The loaded points become a single Phase-1-shaped batch (chunk 0, one frame),
 //! so the batch scrubber shows one frame and the Convergence tab's history is a
-//! single point — a Phase 2 snapshot is one fit, not a run's sequence of batches.
+//! single point -- a Phase 2 snapshot is one fit, not a run's sequence of batches.
 
 use calib_dash::{
     CalibDash,
@@ -66,8 +66,8 @@ fn main() {
     dash.finish();
 }
 
-/// Reads `path` and keeps only the snapshot. The residual block is left opaque —
-/// nothing here reads it — and the provenance warning is dropped: there is no raw
+/// Reads `path` and keeps only the snapshot. The residual block is left opaque --
+/// nothing here reads it -- and the provenance warning is dropped: there is no raw
 /// file to check the calibration against.
 fn load_snapshot(path: &Path) -> Result<CalibrationSnapshot, String> {
     let (saved, _) = calibrt::SavedCalibration::<serde_json::Value>::read(path, None)?;
@@ -80,11 +80,11 @@ fn load_snapshot(path: &Path) -> Result<CalibrationSnapshot, String> {
 /// needs at least 2 points to define a curve.
 fn validate_snapshot(snapshot: &CalibrationSnapshot) -> Result<(), String> {
     if snapshot.grid_size == 0 {
-        return Err("grid_size is 0 — a calibration grid needs at least 1 bin".to_string());
+        return Err("grid_size is 0 -- a calibration grid needs at least 1 bin".to_string());
     }
     if snapshot.points.len() < 2 {
         return Err(format!(
-            "only {} calibrant point(s) in \"calibration.points\" — at least 2 are needed to \
+            "only {} calibrant point(s) in \"calibration.points\" -- at least 2 are needed to \
              fit a curve",
             snapshot.points.len()
         ));
@@ -104,7 +104,7 @@ mod tests {
     #[test]
     fn a_file_of_a_foreign_version_is_refused() {
         // The handle is held (not just its path) because dropping it is what
-        // deletes the file — including when the test fails.
+        // deletes the file -- including when the test fails.
         let mut f = NamedTempFile::new().expect("a writable temp dir");
         f.write_all(
             br#"{
