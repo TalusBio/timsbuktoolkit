@@ -18,18 +18,24 @@ use std::sync::{
 /// ~48 ms.
 ///
 /// Dropping an ontology normally costs you the sequences that reference it, but
-/// not here. A GNO-accession glycopeptide is already unusable. Every mod goes
-/// through [`modification_to_mod`], which returns `None` for anything
-/// non-Unimod, and [`parse_sequence_mzcore`] propagates that `None` for the
-/// whole peptide. GNOme's only effect was to let such a peptide parse and then
-/// be discarded one step later.
+/// a `[GNO:...]` peptide was already unusable. Every mod goes through
+/// [`modification_to_mod`], which returns `None` for anything non-Unimod, and
+/// [`parse_sequence_mzcore`] propagates that `None` for the whole peptide.
+/// GNOme only ever let such a peptide parse and then be discarded a step later.
 ///
-/// One behaviour does change.
+/// A glycopeptide from a real library is unaffected, because it does not arrive
+/// spelled this way. DIA-NN writes `(UniMod:n)`, [`normalize_to_proforma`]
+/// rewrites that to `[UNIMOD:n]`, and the byte-walk fast path takes it without
+/// consulting any ontology. Reaching this code needs a hand-written GNO
+/// accession.
+///
+/// What does change is where such a peptide fails.
 /// [`count_carbon_sulphur_in_sequence`](crate::fragment_mass::elution_group_converter::count_carbon_sulphur_in_sequence)
-/// no longer gets a composition for a `[GNO:...]` sequence, so its isotope
-/// envelope comes from averagine. That is the documented fallback, already
-/// tallied as `n_averagine_fallback`. PSI-MOD, XL-MOD and RESID stay loaded
-/// (~1.4 MB combined), so that path is untouched for them.
+/// now errors on it rather than returning a composition. Note that the two
+/// callers of `isotope_dist_or_averagine` pass the mod-stripped sequence, so
+/// neither sees the GNO tag at all and neither takes the averagine branch on
+/// account of it (see issue #108). PSI-MOD, XL-MOD and RESID stay loaded
+/// (~1.4 MB combined) for the formula path.
 fn ontologies() -> &'static mzcore::ontology::Ontologies {
     static ONTOLOGIES: OnceLock<mzcore::ontology::Ontologies> = OnceLock::new();
     ONTOLOGIES.get_or_init(|| {
@@ -817,21 +823,72 @@ mod tests {
             "AAAGAAATHLEVAR",
         ];
         for s in corpus {
-            if let Some(fast) = parse_sequence_fast(s) {
-                let slow = parse_sequence_mzcore(s)
-                    .unwrap_or_else(|| panic!("mzcore must also parse {s:?}"));
-                assert_eq!(fast.residues, slow.residues, "residues mismatch for {s:?}");
-                assert_eq!(
-                    fast.mods.len(),
-                    slow.mods.len(),
-                    "n_mods mismatch for {s:?}"
-                );
-                assert_eq!(
-                    fast.aa_counts(),
-                    slow.aa_counts(),
-                    "aa_counts mismatch for {s:?}"
-                );
-            }
+            // `expect` on both, not `if let`. Every entry is inside the fast
+            // grammar by construction, so a `None` here means the fast path
+            // narrowed and the corpus stopped testing anything.
+            let fast =
+                parse_sequence_fast(s).unwrap_or_else(|| panic!("fast path must claim {s:?}"));
+            let slow =
+                parse_sequence_mzcore(s).unwrap_or_else(|| panic!("mzcore must also parse {s:?}"));
+            assert_eq!(fast.residues, slow.residues, "residues mismatch for {s:?}");
+            assert_eq!(
+                fast.aa_counts(),
+                slow.aa_counts(),
+                "aa_counts mismatch for {s:?}"
+            );
+            // Positions and kinds, not just the count: a fast path that put the
+            // right number of mods in the wrong places passed the old version.
+            let mut fast_mods: Vec<_> = fast.mods.iter().map(|m| (m.pos, m.kind)).collect();
+            let mut slow_mods: Vec<_> = slow.mods.iter().map(|m| (m.pos, m.kind)).collect();
+            fast_mods.sort_by_key(|(pos, _)| *pos);
+            slow_mods.sort_by_key(|(pos, _)| *pos);
+            assert_eq!(fast_mods, slow_mods, "mods mismatch for {s:?}");
         }
+    }
+
+    /// Monoisotopic mass of a peptide with exactly one formula.
+    fn neutral_mass(seq: &str) -> f64 {
+        use mzcore::prelude::*;
+        let pf = parse_proforma(seq).unwrap_or_else(|e| panic!("{seq:?}: {e}"));
+        let linear = pf.as_linear().expect("linear").clone();
+        let formulas = linear.formulas();
+        assert_eq!(formulas.len(), 1, "{seq:?} is not a single formula");
+        formulas[0].monoisotopic_mass().value
+    }
+
+    /// The expected values here come from atomic masses, not from mzcore, so
+    /// this checks that a UNIMOD accession resolves to the chemistry it is
+    /// supposed to name. A test that recorded mzcore's own output would pass
+    /// just as happily if an accession were remapped.
+    ///
+    /// These four carry essentially every real library we read.
+    #[test]
+    fn unimod_deltas_match_their_compositions() {
+        // (bare, modified, delta, composition)
+        let cases = [
+            ("PEPTCIDEK", "PEPTC[UNIMOD:4]IDEK", 57.021_46, "C2H3NO"),
+            ("PEPTMIDEK", "PEPTM[UNIMOD:35]IDEK", 15.994_91, "O"),
+            ("PEPTSIDEK", "PEPTS[UNIMOD:21]IDEK", 79.966_33, "HPO3"),
+            ("PEPTNIDEK", "PEPTN[UNIMOD:7]IDEK", 0.984_02, "O minus NH"),
+        ];
+        for (bare, modified, delta, composition) in cases {
+            let got = neutral_mass(modified) - neutral_mass(bare);
+            assert!(
+                (got - delta).abs() < 1e-4,
+                "{modified} minus {bare} must be {delta} ({composition}), got {got}"
+            );
+        }
+    }
+
+    /// Hand sum of the monoisotopic residue masses: P+E+P+T+I+D+E+K is
+    /// 909.44434, plus H2O is 927.45491. The residue masses carry 5 decimals,
+    /// so the tolerance covers that rounding and nothing else.
+    #[test]
+    fn unmodified_peptide_mass_is_the_hand_sum() {
+        let got = neutral_mass("PEPTIDEK");
+        assert!(
+            (got - 927.454_91).abs() < 1e-4,
+            "PEPTIDEK must be 927.45491, got {got}"
+        );
     }
 }

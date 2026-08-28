@@ -182,6 +182,12 @@ pub struct LoadReport {
     /// Physical stored rows (pre decoy expansion), i.e. `TargetColumns::n_rows`.
     pub n_rows: usize,
     pub n_averagine_fallback: usize,
+    /// Rows whose modified sequence neither parser could turn into a
+    /// `ParsedSequence`. Any non-zero value forces `sequence_features` off for
+    /// the whole library, which is deliberate: scores have to be computed the
+    /// same way for every analyte or the target/decoy comparison is meaningless.
+    /// Counted rather than short-circuited so the log can say how bad it is.
+    pub n_unparsable_sequences: usize,
     pub sequence_features: SeqFeatureState,
 }
 
@@ -243,15 +249,15 @@ fn finalize_reference_library(
             }
         }
     }
-    let mut all_parsable = true;
+    let mut n_unparsable = 0usize;
+    let mut first_unparsable: Option<String> = None;
     let mut n_averagine_fallback = 0usize;
     for tgt in geom.rows() {
-        if all_parsable {
-            let modified = geom.seq_mod(tgt);
-            let normalized = normalize_to_proforma(modified);
-            if parse_sequence(&normalized).is_none() {
-                all_parsable = false;
-            }
+        let modified = geom.seq_mod(tgt);
+        let normalized = normalize_to_proforma(modified);
+        if parse_sequence(&normalized).is_none() {
+            n_unparsable += 1;
+            first_unparsable.get_or_insert_with(|| modified.to_string());
         }
         let stripped = geom.seq_strip(tgt);
         let charge = geom.charge(tgt) as f64;
@@ -262,12 +268,22 @@ fn finalize_reference_library(
         }
     }
 
-    let sequence_features = if all_parsable {
+    let sequence_features = if n_unparsable == 0 {
         SeqFeatureState::Available
     } else {
         SeqFeatureState::Unavailable
     };
     geom.caps.sequence_features = sequence_features;
+
+    if let Some(example) = &first_unparsable {
+        tracing::warn!(
+            "{}/{} library entries have an unparsable modified sequence, so \
+             sequence features are off for the whole library (first: {:?})",
+            n_unparsable,
+            n_rows,
+            example
+        );
+    }
 
     if n_averagine_fallback > 0 {
         tracing::warn!(
@@ -285,6 +301,7 @@ fn finalize_reference_library(
     let report = LoadReport {
         n_rows,
         n_averagine_fallback,
+        n_unparsable_sequences: n_unparsable,
         sequence_features,
     };
 
