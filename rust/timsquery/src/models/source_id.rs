@@ -6,9 +6,14 @@
 //!
 //! Ids are polymorphic because formats disagree: JSON targets carry integers,
 //! DIA-NN carries `transition_group_id` / the `.speclib` entry name, which are
-//! strings. Neither is coerced into the other's shape — a numeric id stays a
-//! JSON number so Carafe's `"id": 7` is unchanged, and a text id stays a
-//! string.
+//! strings.
+//!
+//! The shape is preserved where a consumer distinguishes the two, which today
+//! is the JSON result path only: Carafe reads `id` with fastjson and keys
+//! results by it, so `"id": 7` must stay a bare number. The parquet writer does
+//! not distinguish — both id columns are `Utf8` and a numeric id is written as
+//! its digits — because a search result is read by column type, not by the
+//! shape of one value.
 
 use serde::{
     Deserialize,

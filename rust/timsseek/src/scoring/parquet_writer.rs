@@ -26,6 +26,9 @@ use super::results::FinalResult;
 ///   already the caller's id but was truncated to 32 bits; `decoy_group_id`
 ///   used to be the arena row position and is now an id declared by the input
 ///   or minted at load.
+/// - 3: both became Utf8, because an id keeps the shape its source used and
+///   DIA-NN names its precursors with a string (`transition_group_id`). A
+///   numeric id is written as its digits.
 pub const RESULTS_FORMAT_VERSION: u32 = 3;
 
 // ---------------------------------------------------------------------------
