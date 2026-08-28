@@ -2,6 +2,7 @@ use crate::Target;
 use crate::ion::{
     IonAnnot,
     IonParsingError,
+    UnknownIonCounter,
 };
 use serde::{
     Deserialize,
@@ -309,7 +310,7 @@ fn parse_precursor_group(
     let mut fragment_mzs = Vec::with_capacity(fragment_rows.len());
     buffers.fragment_labels.clear();
     let mut relative_intensities = Vec::with_capacity(fragment_rows.len());
-    let mut num_unknown_losses = 0u8;
+    let mut unknown_ions = UnknownIonCounter::new();
 
     for (i, row) in fragment_rows.iter().enumerate() {
         let fragment_mz = row.product_mz;
@@ -348,8 +349,7 @@ fn parse_precursor_group(
                      falling back to unknown ion",
                     frag_type, i
                 );
-                num_unknown_losses = num_unknown_losses.saturating_add(1);
-                IonAnnot::try_new('?', Some(num_unknown_losses), frag_charge as i8, 0)?
+                unknown_ions.next(frag_charge as i8)?
             }
         };
 

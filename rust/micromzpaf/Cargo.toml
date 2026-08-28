@@ -8,5 +8,7 @@ license.workspace = true
 serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
 
-# Workspace-inherited deps
-rustyms = { workspace = true }
+[dev-dependencies]
+# Only to pin that `IonAnnot` serialises as its mzPAF string rather than the
+# packed word.
+serde_json = { workspace = true }
