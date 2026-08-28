@@ -120,6 +120,10 @@ pub struct CalibrantCandidate {
     pub score: f32,
     pub apex_rt: ObservedRTSeconds<f32>,
     pub speclib_index: FlatIdx,
+    /// The id this row reports, carried alongside the position because the
+    /// calibration dashboard keys on something a human can recognise and a
+    /// position must not leave the crate.
+    pub library_id: u64,
     pub library_rt: LibraryRT<f32>,
 }
 
@@ -921,6 +925,7 @@ impl<I: ScorerQueriable> Scorer<I> {
                             score: loc.score,
                             apex_rt: ObservedRTSeconds(loc.retention_time_ms as f32 / 1000.0),
                             speclib_index: flat,
+                            library_id: q.library_id(),
                             library_rt: LibraryRT(q.rt_seconds()),
                         };
                         if let Err(reason) = heap.push(cand) {
