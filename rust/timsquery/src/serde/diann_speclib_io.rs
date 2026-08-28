@@ -30,7 +30,11 @@ use super::library_file::{
     TargetReadingError,
     TargetTable,
 };
-use crate::ion::IonAnnot;
+use crate::ion::{
+    IonAnnot,
+    IonSeriesOrdinal,
+    NeutralLoss,
+};
 use crate::models::{
     Row,
     TargetCapabilities,
@@ -572,9 +576,9 @@ pub struct SpeclibDecodeStats {
     /// Fragments flagged `ExcludeFromAssay` (`type & 0x80`). Kept (see
     /// `map_entry`); counted for reporting only.
     pub exclude_flagged: usize,
-    /// Fragments with a neutral loss (`loss != 0`). `IonAnnot` can represent
-    /// these; what is missing is the DIA-NN loss-code mapping (see #105), so
-    /// they are dropped and counted to keep the cost visible.
+    /// Fragments whose neutral-loss code `loss_from_code` does not map. Water
+    /// and ammonia are mapped and kept; anything else is dropped rather than
+    /// guessed, and counted so the cost stays visible.
     pub loss_dropped: usize,
     /// Fragments whose ion-type code or recovered series was unusable.
     pub unknown_ion_dropped: usize,
@@ -703,6 +707,28 @@ fn append_arena(dst: &mut TargetColumns<IonAnnot>, mut src: TargetColumns<IonAnn
     } = src;
 }
 
+/// DIA-NN's neutral-loss code (`Product` byte 11) as a [`NeutralLoss`].
+///
+/// The numbering is not documented anywhere I could find, so it was measured off
+/// a real library: for fragments that differ *only* in this byte,
+/// `(no_loss_mz - lossy_mz) * charge` is the neutral mass. On
+/// `diann-hela-diapasef-lib.speclib` code 1 gives 18.011 across 47 pairs and
+/// code 2 gives 17.027 across 37, which are water and ammonia and nothing else
+/// within half a dalton. `loss_codes_are_water_and_ammonia` re-derives that from
+/// the fixture rather than trusting this comment.
+///
+/// `None` for any other code -- the caller drops and counts it. Guessing would
+/// be worse than dropping: a wrong loss puts a real m/z on a label that
+/// collides with a different real fragment.
+fn loss_from_code(code: u8) -> Option<NeutralLoss> {
+    match code {
+        0 => Some(NeutralLoss::None),
+        1 => Some(NeutralLoss::Water),
+        2 => Some(NeutralLoss::Ammonia),
+        _ => None,
+    }
+}
+
 /// Map a decoded target `EntryView` directly into the columnar arena, folding
 /// drop counters into `stats` and appending each kept fragment's reference
 /// intensity to `frag_intens` IN THE SAME ORDER as the pushed fragment labels
@@ -767,13 +793,18 @@ fn map_entry(
         if f.typ() & 0x80 != 0 {
             stats.exclude_flagged += 1;
         }
-        // `IonAnnot` can represent neutral losses, but the map from DIA-NN's
-        // loss code byte to `NeutralLoss` is not written, so these are dropped.
-        // The `loss_dropped` assertion in the tests below measures the cost. #105
-        if f.loss() != 0 {
-            stats.loss_dropped += 1;
-            continue;
-        }
+        let loss = match loss_from_code(f.loss()) {
+            Some(loss) => loss,
+            None => {
+                warn!(
+                    "speclib entry {:?}: unknown neutral-loss code {}; dropping fragment",
+                    name,
+                    f.loss()
+                );
+                stats.loss_dropped += 1;
+                continue;
+            }
+        };
 
         let type_char = match f.typ() & 0x7F {
             1 => 'b',
@@ -830,7 +861,9 @@ fn map_entry(
             }
         };
 
-        let ion = match IonAnnot::try_new(type_char, Some(series as u8), charge, 0) {
+        let ion = match IonSeriesOrdinal::from_series_char(type_char, Some(series as u8))
+            .and_then(|series| IonAnnot::new(series, loss, charge, 0))
+        {
             Ok(ion) => ion,
             Err(e) => {
                 warn!(
@@ -1158,10 +1191,20 @@ mod tests {
         let (geom, _intens, stats, _eof) =
             parse_speclib_reader(std::io::BufReader::new(file)).unwrap();
         // Reference parser: 8384 ExcludeFromAssay-flagged (kept, counted only),
-        // 152 neutral-loss dropped, no dc != 0 entries.
+        // no dc != 0 entries.
         assert_eq!(stats.exclude_flagged, 8384);
-        assert_eq!(stats.loss_dropped, 152);
         assert_eq!(stats.decoys_dropped, 0);
+        // Every neutral loss in this fixture is water or ammonia, both of which
+        // `loss_from_code` maps, so nothing is dropped for its loss. This was
+        // 152 before that mapping existed.
+        assert_eq!(stats.loss_dropped, 0);
+        // And they arrive as labelled losses rather than as bare ions.
+        let with_loss = geom
+            .frag_labels
+            .iter()
+            .filter(|l| l.loss() != NeutralLoss::None)
+            .count();
+        assert_eq!(with_loss, 152, "every dropped loss is now a labelled one");
         // Exclude-flagged fragments are present in the output, not dropped:
         // entry[0] keeps its flagged y9.
         assert!(
@@ -1170,5 +1213,93 @@ mod tests {
                 .any(|l| *l == IonAnnot::try_new('y', Some(9), 1, 0).unwrap()),
             "flagged y9 must be kept"
         );
+    }
+
+    /// Re-derives [`loss_from_code`] from the fixture instead of trusting it.
+    ///
+    /// DIA-NN's loss numbering is undocumented, so the mapping was measured: a
+    /// lossy fragment and its no-loss sibling differ by exactly the loss, so
+    /// `(base_mz - lossy_mz) * charge` is the neutral mass. If a future fixture
+    /// or DIA-NN version renumbers the codes, this fails here rather than
+    /// silently relabelling peaks.
+    ///
+    /// The tolerance is 3 mDa: the m/z values on disk are `f32`, and DIA-NN's
+    /// own loss constants are a shade off the monoisotopic masses (water reads
+    /// 18.011 against 18.0106). That is far tighter than the gap to any other
+    /// candidate loss, which is what makes the identification safe.
+    #[test]
+    fn loss_codes_are_water_and_ammonia() {
+        use std::collections::BTreeMap;
+        let mut buf = Vec::new();
+        std::fs::File::open(fixture_path())
+            .unwrap()
+            .read_to_end(&mut buf)
+            .unwrap();
+        let lib = SpecLib::open(std::io::Cursor::new(&buf[..])).unwrap();
+
+        let mut hist: BTreeMap<u8, usize> = BTreeMap::new();
+        let mut deltas: BTreeMap<u8, Vec<f64>> = BTreeMap::new();
+
+        let mut c = Cursor::new(lib.data.bytes());
+        c.pos = lib.entries_start;
+        for _ in 0..lib.n_entries {
+            let entry = read_entry(&mut c, lib.version, &lib.pg_ids).unwrap();
+            let frags: Vec<(u8, u8, u8, u8, f64)> = entry
+                .peptide
+                .fragments()
+                .map(|f| {
+                    (
+                        f.typ() & 0x7F,
+                        f.index(),
+                        f.charge(),
+                        f.loss(),
+                        f.mz() as f64,
+                    )
+                })
+                .collect();
+            for &(_, _, _, loss, _) in &frags {
+                *hist.entry(loss).or_default() += 1;
+            }
+            for &(t, i, c, loss, mz) in &frags {
+                if loss == 0 || c == 0 {
+                    continue;
+                }
+                if let Some(&(_, _, _, _, base)) = frags
+                    .iter()
+                    .find(|&&(t2, i2, c2, l2, _)| (t2, i2, c2, l2) == (t, i, c, 0))
+                {
+                    deltas.entry(loss).or_default().push((base - mz) * c as f64);
+                }
+            }
+        }
+        // Only codes this build maps appear. A new one must be measured, not
+        // guessed, so it fails here rather than being dropped in silence.
+        for &code in hist.keys() {
+            assert!(
+                loss_from_code(code).is_some(),
+                "unmapped loss code {code} in the fixture: measure it before mapping it"
+            );
+        }
+        // The codes carrying a loss, and the neutral mass each one measures at.
+        let expected = [
+            (1u8, NeutralLoss::Water, 18.0106_f64),
+            (2, NeutralLoss::Ammonia, 17.0265),
+        ];
+        assert_eq!(
+            deltas.keys().copied().collect::<Vec<_>>(),
+            expected.iter().map(|e| e.0).collect::<Vec<_>>(),
+            "the fixture's set of lossy codes changed"
+        );
+        for (code, loss, mass) in expected {
+            assert_eq!(loss_from_code(code), Some(loss));
+            let observed = &deltas[&code];
+            assert!(!observed.is_empty());
+            for &d in observed {
+                assert!(
+                    (d - mass).abs() < 3e-3,
+                    "code {code} measures {d:.4}, not {mass:.4} -- it is not {loss:?}"
+                );
+            }
+        }
     }
 }

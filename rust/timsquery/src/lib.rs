@@ -58,6 +58,7 @@ pub mod ion {
         IonAnnot,
         IonParsingError,
         IonSeriesOrdinal,
+        NeutralLoss,
         Series,
         UnknownIonCounter,
     };
