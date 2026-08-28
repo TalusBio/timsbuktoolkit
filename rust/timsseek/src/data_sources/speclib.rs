@@ -972,7 +972,11 @@ mod tests {
         assert_eq!(n_target_indices, 2, "Should have 2 unique targets");
         for tgt in lib.geom.rows() {
             let variants: Vec<u8> = (0..3)
-                .map(|v| RefQuery::new(lib, tgt, v).geom().variant())
+                .map(|v| {
+                    RefQuery::new(lib, lib.geom.flat_for(tgt, v))
+                        .geom()
+                        .variant()
+                })
                 .collect();
             assert_eq!(
                 variants,
@@ -1004,9 +1008,9 @@ mod tests {
         use timsquery::models::capabilities::DECOY_CH2_OFFSET_DA;
 
         for tgt in lib.geom.rows() {
-            let target = RefQuery::new(lib, tgt, 0);
-            let plus = RefQuery::new(lib, tgt, 1);
-            let minus = RefQuery::new(lib, tgt, 2);
+            let target = RefQuery::new(lib, lib.geom.flat_for(tgt, 0));
+            let plus = RefQuery::new(lib, lib.geom.flat_for(tgt, 1));
+            let minus = RefQuery::new(lib, lib.geom.flat_for(tgt, 2));
 
             let target_mz = target.mono_precursor_mz();
             let charge = target.precursor_charge();

@@ -51,11 +51,10 @@ impl ReferenceLibrary {
         self.len() == 0
     }
 
-    /// Maps a flat `0..len()` index to a `(row, variant)` `RefQuery`, delegating
-    /// the flat->(row,variant) math to the arena's `split_flat` transform.
+    /// Maps a scored slot to its `RefQuery`; the flat->(row, variant) transform
+    /// belongs to the arena.
     pub fn item_at(&self, flat: FlatIdx) -> RefQuery<'_> {
-        let (row, variant) = self.geom.split_flat(flat);
-        RefQuery::new(self, row, variant)
+        RefQuery::new(self, flat)
     }
 
     pub fn iter(&self) -> impl Iterator<Item = RefQuery<'_>> {
@@ -103,10 +102,10 @@ impl TryFrom<TargetTable> for ReferenceLibrary {
 }
 
 impl<'a> RefQuery<'a> {
-    pub fn new(lib: &'a ReferenceLibrary, tgt: RowIdx, variant: u8) -> Self {
+    pub fn new(lib: &'a ReferenceLibrary, flat: FlatIdx) -> Self {
         Self {
             lib,
-            geom: Query::new(&lib.geom, tgt, variant),
+            geom: Query::new(&lib.geom, flat),
         }
     }
 
@@ -213,11 +212,6 @@ impl<'a> QueryGeom for RefQuery<'a> {
     }
 }
 
-/// Arm-neutral identity accessors the scoring loop needs but that are NOT part
-/// of `QueryGeom` / `ExpectedIntensity`. Implemented by the `RefQuery`
-/// flyweight so the batch scoring loop stays generic (monomorphized,
-/// zero-heap) over the concrete type — see
-/// `Scorer::{prescore,score_calibrated}_batch_impl`.
 /// Which row a scored result came from, and which group it competes in.
 ///
 /// The two travel together because the scorer holds the run's raw-data index,
@@ -230,6 +224,11 @@ pub struct RowHandles {
     pub group: GroupCode,
 }
 
+/// Arm-neutral identity accessors the scoring loop needs but that are NOT part
+/// of `QueryGeom` / `ExpectedIntensity`. Implemented by the `RefQuery`
+/// flyweight so the batch scoring loop stays generic (monomorphized,
+/// zero-heap) over the concrete type — see
+/// `Scorer::{prescore,score_calibrated}_batch_impl`.
 pub trait ScoredIdentity {
     /// Whether this item is a target (vs a decoy variant).
     fn is_target(&self) -> bool;
@@ -337,7 +336,7 @@ mod tests {
     #[test]
     fn expected_fragments_pair_labels_with_intensities() {
         let lib = tiny_ref_lib();
-        let q = RefQuery::new(&lib, row(&lib, 0), 0);
+        let q = RefQuery::new(&lib, lib.geom.flat_for(row(&lib, 0), 0));
         let pairs: Vec<_> = q.iter_expected_fragments().collect();
         assert_eq!(pairs.len(), 2);
         assert_eq!(pairs[0].0, IonAnnot::try_from("y3").unwrap());
@@ -348,7 +347,7 @@ mod tests {
     #[test]
     fn precursor_envelope_is_max_normalized_three_peaks() {
         let lib = tiny_ref_lib();
-        let q = RefQuery::new(&lib, row(&lib, 0), 0);
+        let q = RefQuery::new(&lib, lib.geom.flat_for(row(&lib, 0), 0));
         let env = q.expected_precursor_envelope();
         assert_eq!(env.len(), 3);
         // Envelopes are MAX-normalized (base peak = 1.0), matching the
@@ -366,10 +365,10 @@ mod tests {
     #[test]
     fn decoy_variant_reuses_target_intensities() {
         let lib = tiny_ref_lib();
-        let t: Vec<_> = RefQuery::new(&lib, row(&lib, 0), 0)
+        let t: Vec<_> = RefQuery::new(&lib, lib.geom.flat_for(row(&lib, 0), 0))
             .iter_expected_fragments()
             .collect();
-        let d: Vec<_> = RefQuery::new(&lib, row(&lib, 0), 1)
+        let d: Vec<_> = RefQuery::new(&lib, lib.geom.flat_for(row(&lib, 0), 1))
             .iter_expected_fragments()
             .collect();
         assert_eq!(t, d, "intensities are variant-independent");

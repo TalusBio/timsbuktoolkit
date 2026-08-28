@@ -27,9 +27,8 @@ pub use index::{
 /// only be obtained from the arena and handed straight back to it.
 ///
 /// Construction is `pub(super)`, i.e. this file, so the arena is the only thing
-/// that mints one. `RowIdx` is `pub(in crate::models)` only because the
-/// flyweight in `query_handle` packs and unpacks it; unpacking is the last
-/// place outside here that builds one.
+/// that mints one — including a `RowIdx`, since the flyweight now stores the
+/// handle it was given rather than packing and rebuilding it.
 mod index {
     /// A stored row: `0..n_rows()`.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -54,11 +53,11 @@ mod index {
     pub struct GroupCode(u32);
 
     impl RowIdx {
-        pub(in crate::models) fn new(row: u32) -> Self {
+        pub(super) fn new(row: u32) -> Self {
             Self(row)
         }
 
-        pub(in crate::models) fn get(self) -> usize {
+        pub(super) fn get(self) -> usize {
             self.0 as usize
         }
     }
@@ -83,26 +82,22 @@ mod index {
         }
     }
 
-    /// `u32::MAX`, not 0. A defaulted index exists only as a placeholder — a
-    /// `#[serde(skip)]` field, a test fixture — and 0 is a valid row in every
-    /// non-empty arena, so a placeholder that leaked would read row 0 and look
-    /// right. `u32::MAX` panics on access instead.
+    /// `u32::MAX`, not 0, because 0 is a valid row in every non-empty arena: a
+    /// placeholder that leaked would read row 0 and look right, where `u32::MAX`
+    /// panics on access. A defaulted group likewise competes with the other
+    /// placeholders and with nothing real, rather than folding into the arena's
+    /// first group.
+    ///
+    /// These exist for exactly one caller: `Identity::sample_default()`, which
+    /// `#[derive(ScoreBlock)]` deliberately leaves un-gated so other crates'
+    /// tests can build a fixture. Nothing in production defaults a handle. There
+    /// is no `Default for FlatIdx` because nothing ever wanted one.
     impl Default for RowIdx {
         fn default() -> Self {
             Self(u32::MAX)
         }
     }
 
-    impl Default for FlatIdx {
-        fn default() -> Self {
-            Self(u32::MAX)
-        }
-    }
-
-    /// Same reasoning, and the same placeholder value: a defaulted group is one
-    /// nothing has assigned yet. `u32::MAX` makes such rows compete with each
-    /// other and with nothing real, which is visible; 0 would silently fold
-    /// them into the arena's first group.
     impl Default for GroupCode {
         fn default() -> Self {
             Self(u32::MAX)
@@ -485,15 +480,15 @@ impl<L: KeyLike> TargetColumns<L> {
             tracing::warn!("library ships decoys; downgrading LazyMassShift -> Passthrough");
             self.caps.decoys = DecoyStrategy::Passthrough;
         }
-        // The flyweight packs the decoy variant into `VARIANT_BITS` bits. Fail
-        // loud here (where the invariant is established) rather than silently
-        // corrupting the packed handle in a release build. The free fn is used
-        // because `seal` is not bounded on `DecoyShift`.
+        // A decoy variant is a `u8` all the way from `split_flat`'s `% vpr`
+        // cast to the flyweight. Fail loud here, where the invariant is
+        // established, rather than silently truncating a variant index in a
+        // release build. The free fn is used because `seal` is not bounded on
+        // `DecoyShift`.
         let vpr = variants_per_row_for(self.caps.decoys);
         assert!(
-            vpr <= (1usize << QueryRef::<'_, L>::VARIANT_BITS),
-            "variants_per_row {vpr} exceeds the {}-bit decoy-variant packing budget",
-            QueryRef::<'_, L>::VARIANT_BITS,
+            vpr <= u8::MAX as usize + 1,
+            "variants_per_row {vpr} exceeds what a u8 decoy variant can name"
         );
         self.precursor_mz.shrink_to_fit();
         self.charge.shrink_to_fit();
@@ -570,10 +565,25 @@ impl<L: KeyLike + DecoyShift> TargetColumns<L> {
         (RowIdx::new(row), (flat % vpr) as u8)
     }
 
+    /// The inverse of [`Self::split_flat`]: name one of a row's scored slots.
+    ///
+    /// Both directions live here so the encoding has one owner. This is also the
+    /// only way to pair a row with a variant, and it checks the pairing — a
+    /// caller that could build the pair itself could name a variant the library
+    /// does not expand into, which would read a real but wrong slot.
+    pub fn flat_for(&self, row: RowIdx, variant: u8) -> FlatIdx {
+        let vpr = self.variants_per_row();
+        assert!(
+            (variant as usize) < vpr,
+            "variant {variant} does not exist in a library with {vpr} variants per row"
+        );
+        assert!(row.get() < self.n_rows(), "row is out of range");
+        FlatIdx::new((row.get() * vpr + variant as usize) as u32)
+    }
+
     /// Scored slot -> `(row, variant)` flyweight.
     pub fn item_at(&self, flat: FlatIdx) -> QueryRef<'_, L> {
-        let (row, variant) = self.split_flat(flat);
-        QueryRef::new(self, row, variant)
+        QueryRef::new(self, flat)
     }
 
     /// A slot is a target iff its stored row is a target AND it is the
