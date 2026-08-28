@@ -704,12 +704,9 @@ mod carafe_output_contract {
                 .to_string()
         }
 
+        assert_eq!(name(PossibleAggregator::Spectrum), "spectrum-aggregator");
         assert_eq!(
-            name(PossibleAggregator::SpectrumAggregator),
-            "spectrum-aggregator"
-        );
-        assert_eq!(
-            name(PossibleAggregator::ChromatogramAggregator),
+            name(PossibleAggregator::Chromatogram),
             "chromatogram-aggregator"
         );
         assert_eq!(name(SerializationFormat::Ndjson), "ndjson");

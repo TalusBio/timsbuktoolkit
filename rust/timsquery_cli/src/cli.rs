@@ -28,11 +28,17 @@ pub enum Commands {
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]
+/// The CLI value strings are pinned with `#[value(name)]`: they are a public
+/// surface (Carafe passes `chromatogram-aggregator`), so they must not follow
+/// the variant names if those are ever renamed again.
 pub enum PossibleAggregator {
-    PointIntensityAggregator,
+    #[value(name = "point-intensity-aggregator")]
+    PointIntensity,
     #[default]
-    ChromatogramAggregator,
-    SpectrumAggregator,
+    #[value(name = "chromatogram-aggregator")]
+    Chromatogram,
+    #[value(name = "spectrum-aggregator")]
+    Spectrum,
 }
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, clap::ValueEnum)]

@@ -3,6 +3,9 @@ use OptionallyRestricted::{
     Unrestricted,
 };
 use half::f16;
+
+/// One synthetic query: (mz range, rt range, mobility range).
+type BenchQuery = ((f32, f32), (f32, f32), (f16, f16));
 use rand::SeedableRng;
 use timscentroid::StorageLocation;
 use timscentroid::lazy::LazyIndexedTimstofPeaks;
@@ -176,10 +179,7 @@ fn main() {
     }
 }
 
-fn build_queries(
-    rng: &mut impl rand::Rng,
-    num_queries: usize,
-) -> Vec<((f32, f32), (f32, f32), (f16, f16))> {
+fn build_queries(rng: &mut impl rand::Rng, num_queries: usize) -> Vec<BenchQuery> {
     let mut out = Vec::with_capacity(num_queries);
     for _ in 0..num_queries {
         let prec_start: f32 = rng.random_range(600.0..800.0);

@@ -8,8 +8,10 @@ pub enum DecoyMode {
     EdgeMutate,
 }
 
-impl DecoyMode {
-    pub fn from_str(s: &str) -> Result<Self, String> {
+impl std::str::FromStr for DecoyMode {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
             "none" => Ok(Self::None),
             "reverse" => Ok(Self::Reverse),
@@ -67,6 +69,7 @@ pub fn generate_decoy(seq: &str, mode: DecoyMode) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::str::FromStr;
 
     #[test]
     fn test_reverse_matches_python() {

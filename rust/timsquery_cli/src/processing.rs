@@ -94,10 +94,10 @@ impl<T: KeyLike + Display> AggregatorContainer<T> {
         T: DecoyShift,
     {
         Ok(match aggregator {
-            PossibleAggregator::PointIntensityAggregator => AggregatorContainer::Point(
+            PossibleAggregator::PointIntensity => AggregatorContainer::Point(
                 queries.iter().map(PointIntensityAggregator::new).collect(),
             ),
-            PossibleAggregator::ChromatogramAggregator => {
+            PossibleAggregator::Chromatogram => {
                 let collectors = queries
                     .iter()
                     .map(|q| {
@@ -115,7 +115,7 @@ impl<T: KeyLike + Display> AggregatorContainer<T> {
                     .collect::<Result<Vec<_>, _>>()?;
                 AggregatorContainer::Chromatogram(collectors)
             }
-            PossibleAggregator::SpectrumAggregator => {
+            PossibleAggregator::Spectrum => {
                 AggregatorContainer::Spectrum(queries.iter().map(SpectralCollector::new).collect())
             }
         })
