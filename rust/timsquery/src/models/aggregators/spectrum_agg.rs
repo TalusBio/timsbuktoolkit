@@ -33,7 +33,7 @@ const SPEC_INLINE_CAP: usize = 13;
 #[derive(Debug, Clone, Serialize)]
 pub struct SpectralCollector<T: KeyLike, V: Default + ValueLike> {
     // Query scalars carried from eg at construction / reset.
-    pub id: u64,
+    pub id: crate::models::OwnedSourceId,
     pub mobility_ook0: f32,
     pub rt_seconds: f32,
     pub precursor_mono_mz: f64,
@@ -53,7 +53,7 @@ pub struct SpectralCollector<T: KeyLike, V: Default + ValueLike> {
 impl<T: KeyLike, V: ValueLike + Default> SpectralCollector<T, V> {
     pub fn new(eg: &impl QueryGeom<Label = T>) -> Self {
         let mut out = Self {
-            id: 0,
+            id: Default::default(),
             mobility_ook0: 0.0,
             rt_seconds: 0.0,
             precursor_mono_mz: 0.0,
@@ -82,7 +82,7 @@ impl<T: KeyLike, V: ValueLike + Default> SpectralCollector<T, V> {
         rt_override: Option<f32>,
         mobility_override: Option<f32>,
     ) {
-        self.id = eg.output_id();
+        self.id = eg.output_id().to_owned_id();
         self.mobility_ook0 = mobility_override.unwrap_or_else(|| eg.mobility_ook0());
         self.rt_seconds = rt_override.unwrap_or_else(|| eg.rt_seconds());
         self.precursor_mono_mz = eg.mono_precursor_mz();
@@ -144,10 +144,6 @@ impl<T: KeyLike, V: ValueLike + Default> SpectralCollector<T, V> {
 }
 
 impl<T: KeyLike, V: Default + ValueLike> HasQueryData<T> for SpectralCollector<T, V> {
-    fn id(&self) -> u64 {
-        self.id
-    }
-
     fn precursor_mz_limits(&self) -> (f64, f64) {
         self.precursor_mz_limits
     }

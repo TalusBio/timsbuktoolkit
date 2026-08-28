@@ -548,7 +548,7 @@ impl ViewerCalibrationState {
                                 score: apex.score,
                                 apex_rt: ObservedRTSeconds(apex.retention_time_ms as f32 / 1000.0),
                                 speclib_index: elution_groups.flat(eg_idx),
-                                library_id: elution_group.id(),
+                                library_id: elution_group.id().to_owned_id(),
                                 library_rt: LibraryRT(elution_group.rt_seconds()),
                             });
                         }

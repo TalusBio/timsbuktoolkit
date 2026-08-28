@@ -26,7 +26,7 @@ use super::results::FinalResult;
 ///   already the caller's id but was truncated to 32 bits; `decoy_group_id`
 ///   used to be the arena row position and is now an id declared by the input
 ///   or minted at load.
-pub const RESULTS_FORMAT_VERSION: u32 = 2;
+pub const RESULTS_FORMAT_VERSION: u32 = 3;
 
 // ---------------------------------------------------------------------------
 // Build a RecordBatch from a slice of FinalResult
@@ -175,8 +175,8 @@ mod tests {
     /// keeping it stable.
     const GOLDEN_SCHEMA: &[(&str, &str, bool)] = &[
         ("sequence", "Utf8", false),
-        ("library_id", "UInt64", false),
-        ("decoy_group_id", "UInt64", false),
+        ("library_id", "Utf8", false),
+        ("decoy_group_id", "Utf8", false),
         ("is_target", "Boolean", false),
         ("precursor_mz", "Float64", false),
         ("precursor_charge", "UInt8", false),

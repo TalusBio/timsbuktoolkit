@@ -25,7 +25,6 @@ use super::spectronaut_io::{
 };
 use crate::ion::IonAnnot;
 use crate::models::{
-    LibraryId,
     SourceIdError,
     TargetCapabilities,
     TargetColumns,
@@ -408,8 +407,11 @@ fn set_source_ids_from<L: KeyLike, T: KeyLike>(
     geom: &mut TargetColumns<L>,
     egs: &[Target<T>],
 ) -> Result<(), TargetReadingError> {
-    let ids = egs.iter().map(|eg| LibraryId::new(eg.id())).collect();
-    geom.set_source_ids(ids)
+    let ids = egs
+        .iter()
+        .map(|eg| eg.id().to_owned_id())
+        .collect::<Vec<_>>();
+    geom.set_source_ids_owned(ids)
         .map_err(TargetReadingError::SourceId)
 }
 

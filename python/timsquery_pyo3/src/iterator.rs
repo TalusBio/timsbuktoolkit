@@ -26,8 +26,7 @@ pub enum ToleranceSource {
 /// collector pool is never exposed — it reuses Rust-side buffers across chunks.
 #[pyclass(frozen)]
 pub struct PyChromatogramArrays {
-    #[pyo3(get)]
-    id: u64,
+    id: timsquery::models::OwnedSourceId,
     precursor_intensities: Py<PyAny>,
     fragment_intensities: Py<PyAny>,
     #[pyo3(get)]
@@ -42,6 +41,11 @@ pub struct PyChromatogramArrays {
 
 #[pymethods]
 impl PyChromatogramArrays {
+    #[getter]
+    fn id<'py>(&self, py: pyo3::Python<'py>) -> pyo3::PyResult<pyo3::Bound<'py, pyo3::PyAny>> {
+        crate::source_id_to_py(py, &self.id)
+    }
+
     #[getter]
     fn precursor_intensities<'py>(&self, py: Python<'py>) -> Bound<'py, PyAny> {
         self.precursor_intensities.clone_ref(py).into_bound(py)
@@ -72,7 +76,7 @@ fn extract_arrays(
     let rt = collector.rt_range_milis();
 
     Ok(PyChromatogramArrays {
-        id: collector.id,
+        id: collector.id.clone(),
         precursor_intensities: prec_np.into_any().unbind(),
         fragment_intensities: frag_np.into_any().unbind(),
         precursor_labels: collector

@@ -10,7 +10,7 @@ const POINT_INLINE_CAP: usize = 13;
 
 #[derive(Debug, Clone, Serialize)]
 pub struct PointIntensityAggregator<T: KeyLike> {
-    pub id: u64,
+    pub id: crate::models::OwnedSourceId,
     pub mobility_ook0: f32,
     pub rt_seconds: f32,
     pub precursor_mono_mz: f64,
@@ -42,7 +42,7 @@ impl<T: KeyLike> PointIntensityAggregator<T> {
             fragment_mzs.push(mz);
         }
         Self {
-            id: eg.output_id(),
+            id: eg.output_id().to_owned_id(),
             mobility_ook0: eg.mobility_ook0(),
             rt_seconds: eg.rt_seconds(),
             precursor_mono_mz: eg.mono_precursor_mz(),
@@ -58,10 +58,6 @@ impl<T: KeyLike> PointIntensityAggregator<T> {
 }
 
 impl<T: KeyLike> HasQueryData<T> for PointIntensityAggregator<T> {
-    fn id(&self) -> u64 {
-        self.id
-    }
-
     fn precursor_mz_limits(&self) -> (f64, f64) {
         self.precursor_mz_limits
     }

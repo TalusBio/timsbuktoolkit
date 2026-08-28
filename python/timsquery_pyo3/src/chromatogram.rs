@@ -63,8 +63,8 @@ impl PyChromatogramResult {
     }
 
     #[getter]
-    fn id(&self) -> u64 {
-        self.collector.id
+    fn id<'py>(&self, py: pyo3::Python<'py>) -> pyo3::PyResult<pyo3::Bound<'py, pyo3::PyAny>> {
+        crate::source_id_to_py(py, &self.collector.id)
     }
 
     fn __repr__(&self) -> String {

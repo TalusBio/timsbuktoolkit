@@ -3,7 +3,10 @@
 //! never add a *score* here.
 
 use std::sync::Arc;
-use timsquery::models::RowIdx;
+use timsquery::models::{
+    OwnedSourceId,
+    RowIdx,
+};
 
 use crate::models::DecoyMarking;
 use crate::models::sequence::Peptide;
@@ -18,8 +21,8 @@ use crate::scoring::blocks::{
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Identity {
     pub peptide: Peptide,
-    pub library_id: u64,
-    pub decoy_group_id: u64,
+    pub library_id: OwnedSourceId,
+    pub decoy_group_id: OwnedSourceId,
     /// The arena row this result came from. Opaque and unserializable, so it
     /// can order the q-value tie-break without a caller-supplied id reaching
     /// the sort (`library_id` is caller-supplied whenever the file had one).
@@ -43,8 +46,8 @@ impl Identity {
     pub fn compute(metadata: &PeptideMetadata) -> Self {
         Self {
             peptide: metadata.digest.clone(),
-            library_id: metadata.library_id,
-            decoy_group_id: metadata.digest.decoy_group,
+            library_id: metadata.library_id.clone(),
+            decoy_group_id: metadata.digest.decoy_group.clone(),
             row: metadata.row,
             precursor_mz: metadata.ref_precursor_mz,
             precursor_charge: metadata.charge,
@@ -64,8 +67,8 @@ impl Identity {
         self.competition_key() == other.competition_key()
     }
 
-    pub fn competition_key(&self) -> (u64, u8) {
-        (self.decoy_group_id, self.precursor_charge)
+    pub fn competition_key(&self) -> (&OwnedSourceId, u8) {
+        (&self.decoy_group_id, self.precursor_charge)
     }
 
     /// The observed mobility is a sentinel on non-scoreable axes; drop the
@@ -92,11 +95,11 @@ impl Identity {
             peptide: Peptide {
                 raw: Arc::from("PEPTIDEK"),
                 decoy: DecoyMarking::Target,
-                decoy_group: 0,
+                decoy_group: OwnedSourceId::Numeric(0),
                 sequence_features: false,
             },
-            library_id: 1,
-            decoy_group_id: 0,
+            library_id: OwnedSourceId::Numeric(1),
+            decoy_group_id: OwnedSourceId::Numeric(0),
             row: RowIdx::default(),
             precursor_mz: 500.0,
             precursor_charge: 2,
@@ -109,8 +112,8 @@ impl Identity {
 impl ScoreBlock for Identity {
     fn columns(&self, o: &mut ColSink) {
         o.str("sequence", self.peptide.as_str());
-        o.u64("library_id", self.library_id);
-        o.u64("decoy_group_id", self.decoy_group_id);
+        o.str("library_id", &self.library_id.to_string());
+        o.str("decoy_group_id", &self.decoy_group_id.to_string());
         o.f64("precursor_mz", self.precursor_mz);
         o.u8("precursor_charge", self.precursor_charge);
         o.f32("precursor_mobility", self.precursor_mobility);
@@ -119,8 +122,8 @@ impl ScoreBlock for Identity {
 
     fn column_schema(o: &mut SchemaSink) {
         o.str("sequence");
-        o.u64("library_id");
-        o.u64("decoy_group_id");
+        o.str("library_id");
+        o.str("decoy_group_id");
         o.f64("precursor_mz");
         o.u8("precursor_charge");
         o.f32("precursor_mobility");

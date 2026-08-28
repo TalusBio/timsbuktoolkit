@@ -87,11 +87,11 @@ impl<Lib: Deref<Target = TargetColumns<L>>, L: KeyLike + DecoyShift> Query<Lib, 
 impl<Lib: Deref<Target = TargetColumns<L>>, L: KeyLike + DecoyShift> QueryGeom for Query<Lib, L> {
     type Label = L;
 
-    fn source_id(&self) -> Option<crate::models::LibraryId> {
+    fn source_id(&self) -> Option<crate::models::SourceId<'_>> {
         self.geom().source_id(self.row())
     }
 
-    fn output_id(&self) -> u64 {
+    fn output_id(&self) -> crate::models::SourceId<'_> {
         self.geom().output_id(self.row())
     }
 
@@ -158,6 +158,7 @@ mod tests {
     use crate::IonAnnot;
     use crate::models::TargetColumns;
     use crate::models::capabilities::*;
+    use crate::models::source_id::SourceId;
     use crate::traits::QueryGeom;
 
     fn one_target_lib() -> TargetColumns<IonAnnot> {
@@ -191,7 +192,7 @@ mod tests {
     fn target_variant_is_unshifted() {
         let lib = one_target_lib();
         let q = Query::new(&lib, RowIdx::new(0), 0);
-        assert_eq!(q.output_id(), 0);
+        assert_eq!(q.output_id(), SourceId::Numeric(0));
         assert!((q.mono_precursor_mz() - 654.855).abs() < 1e-9);
         let frags: Vec<_> = q.iter_fragments_refs().collect();
         assert!((frags[1].1 - 896.5).abs() < 1e-9);

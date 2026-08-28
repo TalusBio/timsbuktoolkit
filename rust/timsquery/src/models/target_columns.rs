@@ -6,6 +6,8 @@ use crate::models::capabilities::{
 use crate::models::query_handle::QueryRef;
 use crate::models::source_id::{
     LibraryId,
+    OwnedSourceId,
+    SourceId,
     SourceIdError,
     SourceIds,
 };
@@ -99,7 +101,7 @@ pub struct TargetColumns<L: KeyLike> {
     /// derived from the row position: group membership is a property of the
     /// analytes, and reading it off the arena layout only works for as long as
     /// the layout happens to encode it.
-    decoy_groups: Vec<u64>,
+    decoy_groups: Vec<OwnedSourceId>,
     // CSR prefix offsets (n+1)
     pub(crate) frag_off: Vec<u32>,
     pub(crate) seq_strip_off: Vec<u32>,
@@ -225,6 +227,12 @@ impl<L: KeyLike> TargetColumns<L> {
         Ok(())
     }
 
+    /// Attach ids of whichever shape the file used.
+    pub fn set_source_ids_owned(&mut self, ids: Vec<OwnedSourceId>) -> Result<(), SourceIdError> {
+        self.source_ids = SourceIds::owned(ids, self.n_rows())?;
+        Ok(())
+    }
+
     /// The rows of this arena, in storage order.
     pub fn rows(&self) -> impl Iterator<Item = RowIdx> + use<L> {
         (0..self.n_rows() as u32).map(RowIdx::new)
@@ -233,7 +241,7 @@ impl<L: KeyLike> TargetColumns<L> {
     /// Attach the competition groups a file declared. Call before `seal`,
     /// which otherwise mints one group per row. Rows sharing a value compete,
     /// so unlike source ids these are not required to be unique.
-    pub fn set_decoy_groups(&mut self, groups: Vec<u64>) -> Result<(), SourceIdError> {
+    pub fn set_decoy_groups(&mut self, groups: Vec<OwnedSourceId>) -> Result<(), SourceIdError> {
         if groups.len() != self.n_rows() {
             return Err(SourceIdError::LengthMismatch {
                 ids: groups.len(),
@@ -244,17 +252,27 @@ impl<L: KeyLike> TargetColumns<L> {
         Ok(())
     }
 
-    pub fn source_id(&self, tgt: RowIdx) -> Option<LibraryId> {
+    pub fn source_id(&self, tgt: RowIdx) -> Option<SourceId<'_>> {
         self.source_ids.get(tgt.get())
     }
 
     /// The id a result for row `tgt` carries. Always a source id: [`Self::seal`]
     /// mints them for formats that carry none, so a row position has no route
     /// into output.
-    pub fn output_id(&self, tgt: RowIdx) -> u64 {
+    pub fn output_id(&self, tgt: RowIdx) -> SourceId<'_> {
         self.source_id(tgt)
             .expect("sealed targets have source ids; seal() mints any that are missing")
-            .get()
+    }
+
+    /// Attach ids the file spelled as text, e.g. DIA-NN's
+    /// `transition_group_id`. Call after every `push_row`, before `seal`.
+    pub fn set_source_ids_text<I, S>(&mut self, ids: I) -> Result<(), SourceIdError>
+    where
+        I: IntoIterator<Item = S>,
+        S: AsRef<str>,
+    {
+        self.source_ids = SourceIds::text(ids, self.n_rows())?;
+        Ok(())
     }
 
     pub fn charge(&self, tgt: RowIdx) -> u8 {
@@ -348,7 +366,10 @@ impl<L: KeyLike> TargetColumns<L> {
                 "input declares no decoy groups; minting one per row, named by the row's \
                  own id. Stored decoys therefore compete alone, not against their target."
             );
-            self.decoy_groups = self.rows().map(|r| self.output_id(r)).collect();
+            self.decoy_groups = self
+                .rows()
+                .map(|r| self.output_id(r).to_owned_id())
+                .collect();
         }
         if matches!(self.caps.decoys, DecoyStrategy::LazyMassShift { .. })
             && self.is_decoy.iter().any(|&d| d)
@@ -457,8 +478,8 @@ impl<L: KeyLike + DecoyShift> TargetColumns<L> {
     /// The competition group this row belongs to, as an id — not a position.
     /// A row's decoy variants share its group, so exactly one member survives
     /// competition.
-    pub fn decoy_group(&self, tgt: RowIdx) -> u64 {
-        self.decoy_groups[tgt.get()]
+    pub fn decoy_group(&self, tgt: RowIdx) -> SourceId<'_> {
+        self.decoy_groups[tgt.get()].as_ref()
     }
 }
 
@@ -487,8 +508,8 @@ mod tests {
         }
         assert_eq!(c.source_id(RowIdx::new(0)), None);
         c.seal();
-        assert_eq!(c.output_id(RowIdx::new(0)), 0);
-        assert_eq!(c.output_id(RowIdx::new(1)), 1);
+        assert_eq!(c.output_id(RowIdx::new(0)), SourceId::Numeric(0));
+        assert_eq!(c.output_id(RowIdx::new(1)), SourceId::Numeric(1));
     }
 
     #[test]
@@ -510,7 +531,7 @@ mod tests {
         assert!(c.is_target(FlatIdx::new(0))); // variant 0
         assert!(!c.is_target(FlatIdx::new(1))); // +decoy
         assert!(!c.is_target(FlatIdx::new(2))); // -decoy
-        assert_eq!(c.decoy_group(RowIdx::new(0)), 0);
+        assert_eq!(c.decoy_group(RowIdx::new(0)), SourceId::Numeric(0));
     }
 
     #[test]

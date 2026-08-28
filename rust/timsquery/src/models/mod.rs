@@ -28,6 +28,8 @@ pub use query_handle::{
 };
 pub use source_id::{
     LibraryId,
+    OwnedSourceId,
+    SourceId,
     SourceIdError,
     SourceIds,
 };

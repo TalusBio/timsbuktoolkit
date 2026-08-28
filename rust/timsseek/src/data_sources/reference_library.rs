@@ -10,6 +10,7 @@ use timsquery::models::capabilities::{
 };
 use timsquery::models::{
     FlatIdx,
+    OwnedSourceId,
     Query,
     RowIdx,
     TargetColumns,
@@ -121,7 +122,7 @@ impl<'a> RefQuery<'a> {
     /// time), else `None`. Parsing the modified (not stripped) form preserves
     /// the mod set the `n_mods` feature reads. Lazy decoys are mass-shift
     /// decoys, so any non-target variant is `MassShiftedDecoy`.
-    pub fn materialize_peptide_in_group(&self, decoy_group: u64) -> Peptide {
+    pub fn materialize_peptide_in_group(&self, decoy_group: OwnedSourceId) -> Peptide {
         let tgt = self.geom.row();
         let coll = &self.lib.geom;
         let raw: Arc<str> = coll.seq_mod(tgt).into();
@@ -168,11 +169,11 @@ impl<'a> ExpectedIntensity for RefQuery<'a> {
 impl<'a> QueryGeom for RefQuery<'a> {
     type Label = IonAnnot;
 
-    fn source_id(&self) -> Option<timsquery::models::LibraryId> {
+    fn source_id(&self) -> Option<timsquery::models::SourceId<'_>> {
         self.geom.source_id()
     }
 
-    fn output_id(&self) -> u64 {
+    fn output_id(&self) -> timsquery::models::SourceId<'_> {
         self.geom.output_id()
     }
 
@@ -222,12 +223,12 @@ pub trait ScoredIdentity {
     /// The id this result carries, so a caller can map it onto the row they
     /// asked about: the source id where the file gave one, otherwise the id
     /// minted for it at load.
-    fn library_id(&self) -> u64;
+    fn library_id(&self) -> OwnedSourceId;
     /// Whether this item is a target (vs a decoy variant).
     fn is_target(&self) -> bool;
     /// Competition group id. Declared by the file when it says, minted at load
     /// otherwise — never the row's position.
-    fn decoy_group(&self) -> u64;
+    fn decoy_group(&self) -> OwnedSourceId;
     /// The row this result came from. Opaque and unprintable, so it can order
     /// the q-value tie-break without any caller-supplied value reaching it.
     fn row(&self) -> RowIdx;
@@ -236,8 +237,8 @@ pub trait ScoredIdentity {
 }
 
 impl<'a> ScoredIdentity for RefQuery<'a> {
-    fn library_id(&self) -> u64 {
-        self.geom().output_id()
+    fn library_id(&self) -> OwnedSourceId {
+        self.geom().output_id().to_owned_id()
     }
 
     fn row(&self) -> RowIdx {
@@ -251,8 +252,8 @@ impl<'a> ScoredIdentity for RefQuery<'a> {
         !self.lib.geom.is_decoy(tgt) && self.geom().variant() == 0
     }
 
-    fn decoy_group(&self) -> u64 {
-        self.lib.geom.decoy_group(self.geom().row())
+    fn decoy_group(&self) -> OwnedSourceId {
+        self.lib.geom.decoy_group(self.geom().row()).to_owned_id()
     }
 
     fn materialize_peptide(&self) -> Peptide {
@@ -384,8 +385,8 @@ mod tests {
         let lib = tiny_ref_lib();
         let scored = lib.item_at(flat(&lib, 0));
         assert!(scored.is_target());
-        assert_eq!(scored.library_id(), 0); // flat index 0 -> target 0
-        assert_eq!(scored.decoy_group(), 0);
+        assert_eq!(scored.library_id(), OwnedSourceId::Numeric(0)); // flat 0 -> target 0
+        assert_eq!(scored.decoy_group(), OwnedSourceId::Numeric(0));
         let got_frags: Vec<(IonAnnot, f32)> = scored.iter_expected_fragments().collect();
         assert_eq!(got_frags.len(), 2);
         assert!((got_frags[0].1 - 1.0).abs() < 1e-6);

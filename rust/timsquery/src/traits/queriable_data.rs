@@ -23,7 +23,6 @@ use timscentroid::rt_mapping::RTIndex;
 /// by `Target` as well as by aggregators that carry their own
 /// query scalars.
 pub trait HasQueryData<FH: KeyLike> {
-    fn id(&self) -> u64;
     fn precursor_mz_limits(&self) -> (f64, f64);
     fn mobility_ook0(&self) -> f32;
     /// The kind of mobility axis the LIBRARY entry carries. Defaults to `Ook0`
@@ -42,10 +41,6 @@ pub trait HasQueryData<FH: KeyLike> {
 }
 
 impl<FH: KeyLike> HasQueryData<FH> for Target<FH> {
-    fn id(&self) -> u64 {
-        Target::id(self)
-    }
-
     fn precursor_mz_limits(&self) -> (f64, f64) {
         self.precursor_mz_limits()
     }

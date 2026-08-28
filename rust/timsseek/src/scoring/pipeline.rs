@@ -42,6 +42,7 @@ use timscentroid::rt_mapping::{
 };
 use timsquery::models::{
     FlatIdx,
+    OwnedSourceId,
     RowIdx,
 };
 use timsquery::traits::QueryGeom;
@@ -123,7 +124,7 @@ pub struct CalibrantCandidate {
     /// The id this row reports, carried alongside the position because the
     /// calibration dashboard keys on something a human can recognise and a
     /// position must not leave the crate.
-    pub library_id: u64,
+    pub library_id: OwnedSourceId,
     pub library_rt: LibraryRT<f32>,
 }
 
@@ -600,7 +601,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         Ok(super::apex_finding::PeptideMetadata {
             digest,
             charge: query.precursor_charge(),
-            library_id: extr.chromatograms.id,
+            library_id: extr.chromatograms.id.clone(),
             row,
             library_rt: original_irt.0,
             calibrated_rt_seconds: calibrated_rt.0,

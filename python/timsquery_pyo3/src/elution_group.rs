@@ -60,8 +60,8 @@ impl PyElutionGroup {
     }
 
     #[getter]
-    fn id(&self) -> u64 {
-        self.inner.id()
+    fn id<'py>(&self, py: pyo3::Python<'py>) -> pyo3::PyResult<pyo3::Bound<'py, pyo3::PyAny>> {
+        crate::source_id_to_py(py, &self.inner.id().to_owned_id())
     }
 
     #[getter]

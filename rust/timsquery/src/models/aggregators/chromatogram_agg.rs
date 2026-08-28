@@ -26,7 +26,7 @@ use timscentroid::utils::TupleRange;
 #[derive(Debug, Clone, Serialize)]
 pub struct ChromatogramCollector<T: KeyLike, V: ArrayElement + ValueLike> {
     // Query scalars carried from the eg at reset time.
-    pub id: u64,
+    pub id: crate::models::OwnedSourceId,
     pub mobility_ook0: f32,
     pub rt_seconds: f32,
     pub precursor_mono_mz: f64,
@@ -90,7 +90,7 @@ impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
         let fragments =
             MzMajorIntensityArray::try_new_empty(fragment_order, num_cycles, start.index())?;
         Ok(Self {
-            id: eg.output_id(),
+            id: eg.output_id().to_owned_id(),
             mobility_ook0: eg.mobility_ook0(),
             rt_seconds: eg.rt_seconds(),
             precursor_mono_mz: eg.mono_precursor_mz(),
@@ -136,7 +136,7 @@ impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
             return Err(DataProcessingError::ExpectedNonEmptyData);
         }
 
-        self.id = eg.output_id();
+        self.id = eg.output_id().to_owned_id();
         self.mobility_ook0 = mobility_override.unwrap_or_else(|| eg.mobility_ook0());
         self.rt_seconds = rt_override.unwrap_or_else(|| eg.rt_seconds());
         self.precursor_mono_mz = eg.mono_precursor_mz();
@@ -219,10 +219,6 @@ impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
 }
 
 impl<T: KeyLike, V: ArrayElement + ValueLike> HasQueryData<T> for ChromatogramCollector<T, V> {
-    fn id(&self) -> u64 {
-        self.id
-    }
-
     fn precursor_mz_limits(&self) -> (f64, f64) {
         self.precursor_mz_limits
     }

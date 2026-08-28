@@ -36,6 +36,7 @@ use crate::scoring::results::{
 use crate::utils::maybe_par;
 use rand::prelude::*;
 use std::sync::Arc;
+use timsquery::models::OwnedSourceId;
 
 #[cfg(test)]
 use super::cv::RowMajorDataset;
@@ -1027,7 +1028,7 @@ mod feature_tests {
         let peptide = Peptide {
             raw: Arc::from("PEPTIDEK"),
             decoy: DecoyMarking::Target,
-            decoy_group: 0,
+            decoy_group: OwnedSourceId::Numeric(0),
             sequence_features,
         };
         CompetedCandidate {
@@ -1151,7 +1152,7 @@ mod feature_tests {
         (0..n)
             .map(|i| {
                 let mut c = sample_competed_candidate(true);
-                c.scoring.identity.library_id = i as u64;
+                c.scoring.identity.library_id = OwnedSourceId::Numeric(i as u64);
                 let is_target = i % 2 == 0;
                 c.scoring.identity.is_target = is_target;
                 let base: u8 = if is_target { 20 } else { 8 };
@@ -1272,12 +1273,12 @@ mod feature_tests {
             assert!((0.0..=1.0).contains(&r.qvalue));
         }
 
-        let key = |out: &[FinalResult]| -> Vec<(u64, u32)> {
-            let mut v: Vec<(u64, u32)> = out
+        let key = |out: &[FinalResult]| -> Vec<(OwnedSourceId, u32)> {
+            let mut v: Vec<(OwnedSourceId, u32)> = out
                 .iter()
                 .map(|r| {
                     (
-                        r.scoring.identity.library_id,
+                        r.scoring.identity.library_id.clone(),
                         r.discriminant_score.to_bits(),
                     )
                 })
@@ -1459,12 +1460,12 @@ mod feature_tests {
     #[test]
     fn rescore_mlp_is_deterministic() {
         let n = 90;
-        let key = |out: &[FinalResult]| -> Vec<(u64, u32)> {
-            let mut v: Vec<(u64, u32)> = out
+        let key = |out: &[FinalResult]| -> Vec<(OwnedSourceId, u32)> {
+            let mut v: Vec<(OwnedSourceId, u32)> = out
                 .iter()
                 .map(|r| {
                     (
-                        r.scoring.identity.library_id,
+                        r.scoring.identity.library_id.clone(),
                         r.discriminant_score.to_bits(),
                     )
                 })
@@ -1567,12 +1568,12 @@ mod feature_tests {
             );
         }
 
-        let key = |out: &[FinalResult]| -> Vec<(u64, u32)> {
-            let mut v: Vec<(u64, u32)> = out
+        let key = |out: &[FinalResult]| -> Vec<(OwnedSourceId, u32)> {
+            let mut v: Vec<(OwnedSourceId, u32)> = out
                 .iter()
                 .map(|r| {
                     (
-                        r.scoring.identity.library_id,
+                        r.scoring.identity.library_id.clone(),
                         r.discriminant_score.to_bits(),
                     )
                 })
@@ -1719,7 +1720,7 @@ mod feature_tests {
         (0..n)
             .map(|i| {
                 let mut c = sample_competed_candidate(true);
-                c.scoring.identity.library_id = i as u64;
+                c.scoring.identity.library_id = OwnedSourceId::Numeric(i as u64);
                 c.scoring.identity.is_target = i % 2 == 0;
                 c
             })

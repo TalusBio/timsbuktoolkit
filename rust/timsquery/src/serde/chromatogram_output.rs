@@ -20,7 +20,7 @@ type UnzippedFragmentTraces = ((Vec<f64>, Vec<Vec<f32>>), Vec<String>);
 /// in the logic so we keep them as buffers, so only 1 exists at a time.
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct ChromatogramOutput {
-    pub id: u64,
+    pub id: crate::models::OwnedSourceId,
     pub mobility_ook0: f32,
     pub rt_seconds: f32,
     pub precursor_mzs: Vec<f64>,
@@ -125,7 +125,7 @@ impl ChromatogramOutput {
                 .unzip();
 
         Ok(ChromatogramOutput {
-            id: collector.id,
+            id: collector.id.clone(),
             mobility_ook0: collector.mobility_ook0,
             rt_seconds: collector.rt_seconds,
             precursor_mzs,

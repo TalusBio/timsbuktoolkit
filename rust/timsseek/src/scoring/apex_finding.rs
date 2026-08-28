@@ -25,7 +25,10 @@
 //! ```
 
 use std::fmt::Display;
-use timsquery::models::RowIdx;
+use timsquery::models::{
+    OwnedSourceId,
+    RowIdx,
+};
 
 use super::apex::ApexConfig;
 use super::{
@@ -90,7 +93,7 @@ pub struct PeptideMetadata {
 
     pub charge: u8,
 
-    pub library_id: u64,
+    pub library_id: OwnedSourceId,
 
     /// The arena row scored, carried for the q-value determinism sort.
     pub row: RowIdx,

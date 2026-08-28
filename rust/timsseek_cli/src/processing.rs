@@ -1,5 +1,6 @@
 use super::config::OutputConfig;
 use indicatif::ProgressIterator;
+use timsquery::models::OwnedSourceId;
 use timsquery::models::tolerance::{
     MobilityTolerance,
     MzTolerance,
@@ -1153,7 +1154,12 @@ mod tests {
     use timsseek::models::sequence::Peptide;
     use timsseek::scoring::results::ScoringFields;
 
-    fn candidate(seq: &str, mz: f64, is_target: bool, decoy_group: u64) -> ScoredCandidate {
+    fn candidate(
+        seq: &str,
+        mz: f64,
+        is_target: bool,
+        decoy_group: OwnedSourceId,
+    ) -> ScoredCandidate {
         let decoy = if is_target {
             DecoyMarking::Target
         } else {
@@ -1162,7 +1168,7 @@ mod tests {
         let peptide = Peptide {
             raw: Arc::from(seq),
             decoy,
-            decoy_group,
+            decoy_group: decoy_group.clone(),
             sequence_features: false,
         };
         let mut scoring = ScoringFields::sample(peptide);
@@ -1195,14 +1201,14 @@ mod tests {
         // and charge, distinct precursor m/z. Two input orderings differing ONLY
         // in the tie order must produce identical (ordered) survivors.
         let order_a = vec![
-            candidate("PEPTIDEK", 501.0, true, 0),
-            candidate("PEPTIDEK", 500.0, false, 0),
-            candidate("PEPTIDEK", 502.0, false, 0),
+            candidate("PEPTIDEK", 501.0, true, OwnedSourceId::Numeric(0)),
+            candidate("PEPTIDEK", 500.0, false, OwnedSourceId::Numeric(0)),
+            candidate("PEPTIDEK", 502.0, false, OwnedSourceId::Numeric(0)),
         ];
         let order_b = vec![
-            candidate("PEPTIDEK", 502.0, false, 0),
-            candidate("PEPTIDEK", 500.0, false, 0),
-            candidate("PEPTIDEK", 501.0, true, 0),
+            candidate("PEPTIDEK", 502.0, false, OwnedSourceId::Numeric(0)),
+            candidate("PEPTIDEK", 500.0, false, OwnedSourceId::Numeric(0)),
+            candidate("PEPTIDEK", 501.0, true, OwnedSourceId::Numeric(0)),
         ];
 
         let sa = survivors(order_a);
@@ -1221,9 +1227,9 @@ mod tests {
 
     #[test]
     fn competition_features_match_their_ln1p_names() {
-        let mut best = candidate("BEST", 501.0, true, 7);
+        let mut best = candidate("BEST", 501.0, true, OwnedSourceId::Numeric(7));
         best.scoring.primary.main_score = 8.0;
-        let mut runner_up = candidate("RUNNER", 502.0, false, 7);
+        let mut runner_up = candidate("RUNNER", 502.0, false, OwnedSourceId::Numeric(7));
         runner_up.scoring.primary.main_score = 3.0;
 
         let competed = target_decoy_compete(vec![runner_up, best]);
@@ -1241,11 +1247,11 @@ mod tests {
     /// to come from the runner-up, not from the worst member.
     #[test]
     fn a_three_member_group_separates_the_winner_from_the_runner_up() {
-        let mut best = candidate("BEST", 501.0, true, 7);
+        let mut best = candidate("BEST", 501.0, true, OwnedSourceId::Numeric(7));
         best.scoring.primary.main_score = 8.0;
-        let mut middle = candidate("MIDDLE", 502.0, false, 7);
+        let mut middle = candidate("MIDDLE", 502.0, false, OwnedSourceId::Numeric(7));
         middle.scoring.primary.main_score = 3.0;
-        let mut worst = candidate("WORST", 503.0, false, 7);
+        let mut worst = candidate("WORST", 503.0, false, OwnedSourceId::Numeric(7));
         worst.scoring.primary.main_score = 1.0;
 
         let competed = target_decoy_compete(vec![worst, middle, best]);
@@ -1261,7 +1267,7 @@ mod tests {
     /// existed.
     #[test]
     fn a_lone_group_member_reports_no_separation() {
-        let mut only = candidate("ALONE", 501.0, true, 7);
+        let mut only = candidate("ALONE", 501.0, true, OwnedSourceId::Numeric(7));
         only.scoring.primary.main_score = 8.0;
 
         let competed = target_decoy_compete(vec![only]);
@@ -1275,9 +1281,9 @@ mod tests {
     /// neighbour's.
     #[test]
     fn separate_groups_do_not_bleed_into_each_other() {
-        let mut a = candidate("A", 501.0, true, 1);
+        let mut a = candidate("A", 501.0, true, OwnedSourceId::Numeric(1));
         a.scoring.primary.main_score = 8.0;
-        let mut b = candidate("B", 502.0, true, 2);
+        let mut b = candidate("B", 502.0, true, OwnedSourceId::Numeric(2));
         b.scoring.primary.main_score = 3.0;
 
         let competed = target_decoy_compete(vec![a, b]);

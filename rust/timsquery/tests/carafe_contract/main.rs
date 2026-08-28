@@ -9,6 +9,7 @@
 //! `tests/carafe_e2e.rs`, which runs the built binary over a generated mzML.
 
 use std::io::Write;
+use timsquery::models::SourceId;
 use timsquery::models::tolerance::{
     MobilityTolerance,
     MzTolerance,
@@ -93,8 +94,12 @@ fn non_sequential_ids_survive_the_reader() {
     let TargetTable::Mzpaf { geom, .. } = arena else {
         panic!("mzpaf labels")
     };
-    let ids: Vec<u64> = geom.rows().map(|r| geom.output_id(r)).collect();
-    assert_eq!(ids, vec![7, 42], "the caller's ids, not 0..n-1");
+    let ids: Vec<SourceId<'_>> = geom.rows().map(|r| geom.output_id(r)).collect();
+    assert_eq!(
+        ids,
+        vec![SourceId::Numeric(7), SourceId::Numeric(42)],
+        "the caller's ids, not 0..n-1"
+    );
 }
 
 /// Carafe keys results by `id`, so a repeat makes one row unreachable.
