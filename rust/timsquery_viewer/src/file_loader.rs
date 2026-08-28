@@ -234,7 +234,7 @@ impl ElutionGroupData {
         use std::fmt::Write;
         buffer.clear();
         let q = self.item_at(idx);
-        let peptide = ScoredIdentity::materialize_peptide(&q);
+        let peptide = q.materialize_peptide();
         let _ = write!(
             buffer,
             "{}|{}|{}",
@@ -348,7 +348,7 @@ impl ElutionGroupData {
     ) {
         let q = self.item_at(idx);
         let is_selected = Some(idx) == *selected_index;
-        let peptide = ScoredIdentity::materialize_peptide(&q);
+        let peptide = q.materialize_peptide();
 
         let mut clicked = false;
         let mut add_col = |ui: &mut egui::Ui, text: &str| {

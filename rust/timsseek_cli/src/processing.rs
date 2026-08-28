@@ -95,6 +95,7 @@ mod calib_dash_hook {
             Hasher,
         };
         use std::io::IsTerminal;
+        use timsquery::models::FlatIdx;
 
         /// The dashboard compares calibrant identity across batches but never
         /// displays it, so it takes a hash of the arena handle rather than the
@@ -102,9 +103,12 @@ mod calib_dash_hook {
         /// more importantly, keeps `size_of` the true cost of a point — which is
         /// what its replay memory budget is computed from. Only meaningful
         /// within one process.
-        fn identity_hash(handle: impl Hash) -> u64 {
+        ///
+        /// Concrete in `FlatIdx` rather than `impl Hash`, which would also
+        /// accept `score.to_bits()` — compiles, means nothing.
+        fn identity_hash(slot: FlatIdx) -> u64 {
             let mut hasher = DefaultHasher::new();
-            handle.hash(&mut hasher);
+            slot.hash(&mut hasher);
             hasher.finish()
         }
 

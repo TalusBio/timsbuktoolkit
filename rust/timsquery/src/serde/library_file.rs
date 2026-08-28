@@ -404,11 +404,10 @@ impl TargetTable {
 
 /// Carry the rows' ids into the arena, then seal it.
 ///
-/// The two steps are one function because separating them is how the ids got
-/// lost: `mzpaf_with_intensities` sealed without them, so every DIA-NN library
-/// -- the formats that actually name their precursors -- minted `0..n` over the
-/// names it had just parsed, and the reader-level tests passed because they
-/// asserted on the `Target` rather than on the arena.
+/// One function, not two calls: `seal` mints `0..n` for a library that arrived
+/// without ids, so sealing before attaching them silently overwrites the names
+/// the reader parsed. Every arm goes through here so that ordering cannot be
+/// got wrong.
 fn seal_with_source_ids<L: KeyLike, T: KeyLike>(
     geom: &mut TargetColumns<L>,
     egs: &[Target<T>],
@@ -597,20 +596,16 @@ mod tests {
     };
 
     /// What a result would actually be keyed by: the ids the sealed arena
-    /// holds, read back through the public funnel.
-    ///
-    /// Every id assertion belongs at this layer. The readers were setting
-    /// `Target::id` correctly the whole time while `mzpaf_with_intensities`
-    /// sealed without carrying it over, so tests one layer up passed against an
-    /// arena full of minted counters.
+    /// holds, read back through the public funnel. Asserting on a `Target`
+    /// instead would pass even if sealing dropped the ids.
     fn arena_ids(path: &Path) -> Vec<String> {
+        // Both arms read the same way; the label type is what differs.
+        fn ids<L: crate::KeyLike>(geom: &crate::models::TargetColumns<L>) -> Vec<String> {
+            geom.rows().map(|r| geom.output_id(r).to_string()).collect()
+        }
         match super::read_targets(path).expect("fixture loads") {
-            super::TargetTable::Mzpaf { geom, .. } => {
-                geom.rows().map(|r| geom.output_id(r).to_string()).collect()
-            }
-            super::TargetTable::Str { geom } => {
-                geom.rows().map(|r| geom.output_id(r).to_string()).collect()
-            }
+            super::TargetTable::Mzpaf { geom, .. } => ids(&geom),
+            super::TargetTable::Str { geom } => ids(&geom),
         }
     }
 

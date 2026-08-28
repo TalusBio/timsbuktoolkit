@@ -974,6 +974,8 @@ pub fn read_diann_speclib_library_file<T: AsRef<Path>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::KeyLike;
+    use crate::models::RowIdx;
     use std::path::PathBuf;
 
     fn fixture_path() -> PathBuf {
@@ -981,6 +983,12 @@ mod tests {
             .join("tests")
             .join("speclib_io_files")
             .join("diann-hela-diapasef-lib.speclib")
+    }
+
+    /// The arena hands out rows; there is no constructor from an integer. These
+    /// tests assert on m/z and sequence values, so the lookup is noise.
+    fn row<L: KeyLike>(geom: &TargetColumns<L>, i: usize) -> RowIdx {
+        geom.rows().nth(i).expect("row is in range")
     }
 
     // All expected values below are sourced from `reference_parser.py` (an
@@ -1039,11 +1047,11 @@ mod tests {
             parse_speclib_reader(std::io::BufReader::new(file)).unwrap();
 
         assert_eq!(
-            &geom.seq_mod_blob[geom.seq_mod_range(geom.rows().nth(0).unwrap())],
+            &geom.seq_mod_blob[geom.seq_mod_range(row(&geom, 0))],
             "AAAGAAATHLEVAR"
         );
         assert_eq!(
-            &geom.seq_strip_blob[geom.seq_strip_range(geom.rows().nth(0).unwrap())],
+            &geom.seq_strip_blob[geom.seq_strip_range(row(&geom, 0))],
             "AAAGAAATHLEVAR"
         );
         assert_eq!(geom.charge[0], 2);
@@ -1055,7 +1063,7 @@ mod tests {
         // The fixture has Peptide.length == 0, so y-series is recovered from the
         // sequence length (14). ExcludeFromAssay fragments are kept; only
         // neutral-loss/dup drop, so all 12 remain.
-        let range = geom.frag_range(geom.rows().nth(0).unwrap());
+        let range = geom.frag_range(row(&geom, 0));
         assert_eq!(range.len(), 12, "all non-loss fragments kept");
 
         // First few fragments in file order, sourced independently. y9 carries
@@ -1100,14 +1108,14 @@ mod tests {
             parse_speclib_reader(std::io::BufReader::new(file)).unwrap();
 
         assert_eq!(
-            &geom.seq_mod_blob[geom.seq_mod_range(geom.rows().nth(532).unwrap())],
+            &geom.seq_mod_blob[geom.seq_mod_range(row(&geom, 532))],
             "LEGNSPQGSNQGVK"
         );
         assert_eq!(geom.charge[532], 2);
         assert!((geom.precursor_mz[532] - 707.85052).abs() < 1e-3);
         assert!((geom.rt_seconds[532] - (-31.935_83)).abs() < 1e-3);
         assert!((geom.mobility[532] - 0.9704546).abs() < 1e-4);
-        assert_eq!(geom.frag_range(geom.rows().nth(532).unwrap()).len(), 6);
+        assert_eq!(geom.frag_range(row(&geom, 532)).len(), 6);
     }
 
     #[test]
@@ -1144,7 +1152,7 @@ mod tests {
         // Exclude-flagged fragments are present in the output, not dropped:
         // entry[0] keeps its flagged y9.
         assert!(
-            geom.frag_labels[geom.frag_range(geom.rows().nth(0).unwrap())]
+            geom.frag_labels[geom.frag_range(row(&geom, 0))]
                 .iter()
                 .any(|l| *l == IonAnnot::try_new('y', Some(9), 1, 0).unwrap()),
             "flagged y9 must be kept"

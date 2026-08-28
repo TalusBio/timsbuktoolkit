@@ -27,8 +27,7 @@ pub use index::{
 /// only be obtained from the arena and handed straight back to it.
 ///
 /// Construction is `pub(super)`, i.e. this file, so the arena is the only thing
-/// that mints one — including a `RowIdx`, since the flyweight now stores the
-/// handle it was given rather than packing and rebuilding it.
+/// that mints one.
 mod index {
     /// A stored row: `0..n_rows()`.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -316,8 +315,8 @@ impl<L: KeyLike> TargetColumns<L> {
     {
         let groups: Vec<OwnedSourceId> = groups.into_iter().map(Into::into).collect();
         if groups.len() != self.n_rows() {
-            return Err(SourceIdError::LengthMismatch {
-                ids: groups.len(),
+            return Err(SourceIdError::GroupLengthMismatch {
+                groups: groups.len(),
                 rows: self.n_rows(),
             });
         }
@@ -480,16 +479,6 @@ impl<L: KeyLike> TargetColumns<L> {
             tracing::warn!("library ships decoys; downgrading LazyMassShift -> Passthrough");
             self.caps.decoys = DecoyStrategy::Passthrough;
         }
-        // A decoy variant is a `u8` all the way from `split_flat`'s `% vpr`
-        // cast to the flyweight. Fail loud here, where the invariant is
-        // established, rather than silently truncating a variant index in a
-        // release build. The free fn is used because `seal` is not bounded on
-        // `DecoyShift`.
-        let vpr = variants_per_row_for(self.caps.decoys);
-        assert!(
-            vpr <= u8::MAX as usize + 1,
-            "variants_per_row {vpr} exceeds what a u8 decoy variant can name"
-        );
         self.precursor_mz.shrink_to_fit();
         self.charge.shrink_to_fit();
         self.rt_seconds.shrink_to_fit();
@@ -512,21 +501,18 @@ impl<L: KeyLike> TargetColumns<L> {
 /// `LazyMassShift`), and expanded/flat indices fan each row out into its
 /// target + decoy variants. Bounded on `DecoyShift` so `item_at` can hand out a
 /// `QueryRef` (the flyweight that computes decoy geometry on the fly).
-/// Variants each stored row expands into, from the decoy strategy alone:
-/// `LazyMassShift` adds `n_decoys` mass-shifted variants (+1 for the target);
-/// `Passthrough`/`None` are 1:1. Free fn (no `DecoyShift` bound) so both the
-/// bounded `variants_per_row` and the unbounded `seal` share one definition.
-pub fn variants_per_row_for(decoys: DecoyStrategy) -> usize {
-    match decoys {
-        DecoyStrategy::LazyMassShift { n_decoys, .. } => n_decoys as usize + 1,
-        DecoyStrategy::Passthrough | DecoyStrategy::None => 1,
-    }
-}
-
 impl<L: KeyLike + DecoyShift> TargetColumns<L> {
-    /// Variants each stored row expands into (see [`variants_per_row_for`]).
+    /// Variants each stored row expands into, from the decoy strategy alone:
+    /// `LazyMassShift` adds `n_decoys` mass-shifted variants (+1 for the
+    /// target); `Passthrough`/`None` are 1:1.
+    ///
+    /// `n_decoys` is a `u8`, which is what keeps a variant index inside the
+    /// `u8` that [`Self::split_flat`] casts it to.
     pub fn variants_per_row(&self) -> usize {
-        variants_per_row_for(self.caps.decoys)
+        match self.caps.decoys {
+            DecoyStrategy::LazyMassShift { n_decoys, .. } => n_decoys as usize + 1,
+            DecoyStrategy::Passthrough | DecoyStrategy::None => 1,
+        }
     }
 
     /// Logical count after decoy expansion: the flat iterator length, i.e. how
@@ -644,26 +630,15 @@ mod tests {
             c.decoy_group_code(b),
             "each row competes alone"
         );
-        assert_eq!(c.decoy_group(a), c.output_id(a));
+        assert_eq!(c.decoy_group(a), SourceId::Numeric(0));
+        assert_eq!(c.decoy_group(b), SourceId::Numeric(1));
     }
 
     /// `output_id` expects a source id on every row; this is what makes that
     /// safe for the formats that carry none.
     #[test]
     fn seal_mints_ids_when_the_input_carried_none() {
-        let mut c = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
-        for _ in 0..2 {
-            c.push_target(
-                500.0,
-                2,
-                1.0,
-                0.8,
-                &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
-                "PEP",
-                "PEP",
-                &[],
-            );
-        }
+        let mut c = two_rows();
         assert_eq!(c.source_id(RowIdx::new(0)), None);
         c.seal();
         assert_eq!(c.output_id(RowIdx::new(0)), SourceId::Numeric(0));

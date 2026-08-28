@@ -29,10 +29,9 @@ use crate::utils::constants::C13_C12_MASS_DIFF;
 /// every geometry method calls stay field reads rather than a division by
 /// `variants_per_row`.
 ///
-/// The fields used to be packed into a `u64`. That cost nothing in size (the
-/// `Lib` pointer's alignment pads the struct to two words either way — see
-/// `the_flyweight_stays_two_words`) and cost the arena its monopoly on minting
-/// a `RowIdx`, since unpacking had to build one.
+/// Storing the pair costs nothing over bit-packing it: the `Lib` pointer's
+/// alignment pads the struct to two words either way, which
+/// `the_flyweight_stays_two_words` pins.
 #[derive(Debug, Clone, Copy)]
 pub struct Query<Lib, L> {
     lib: Lib,

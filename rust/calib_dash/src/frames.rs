@@ -24,10 +24,11 @@ pub const REPLAY_BUDGET_BYTES: usize = 1 << 20;
 ///
 /// `identity` exists because churn diffing needs to tell "same calibrant,
 /// re-scored" from "different calibrant, same RT", and RT coordinates are not
-/// unique. It is an opaque hash of the caller's id, never displayed -- this is
-/// a debugging view, so it compares identity without carrying it. Keeping it a
-/// plain integer is what lets `size_of` below be the true cost of a point, and
-/// what keeps this type `Copy`.
+/// unique. It is an opaque hash of whatever handle the producer keys on (today
+/// the arena's `FlatIdx`), never displayed -- this is a debugging view, so it
+/// compares identity without carrying it. Keeping it a plain integer is what
+/// lets `size_of` below be the true cost of a point, and what keeps this type
+/// `Copy`.
 ///
 /// Only meaningful within one process: the hash is not stable across runs.
 #[derive(Debug, Clone, Copy, PartialEq)]

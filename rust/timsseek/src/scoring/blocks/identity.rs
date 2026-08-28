@@ -59,11 +59,9 @@ impl Identity {
 
     /// Whether two results compete: same decoy group, same charge.
     ///
-    /// Paired with [`Self::competition_key`], which is the key this is a
-    /// comparison of, so sorting by the key leaves competing results adjacent.
-    /// Competition previously spelled the sort key and the grouping predicate
-    /// separately; if those drifted, nothing failed and the groups were simply
-    /// wrong.
+    /// Defined in terms of [`Self::competition_key`], so sorting by that key
+    /// always leaves competing results adjacent — the predicate and the sort
+    /// order cannot drift apart.
     pub fn competes_with(&self, other: &Self) -> bool {
         self.competition_key() == other.competition_key()
     }

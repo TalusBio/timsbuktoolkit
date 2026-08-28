@@ -13,6 +13,7 @@ use std::path::Path;
 use std::sync::Arc;
 use timsquery::IonAnnot;
 use timsquery::models::{
+    RowIdx,
     SourceId,
     TargetColumns,
 };
@@ -20,6 +21,8 @@ use tracing::debug;
 
 use super::blocks::{
     ColSink,
+    NameSink,
+    SchemaSink,
     ScoreBlock,
 };
 use super::results::FinalResult;
@@ -34,18 +37,60 @@ use super::results::FinalResult;
 /// - 3: both became Utf8, because an id keeps the shape its source used and
 ///   DIA-NN names its precursors with a string (`transition_group_id`). A
 ///   numeric id is written as its digits.
+///
+/// `decoy_group_id` equals `library_id` on every row until a library format
+/// declares competition groups: no reader parses them today, so a row competes
+/// only with its own decoy variants and is its own group. The duplication is
+/// expected, not a bug.
 pub const RESULTS_FORMAT_VERSION: u32 = 3;
 
 // ---------------------------------------------------------------------------
 // Build a RecordBatch from a slice of FinalResult
 // ---------------------------------------------------------------------------
 
-/// Write one id column, without rendering a text id through `Display` first.
-fn emit_id(sink: &mut ColSink, name: &str, id: SourceId<'_>) {
-    match id {
-        SourceId::Text(s) => sink.str(name, s),
-        SourceId::Numeric(n) => sink.str(name, &n.to_string()),
+/// The ids a reader joins on, resolved from the arena.
+///
+/// A block rather than two hand-written `o.str` calls in `emit_row` plus two in
+/// `FinalResult::column_schema`: that split is exactly the schema/data drift
+/// `#[derive(ScoreBlock)]` exists to prevent. A block keeps the pair adjacent,
+/// so the two bodies cannot disagree about names, types, or order.
+///
+/// Hand-written, like `Identity`, because the derive works on owned scalar
+/// fields and these are borrowed from the arena.
+pub(crate) struct Ids<'a> {
+    library_id: SourceId<'a>,
+    decoy_group_id: SourceId<'a>,
+}
+
+impl<'a> Ids<'a> {
+    fn for_row(geom: &'a TargetColumns<IonAnnot>, row: RowIdx) -> Self {
+        Self {
+            library_id: geom.output_id(row),
+            decoy_group_id: geom.decoy_group(row),
+        }
     }
+
+    /// A text id goes in borrowed; only a numeric one is rendered.
+    fn emit(o: &mut ColSink, name: &str, id: SourceId<'_>) {
+        match id {
+            SourceId::Text(s) => o.str(name, s),
+            SourceId::Numeric(n) => o.str(name, &n.to_string()),
+        }
+    }
+}
+
+impl ScoreBlock for Ids<'_> {
+    fn columns(&self, o: &mut ColSink) {
+        Self::emit(o, "library_id", self.library_id);
+        Self::emit(o, "decoy_group_id", self.decoy_group_id);
+    }
+
+    fn column_schema(o: &mut SchemaSink) {
+        o.str("library_id");
+        o.str("decoy_group_id");
+    }
+
+    fn nonlinear_feature_names(_: &mut NameSink) {}
 }
 
 /// Emit one result's columns into the sink (all scoring blocks, then the
@@ -57,9 +102,7 @@ fn emit_id(sink: &mut ColSink, name: &str, id: SourceId<'_>) {
 fn emit_row(r: &FinalResult, geom: &TargetColumns<IonAnnot>, sink: &mut ColSink) {
     r.scoring.columns(sink);
     r.result_meta().columns(sink);
-    let row = r.scoring.identity.row;
-    emit_id(sink, "library_id", geom.output_id(row));
-    emit_id(sink, "decoy_group_id", geom.decoy_group(row));
+    Ids::for_row(geom, r.scoring.identity.row).columns(sink);
     sink.end_row();
 }
 
@@ -197,19 +240,27 @@ mod tests {
     use std::fs::File;
     use timsquery::models::capabilities::TargetCapabilities;
 
-    /// A one-row arena for the writer to resolve ids against.
-    fn one_row_arena() -> TargetColumns<IonAnnot> {
+    /// An unsealed arena holding one row per sequence, for the writer to
+    /// resolve ids against. Left unsealed so a caller can attach source ids.
+    fn arena_of(seqs: &[&str]) -> TargetColumns<IonAnnot> {
         let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
-        geom.push_target(
-            900.4,
-            2,
-            1.0,
-            1.0,
-            &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
-            "PEPTIDEK",
-            "PEPTIDEK",
-            &[],
-        );
+        for seq in seqs {
+            geom.push_target(
+                900.4,
+                2,
+                1.0,
+                1.0,
+                &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
+                seq,
+                seq,
+                &[],
+            );
+        }
+        geom
+    }
+
+    fn one_row_arena() -> TargetColumns<IonAnnot> {
+        let mut geom = arena_of(&["PEPTIDEK"]);
         geom.seal();
         geom
     }
@@ -262,22 +313,10 @@ mod tests {
     /// they still reach the file — and that the row a result points at is the
     /// row whose id gets written.
     #[test]
-    fn each_row_s_ids_are_resolved_from_the_arena() {
+    fn ids_resolve_from_the_arena_row() {
         use arrow::array::StringArray;
 
-        let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
-        for seq in ["PEPTIDEK", "AAAAAAALQAK"] {
-            geom.push_target(
-                900.4,
-                2,
-                1.0,
-                1.0,
-                &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
-                seq,
-                seq,
-                &[],
-            );
-        }
+        let mut geom = arena_of(&["PEPTIDEK", "AAAAAAALQAK"]);
         // The names DIA-NN would give these rows, which is the case that must
         // not come back as digits.
         geom.set_source_ids(["PEPTIDEK2", "AAAAAAALQAK2"])

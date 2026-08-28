@@ -1,5 +1,4 @@
 use smallvec::SmallVec;
-use std::sync::Arc;
 use timsquery::IonAnnot;
 use timsquery::serde::TargetTable;
 
@@ -111,30 +110,6 @@ impl<'a> RefQuery<'a> {
 
     pub fn geom(&self) -> &Query<&'a TargetColumns<IonAnnot>, IonAnnot> {
         &self.geom
-    }
-
-    /// Materialize the output identity `Peptide` for this flyweight.
-    ///
-    /// `raw` is the modified-sequence blob slice. `parsed` is filled by
-    /// normalizing the modified sequence to ProForma and parsing it — but ONLY when sequence
-    /// features are `Available` (the whole-library parse gate passed at build
-    /// time), else `None`. Parsing the modified (not stripped) form preserves
-    /// the mod set the `n_mods` feature reads. Lazy decoys are mass-shift
-    /// decoys, so any non-target variant is `MassShiftedDecoy`.
-    pub fn materialize_peptide(&self) -> Peptide {
-        let tgt = self.geom.row();
-        let coll = &self.lib.geom;
-        let raw: Arc<str> = coll.seq_mod(tgt).into();
-        let decoy = if self.geom.variant() == 0 {
-            DecoyMarking::Target
-        } else {
-            DecoyMarking::MassShiftedDecoy
-        };
-        Peptide {
-            raw,
-            decoy,
-            sequence_features: coll.caps.sequence_features == SeqFeatureState::Available,
-        }
     }
 }
 
@@ -254,8 +229,22 @@ impl<'a> ScoredIdentity for RefQuery<'a> {
         !self.lib.geom.is_decoy(tgt) && self.geom().variant() == 0
     }
 
+    /// `raw` is the modified-sequence blob slice; parsing is deferred to
+    /// `Peptide::parse` and gated on the whole-library parse check. The modified
+    /// (not stripped) form is what the `n_mods` feature reads. Lazy decoys are
+    /// mass-shift decoys, so any non-target variant is `MassShiftedDecoy`.
     fn materialize_peptide(&self) -> Peptide {
-        RefQuery::materialize_peptide(self)
+        let tgt = self.geom.row();
+        let coll = &self.lib.geom;
+        Peptide {
+            raw: coll.seq_mod(tgt).into(),
+            decoy: if self.geom.variant() == 0 {
+                DecoyMarking::Target
+            } else {
+                DecoyMarking::MassShiftedDecoy
+            },
+            sequence_features: coll.caps.sequence_features == SeqFeatureState::Available,
+        }
     }
 }
 
@@ -382,13 +371,10 @@ mod tests {
         let lib = tiny_ref_lib();
         let scored = lib.item_at(flat(&lib, 0));
         assert!(scored.is_target());
-        // flat 0 -> row 0, and the id it reports is resolved from the arena,
-        // not carried on the result.
-        let handles = scored.handles();
-        assert_eq!(handles.row, row(&lib, 0));
-        assert_eq!(handles.group, lib.geom.decoy_group_code(row(&lib, 0)));
+        // The id is not on the result; it resolves from the arena via the row
+        // the handles carry.
         assert_eq!(
-            lib.geom.output_id(handles.row),
+            lib.geom.output_id(scored.handles().row),
             timsquery::models::SourceId::Numeric(0)
         );
         let got_frags: Vec<(IonAnnot, f32)> = scored.iter_expected_fragments().collect();

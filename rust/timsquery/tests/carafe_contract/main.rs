@@ -196,10 +196,11 @@ fn an_id_comes_back_in_the_shape_it_arrived() {
     let row = geom.rows().next().unwrap();
     assert_eq!(geom.output_id(row), SourceId::Numeric(7));
     assert_eq!(
-        serde_json::to_string(&geom.output_id(row)).unwrap(),
+        serde_json::to_string(&geom.output_id(row).to_owned_id()).unwrap(),
         "7",
         "Carafe reads `id` with fastjson and keys results by it: a number must \
-         stay a bare number, not become \"7\""
+         stay a bare number, not become \"7\". Serialized as `OwnedSourceId`, \
+         which is what `ChromatogramOutput.id` holds on the real result path"
     );
 
     let text = write_targets(
@@ -215,7 +216,7 @@ fn an_id_comes_back_in_the_shape_it_arrived() {
     let row = geom.rows().next().unwrap();
     assert_eq!(geom.output_id(row), SourceId::Text("PEPTIDEK2"));
     assert_eq!(
-        serde_json::to_string(&geom.output_id(row)).unwrap(),
+        serde_json::to_string(&geom.output_id(row).to_owned_id()).unwrap(),
         r#""PEPTIDEK2""#
     );
 }

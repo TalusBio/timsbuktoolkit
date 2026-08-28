@@ -27,7 +27,6 @@ pub use query_handle::{
     QueryRef,
 };
 pub use source_id::{
-    LibraryId,
     OwnedSourceId,
     SourceId,
     SourceIdError,

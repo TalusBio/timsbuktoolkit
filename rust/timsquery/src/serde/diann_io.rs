@@ -331,10 +331,8 @@ pub fn read_targets<T: AsRef<Path>>(
 /// arena cannot hold both shapes at once, so fall the whole file back to minted
 /// ids rather than half-labelling it.
 ///
-/// One blank cell therefore costs the whole library its names, which is a large
-/// consequence for a small defect — so the warning names the row that triggered
-/// it. The check is library-wide, and without that the caller gets a warning
-/// they cannot act on.
+/// The check is library-wide, so the warning names the precursor that triggered
+/// the fallback; without that a caller cannot act on it.
 fn unify_source_ids(egs: &mut [(Target<IonAnnot>, DiannPrecursorExtras)]) {
     let named = egs.iter().filter(|(eg, _)| is_named(eg)).count();
     if named == 0 || named == egs.len() {

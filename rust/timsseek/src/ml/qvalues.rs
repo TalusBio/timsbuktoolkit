@@ -1024,6 +1024,19 @@ mod feature_tests {
         ScoringFields::sample(peptide)
     }
 
+    /// Pairs each candidate with the score it got, sorted, so two runs are
+    /// comparable regardless of output order. Keyed on the arena row because
+    /// that is what `canonicalize_and_shuffle` sorts by, so a run that assigned
+    /// the same set of scores to different candidates still fails.
+    fn determinism_key(out: &[FinalResult]) -> Vec<(RowIdx, u32)> {
+        let mut v: Vec<(RowIdx, u32)> = out
+            .iter()
+            .map(|r| (r.scoring.identity.row, r.discriminant_score.to_bits()))
+            .collect();
+        v.sort_unstable();
+        v
+    }
+
     /// A target candidate over `PEPTIDEK` — 8 residues, no mods. With
     /// `sequence_features` set the sequence lanes carry those counts; without it
     /// they stay NaN, which is the only difference between the two cases.
@@ -1141,7 +1154,7 @@ mod feature_tests {
     }
 
     /// Build a non-degenerate synthetic candidate set: `n` rows, alternating
-    /// target/decoy, distinct `library_id`, with the LINEAR-lane count fields
+    /// target/decoy, distinct arena rows, with the LINEAR-lane count fields
     /// varied by label + row so the cross-fit LDA has real within-class scatter
     /// and a class-mean gap (i.e. it actually fits, exercising the score path).
     ///
@@ -1275,15 +1288,11 @@ mod feature_tests {
             assert!((0.0..=1.0).contains(&r.qvalue));
         }
 
-        let key = |out: &[FinalResult]| -> Vec<(RowIdx, u32)> {
-            let mut v: Vec<(RowIdx, u32)> = out
-                .iter()
-                .map(|r| (r.scoring.identity.row, r.discriminant_score.to_bits()))
-                .collect();
-            v.sort_unstable();
-            v
-        };
-        assert_eq!(key(&out_a), key(&out_b), "lda rescore not deterministic");
+        assert_eq!(
+            determinism_key(&out_a),
+            determinism_key(&out_b),
+            "lda rescore not deterministic"
+        );
     }
 
     #[test]
@@ -1457,14 +1466,6 @@ mod feature_tests {
     #[test]
     fn rescore_mlp_is_deterministic() {
         let n = 90;
-        let key = |out: &[FinalResult]| -> Vec<(RowIdx, u32)> {
-            let mut v: Vec<(RowIdx, u32)> = out
-                .iter()
-                .map(|r| (r.scoring.identity.row, r.discriminant_score.to_bits()))
-                .collect();
-            v.sort_unstable();
-            v
-        };
 
         for seed in [7u64, 13, 42, 1234] {
             let run = || rescore_mlp_with(synthetic_competed(n), mlp_test_cfg(seed));
@@ -1481,8 +1482,8 @@ mod feature_tests {
                 assert!((0.0..=1.0).contains(&r.qvalue));
             }
             assert_eq!(
-                key(&out_a),
-                key(&out_b),
+                determinism_key(&out_a),
+                determinism_key(&out_b),
                 "seed {seed}: mlp rescore not deterministic"
             );
 
@@ -1560,17 +1561,9 @@ mod feature_tests {
             );
         }
 
-        let key = |out: &[FinalResult]| -> Vec<(RowIdx, u32)> {
-            let mut v: Vec<(RowIdx, u32)> = out
-                .iter()
-                .map(|r| (r.scoring.identity.row, r.discriminant_score.to_bits()))
-                .collect();
-            v.sort_unstable();
-            v
-        };
         assert_eq!(
-            key(&out_a),
-            key(&out_b),
+            determinism_key(&out_a),
+            determinism_key(&out_b),
             "hybrid rescore not deterministic across runs"
         );
     }
