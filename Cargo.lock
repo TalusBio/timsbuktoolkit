@@ -4019,9 +4019,10 @@ dependencies = [
 name = "micromzpaf"
 version = "0.33.0"
 dependencies = [
- "rustyms",
  "serde",
+ "serde_json",
  "thiserror 2.0.18",
+ "tracing",
 ]
 
 [[package]]

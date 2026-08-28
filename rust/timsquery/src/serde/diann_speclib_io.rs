@@ -9,11 +9,11 @@
 //! order, so there is no random access across sections.
 //!
 //! The reader is three layers:
-//!   1. Decode ([`Cursor`], [`Fragment`], [`Peptide`]): typed, zero-copy views
+//!   1. Decode (`Cursor`, `Fragment`, `Peptide`): typed, zero-copy views
 //!      over byte ranges of the in-memory file. No domain knowledge.
-//!   2. Emit ([`SpecLib`] + [`EntryIter`]): a pull parser that walks the
-//!      variable-length envelope and yields one [`EntryView`] per precursor.
-//!   3. Map ([`map_entry`]): [`EntryView`] -> rows pushed directly into a
+//!   2. Emit (`SpecLib` + `EntryIter`): a pull parser that walks the
+//!      variable-length envelope and yields one `EntryView` per precursor.
+//!   3. Map (`map_entry`): `EntryView` -> rows pushed directly into a
 //!      columnar `TargetColumns<IonAnnot>` (plus a parallel reference-intensity
 //!      sidecar). This is where the ion-type table, dedup, and drop stats live.
 //!
@@ -29,7 +29,11 @@ use super::library_file::{
     TargetReadingError,
     TargetTable,
 };
-use crate::ion::IonAnnot;
+use crate::ion::{
+    IonAnnot,
+    IonSeriesOrdinal,
+    NeutralLoss,
+};
 use crate::models::{
     Row,
     TargetCapabilities,
@@ -569,9 +573,11 @@ fn bounded_capacity(count: usize, remaining_bytes: usize, min_record_bytes: usiz
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SpeclibDecodeStats {
     /// Fragments flagged `ExcludeFromAssay` (`type & 0x80`). Kept (see
-    /// [`map_entry`]); counted for reporting only.
+    /// `map_entry`); counted for reporting only.
     pub exclude_flagged: usize,
-    /// Fragments with a neutral loss (`loss != 0`) -- `IonAnnot` cannot hold loss.
+    /// Fragments whose neutral-loss code `loss_from_code` does not map. Water
+    /// and ammonia are mapped and kept; anything else is dropped rather than
+    /// guessed, and counted so the cost stays visible.
     pub loss_dropped: usize,
     /// Fragments whose ion-type code or recovered series was unusable.
     pub unknown_ion_dropped: usize,
@@ -700,6 +706,17 @@ fn append_arena(dst: &mut TargetColumns<IonAnnot>, mut src: TargetColumns<IonAnn
     } = src;
 }
 
+/// Map DIA-NN's neutral-loss code (`Product` byte 11) to a supported loss.
+/// Unknown codes are dropped by the caller.
+fn loss_from_code(code: u8) -> Option<NeutralLoss> {
+    match code {
+        0 => Some(NeutralLoss::None),
+        1 => Some(NeutralLoss::Water),
+        2 => Some(NeutralLoss::Ammonia),
+        _ => None,
+    }
+}
+
 /// Map a decoded target `EntryView` directly into the columnar arena, folding
 /// drop counters into `stats` and appending each kept fragment's reference
 /// intensity to `frag_intens` IN THE SAME ORDER as the pushed fragment labels
@@ -764,11 +781,18 @@ fn map_entry(
         if f.typ() & 0x80 != 0 {
             stats.exclude_flagged += 1;
         }
-        // IonAnnot cannot represent neutral loss; drop lossy fragments.
-        if f.loss() != 0 {
-            stats.loss_dropped += 1;
-            continue;
-        }
+        let loss = match loss_from_code(f.loss()) {
+            Some(loss) => loss,
+            None => {
+                warn!(
+                    "speclib entry {:?}: unknown neutral-loss code {}; dropping fragment",
+                    name,
+                    f.loss()
+                );
+                stats.loss_dropped += 1;
+                continue;
+            }
+        };
 
         let type_char = match f.typ() & 0x7F {
             1 => 'b',
@@ -807,11 +831,27 @@ fn map_entry(
             continue;
         }
 
-        let ion = match IonAnnot::try_new(type_char, Some(series as u8), f.charge() as i8, 0) {
+        // The wire value is unsigned; reject values that do not fit IonAnnot.
+        let charge = match i8::try_from(f.charge()) {
+            Ok(charge) => charge,
+            Err(_) => {
+                warn!(
+                    "speclib entry {:?}: fragment charge byte {} is not a charge; dropping",
+                    name,
+                    f.charge()
+                );
+                stats.unknown_ion_dropped += 1;
+                continue;
+            }
+        };
+
+        let ion = match IonSeriesOrdinal::from_series_char(type_char, Some(series as u8))
+            .and_then(|series| IonAnnot::new(series, loss, charge, 0))
+        {
             Ok(ion) => ion,
             Err(e) => {
                 warn!(
-                    "speclib entry {:?}: failed to build IonAnnot ({:?}); dropping fragment",
+                    "speclib entry {:?}: failed to build IonAnnot ({}); dropping fragment",
                     name, e
                 );
                 stats.unknown_ion_dropped += 1;
@@ -872,7 +912,7 @@ type ParsedSpeclib = (TargetColumns<IonAnnot>, Vec<f32>, SpeclibDecodeStats, boo
 /// structural desync.
 ///
 /// Reads the file, parses the header, then parses+maps entries in parallel
-/// ([`SpecLib::open`] + [`SpecLib::parse_parallel`]).
+/// (`SpecLib::open` + `SpecLib::parse_parallel`).
 pub fn parse_speclib_reader<R: Read>(reader: R) -> Result<ParsedSpeclib, TargetReadingError> {
     SpecLib::open(reader)?.parse_parallel()
 }
@@ -1134,11 +1174,15 @@ mod tests {
         let file = std::fs::File::open(fixture_path()).unwrap();
         let (geom, _intens, stats, _eof) =
             parse_speclib_reader(std::io::BufReader::new(file)).unwrap();
-        // Reference parser: 8384 ExcludeFromAssay-flagged (kept, counted only),
-        // 152 neutral-loss dropped, no dc != 0 entries.
         assert_eq!(stats.exclude_flagged, 8384);
-        assert_eq!(stats.loss_dropped, 152);
         assert_eq!(stats.decoys_dropped, 0);
+        assert_eq!(stats.loss_dropped, 0);
+        let with_loss = geom
+            .frag_labels
+            .iter()
+            .filter(|l| l.loss() != NeutralLoss::None)
+            .count();
+        assert_eq!(with_loss, 152, "every dropped loss is now a labelled one");
         // Exclude-flagged fragments are present in the output, not dropped:
         // entry[0] keeps its flagged y9.
         assert!(
@@ -1147,5 +1191,78 @@ mod tests {
                 .any(|l| *l == IonAnnot::try_new('y', Some(9), 1, 0).unwrap()),
             "flagged y9 must be kept"
         );
+    }
+
+    #[test]
+    fn loss_codes_are_water_and_ammonia() {
+        use std::collections::BTreeMap;
+        let mut buf = Vec::new();
+        std::fs::File::open(fixture_path())
+            .unwrap()
+            .read_to_end(&mut buf)
+            .unwrap();
+        let lib = SpecLib::open(std::io::Cursor::new(&buf[..])).unwrap();
+
+        let mut hist: BTreeMap<u8, usize> = BTreeMap::new();
+        let mut deltas: BTreeMap<u8, Vec<f64>> = BTreeMap::new();
+
+        let mut c = Cursor::new(lib.data.bytes());
+        c.pos = lib.entries_start;
+        for _ in 0..lib.n_entries {
+            let entry = read_entry(&mut c, lib.version, &lib.pg_ids).unwrap();
+            let frags: Vec<(u8, u8, u8, u8, f64)> = entry
+                .peptide
+                .fragments()
+                .map(|f| {
+                    (
+                        f.typ() & 0x7F,
+                        f.index(),
+                        f.charge(),
+                        f.loss(),
+                        f.mz() as f64,
+                    )
+                })
+                .collect();
+            for &(_, _, _, loss, _) in &frags {
+                *hist.entry(loss).or_default() += 1;
+            }
+            for &(t, i, c, loss, mz) in &frags {
+                if loss == 0 || c == 0 {
+                    continue;
+                }
+                if let Some(&(_, _, _, _, base)) = frags
+                    .iter()
+                    .find(|&&(t2, i2, c2, l2, _)| (t2, i2, c2, l2) == (t, i, c, 0))
+                {
+                    deltas.entry(loss).or_default().push((base - mz) * c as f64);
+                }
+            }
+        }
+        for &code in hist.keys() {
+            assert!(
+                loss_from_code(code).is_some(),
+                "unmapped loss code {code} in the fixture: measure it before mapping it"
+            );
+        }
+        let expected = [
+            (1u8, NeutralLoss::Water, 18.0106_f64),
+            (2, NeutralLoss::Ammonia, 17.0265),
+        ];
+        assert_eq!(
+            deltas.keys().copied().collect::<Vec<_>>(),
+            expected.iter().map(|e| e.0).collect::<Vec<_>>(),
+            "the fixture's set of lossy codes changed"
+        );
+        for (code, loss, mass) in expected {
+            assert_eq!(loss_from_code(code), Some(loss));
+            let observed = &deltas[&code];
+            assert!(!observed.is_empty());
+            for &d in observed {
+                assert!(
+                    (d - mass).abs() < 3e-3,
+                    "code {code} measures {d:.4}, not {mass:.4} -- it is not {loss:?}"
+                );
+            }
+        }
     }
 }

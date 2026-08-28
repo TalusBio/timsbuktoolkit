@@ -230,7 +230,7 @@ fn finalize(
 
 /// A cross-fit (leak-free) model over the canonical rescore fold partition.
 ///
-/// See [`crossfit`] for the partition contract.
+/// See `crossfit` for the partition contract.
 struct CrossFit<M: FoldModel> {
     /// Held-out score per row, row-aligned with the input matrix.
     scores: Vec<f64>,
@@ -259,48 +259,13 @@ impl<M: FoldModel> CrossFit<M> {
 /// Cross-fit a [`FoldModel`] over the canonical rescore fold partition and
 /// return each row's HELD-OUT score.
 ///
-/// The shared statement of leak-freedom for [`crossfit_lda`], `rescore_lda`,
-/// and `rescore_hybrid`.
-///
 /// Generic over the model because the partition is independent of the fitted
 /// model. `what` names the model in failure logs.
 ///
-/// # Why a row may never be scored by a model that saw it
-/// These models are label-aware: they fit on the target/decoy labels. One
-/// in-sample fit over all rows, scoring those same rows, lets every row's
-/// discriminant peek at its own label; the target/decoy separation then looks
-/// better than it is, and `assign_qval` derives the q-values from exactly that
-/// separation. The result is an FDR that is wrong in the flattering direction
-/// with nothing downstream to catch it.
-///
-/// The hybrid needs this even more sharply: there the held-out score is not the
-/// final score but one `lda_score` column fed to a
-/// cross-validated GBM. An in-sample column would smuggle a row's own label
-/// into a feature the GBM reads while that row is held out of its GBM fold -- so
-/// the GBM's own CV cannot notice, and the leak surfaces only as an optimistic
-/// FDR.
-///
 /// # Partition
-/// Fold membership comes from [`FoldDataset::get_fold`] -- for the
-/// production datasets, that is `i % N_RESCORE_FOLDS`. For
-/// fold `f` the model is fitted on every row with `get_fold(i) != f` and then
-/// scores only the rows with `get_fold(i) == f`, so no row contributes to the
-/// model scoring it.
-///
-/// This is NOT `CrossValidatedScorer`'s partition and must not be unified with
-/// it: that one fits on fold `f` alone, early-stops on `f + 1`, and scores the
-/// remaining `n_folds - 2` folds, so a row is scored by several models that
-/// each saw a fraction of the data. Here a row is scored exactly once, by a
-/// model that saw everything else. Both satisfy leak-freedom, which is the only
-/// property either has to satisfy; how many rows a model sees and how many
-/// models score a row are free to differ, and do.
-///
-/// What the two DO have to agree on is the fold ASSIGNMENT `get_fold`, or a
-/// hybrid row's cross-fit column can come from a model trained on rows the GBM
-/// is holding out -- leak restored, silently. Both sides read that assignment
-/// from [`FoldDataset::get_fold`], so it has one definition; the
-/// `crossfit_holds_out_exactly_the_rows_the_gbm_scorer_trains_on` test pins the
-/// two partitions against each other rather than against a re-typed modulo.
+/// For fold `f`, the model is fitted on rows where `get_fold(i) != f` and
+/// scores only rows where `get_fold(i) == f`. Fold assignment is shared with
+/// the GBM scorer when this output is used as a hybrid feature.
 ///
 /// Returns an error if any fold cannot fit or score all of its held-out rows.
 /// Callers therefore cannot accidentally consume a partially filled score
@@ -324,18 +289,10 @@ where
     );
 
     for f in 0..n_folds {
-        // TRAIN rows = every row NOT in fold f. HELD = exactly fold f.
-        // Ascending in both cases, so the row order the fit reduces over is the
-        // dataset's own order.
+        // Train on every row outside fold f and score fold f.
         let train: Vec<usize> = (0..nrows).filter(|&i| data.get_fold(i) != f).collect();
         let held: Vec<usize> = (0..nrows).filter(|&i| data.get_fold(i) == f).collect();
 
-        // `val` is EMPTY and the partition is why: this walk trains on
-        // all-but-fold-`f` and scores fold `f`, so every row is already spoken
-        // for and there is no third slice to hand over. The LDA is closed-form
-        // and ignores it. `MlpFoldModel` DOES early-stop, and handles the empty
-        // slice by carving a deterministic inner validation set out of `train`
-        // -- see its `fit` for the rule; nothing about it reaches fold `f`.
         let model = M::fit(cfg, data, f, &train, &[]).map_err(|e| RescoreError::CrossFit {
             model: what,
             fold: f,
@@ -343,7 +300,6 @@ where
             stage: "fit",
             reason: e.to_string(),
         })?;
-        // Score ONLY the held-out fold, with a model that never saw it.
         let preds = model
             .predict(data, &held)
             .map_err(|e| RescoreError::CrossFit {
@@ -380,7 +336,7 @@ where
     })
 }
 
-/// Cross-fit an [`LdaModel`] on [`LdaConfig::default`] -- see [`crossfit`] for
+/// Cross-fit an [`LdaModel`] on [`LdaConfig::default`] -- see `crossfit` for
 /// the partition and the failure policy.
 ///
 /// `N_RESCORE_FOLDS` fits instead of 1 is affordable precisely because the LDA
@@ -447,14 +403,9 @@ pub fn rescore(mut data: Vec<CompetedCandidate>) -> RescoreResult {
 /// is generally much cheaper and less sensitive than GBM, with neither gap
 /// constant across candidate counts.
 ///
-/// The FDR machinery (`assign_qval`, target-decoy competition) is untouched --
-/// only the discriminant score source changes.
+/// Scores each row with an LDA model fitted without that row.
 ///
-/// CROSS-FIT, not a single in-sample fit: every row's score comes from an LDA
-/// fitted without that row, via [`crossfit_lda`] -- see [`crossfit`] for the
-/// partition and why it is mandatory.
-///
-/// Returns PER-FOLD [`FoldStats`] (one per fold, like the GBM path): feature
+/// Returns per-fold `FoldStats`: feature
 /// means/NaN ratios over each fold's held-out rows, `|coef|` importance from
 /// that fold's model.
 ///
@@ -499,10 +450,8 @@ pub fn rescore_lda(mut data: Vec<CompetedCandidate>) -> RescoreResult {
 ///
 /// `data` must already be through [`canonicalize_and_shuffle`].
 ///
-/// The fold count is `N_RESCORE_FOLDS`, i.e. the SAME
-/// `get_fold` the GBM's [`CrossValidatedScorer`] derives its partition from
-/// below. That shared definition is what makes "the same fold assignment on both
-/// sides" structural rather than a comment; see [`crossfit`].
+/// The fold count and assignment match the GBM's
+/// [`CrossValidatedScorer`] partition.
 fn hybrid_linear_dataset(data: &[CompetedCandidate]) -> StreamingDataset<'_, CompetedCandidate> {
     StreamingDataset::new(
         data,
@@ -555,16 +504,8 @@ fn hybrid_frame(
     )
 }
 
-/// Hybrid rescorer: cross-fit an LDA on the LINEAR lane, push its (leak-free)
-/// `lda_score` as one extra column into the NONLINEAR lane, then train the GBM
-/// CV on `nonlinear + lda_score` instead of the full feature frame.
-///
-/// LEAK-FREEDOM: `lda_score` is cross-fit via [`crossfit`] -- see there for the
-/// partition, why a label-aware feature fed to a CV'd GBM in particular must be
-/// leak-free, and why the fold ASSIGNMENT has to match the one
-/// `CrossValidatedScorer` derives its own partition from. ASSIGNMENT, not
-/// partition: the two train/score splits differ deliberately and both are
-/// leak-free, so "unifying" them is the refactor to not make.
+/// Hybrid rescorer: cross-fit an LDA on the LINEAR lane, append its held-out
+/// score to the NONLINEAR lane, then train the GBM on both lanes.
 ///
 /// Selected via the `rescore_model` config field / `--rescore-model` CLI flag
 /// ([`crate::ml::RescoreModel::Hybrid`]).
@@ -645,7 +586,7 @@ fn rescore_mlp_with(mut data: Vec<CompetedCandidate>, config: MlpConfig) -> Resc
 /// [`rescore`] gives the GBM, so the two are directly comparable. The one
 /// [`crate::ml::RescoreModel::Mlp`] selects.
 ///
-/// See [`rescore_mlp_with`] for the cross-fit and determinism contracts.
+/// See `rescore_mlp_with` for the cross-fit and determinism contracts.
 ///
 /// Runtime and sensitivity comparisons are not constant across candidate counts.
 pub fn rescore_mlp(data: Vec<CompetedCandidate>) -> RescoreResult {
@@ -774,8 +715,7 @@ fn write_competed_linear_row(candidate: &CompetedCandidate, out: &mut [f64]) {
     sink.finish();
 }
 
-/// The LINEAR-lane matrix for `data` in its CURRENT order (call AFTER any
-/// shuffle, so row `i` aligns with `data[i]`). `LINEAR_NCOLS` wide.
+/// The LINEAR-lane matrix for `data` in its current order.
 #[cfg(test)]
 fn build_linear_matrix(data: &[CompetedCandidate]) -> Vec<f64> {
     let mut out = Vec::with_capacity(data.len() * LINEAR_NCOLS);
@@ -799,12 +739,8 @@ fn build_nonlinear_matrix(data: &[CompetedCandidate]) -> Vec<f64> {
 /// The ALL-lane matrix (linear then nonlinear, per row) -- the GBM feature set,
 /// `ALL_NCOLS` wide, matching [`all_feature_name_set`]'s order.
 ///
-/// ONE pass over `rows` with ONE `Derived::compute` per row: the two lanes are
-/// adjacent within a row, so there is nothing to gain from walking twice.
-///
-/// Takes `(scoring, meta)` pairs rather than a row type, because both sides of
-/// rescoring feed it and they agree on nothing else. See [`competed_rows`] for
-/// the pre-rescore side and [`feature_frame`] for the post-rescore one.
+/// Each row is projected once, with its linear features followed by its
+/// nonlinear features.
 fn build_all_matrix<'a>(
     rows: impl ExactSizeIterator<Item = (&'a ScoringFields, ResultMeta)>,
 ) -> Vec<f64> {
@@ -817,7 +753,7 @@ fn build_all_matrix<'a>(
     out
 }
 
-/// Competed candidates in the shape [`build_all_matrix`] consumes.
+/// Competed candidates in the shape `build_all_matrix` consumes.
 fn competed_rows(
     data: &[CompetedCandidate],
 ) -> impl ExactSizeIterator<Item = (&ScoringFields, ResultMeta)> {
@@ -833,7 +769,7 @@ pub fn feature_frame(data: &[FinalResult]) -> (Vec<Arc<str>>, Vec<f64>) {
     (all_feature_name_set(), build_all_matrix(rows))
 }
 
-/// LINEAR-lane feature names (LDA), in [`project_linear_row`]'s order.
+/// LINEAR-lane feature names (LDA), in `project_linear_row`'s order.
 pub fn linear_feature_name_set() -> Vec<Arc<str>> {
     let mut n = NameSink::new();
     <ScoringFields as ScoreBlock>::linear_feature_names(&mut n);
@@ -842,7 +778,7 @@ pub fn linear_feature_name_set() -> Vec<Arc<str>> {
     n.into_names()
 }
 
-/// NONLINEAR-lane feature names, in [`project_nonlinear_row`]'s order. The
+/// NONLINEAR-lane feature names, in `project_nonlinear_row`'s order. The
 /// `sequence_counts` names are unconditional -- a peptide with no parsed
 /// sequence contributes NaN values under them, not a shorter row.
 pub fn nonlinear_feature_name_set() -> Vec<Arc<str>> {
@@ -855,7 +791,7 @@ pub fn nonlinear_feature_name_set() -> Vec<Arc<str>> {
 }
 
 /// The ALL-lane feature names (GBM) = linear ++ nonlinear, matching
-/// [`build_all_matrix`]'s column order.
+/// `build_all_matrix`'s column order.
 pub fn all_feature_name_set() -> Vec<Arc<str>> {
     let mut v = linear_feature_name_set();
     v.extend(nonlinear_feature_name_set());

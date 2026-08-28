@@ -2,6 +2,7 @@ use crate::Target;
 use crate::ion::{
     IonAnnot,
     IonParsingError,
+    UnknownIonCounter,
 };
 use serde::Deserialize;
 use std::path::Path;
@@ -16,7 +17,7 @@ use tracing::{
 pub enum SpectronautReadingError {
     Io,
     Csv,
-    PrecursorParsing,
+    PrecursorParsing(SpectronautPrecursorParsingError),
 }
 
 /// Error type for library format detection (sniffing)
@@ -35,8 +36,8 @@ impl std::fmt::Display for SpectronautReadingError {
         match self {
             SpectronautReadingError::Io => write!(f, "IO error"),
             SpectronautReadingError::Csv => write!(f, "CSV parsing error"),
-            SpectronautReadingError::PrecursorParsing => {
-                write!(f, "Spectronaut precursor parsing error")
+            SpectronautReadingError::PrecursorParsing(err) => {
+                write!(f, "Spectronaut precursor parsing error: {}", err)
             }
         }
     }
@@ -46,22 +47,36 @@ impl std::error::Error for SpectronautReadingError {}
 
 #[derive(Debug)]
 pub enum SpectronautPrecursorParsingError {
-    IonParsingError,
+    /// Ion parsing failed at this fragment row.
+    IonParsing {
+        row: usize,
+        source: IonParsingError,
+    },
     IonOverCapacity,
     EmptyIonString,
     Other,
 }
 
-impl From<IonParsingError> for SpectronautPrecursorParsingError {
-    fn from(err: IonParsingError) -> Self {
-        error!("Ion parsing error: {:?}", err);
-        SpectronautPrecursorParsingError::IonParsingError
+impl std::fmt::Display for SpectronautPrecursorParsingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::IonParsing { row, source } => write!(f, "fragment row {}: {}", row, source),
+            Self::IonOverCapacity => write!(f, "fragment ordinal or charge out of range"),
+            Self::EmptyIonString => write!(f, "empty FragmentType"),
+            Self::Other => write!(f, "malformed precursor group"),
+        }
+    }
+}
+
+impl SpectronautPrecursorParsingError {
+    fn ion(row: usize) -> impl Fn(IonParsingError) -> Self {
+        move |source| Self::IonParsing { row, source }
     }
 }
 
 impl From<SpectronautPrecursorParsingError> for SpectronautReadingError {
-    fn from(_err: SpectronautPrecursorParsingError) -> Self {
-        SpectronautReadingError::PrecursorParsing
+    fn from(err: SpectronautPrecursorParsingError) -> Self {
+        SpectronautReadingError::PrecursorParsing(err)
     }
 }
 
@@ -79,7 +94,7 @@ impl From<std::io::Error> for SpectronautReadingError {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, PartialOrd)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct SpectronautPrecursorExtras {
     pub modified_peptide: String,
     pub stripped_peptide: String,
@@ -283,7 +298,7 @@ fn parse_precursor_group(
     let mut fragment_mzs = Vec::with_capacity(included_rows.len());
     buffers.fragment_labels.clear();
     let mut relative_intensities = Vec::with_capacity(included_rows.len());
-    let mut num_unknown_losses = 0;
+    let mut unknown_ions = UnknownIonCounter::default();
 
     for (i, row) in included_rows.iter().enumerate() {
         let fragment_mz = row.fragment_mz;
@@ -303,8 +318,9 @@ fn parse_precursor_group(
                 row.fragment_loss_type, i
             );
 
-            num_unknown_losses += 1;
-            let ion_annot = IonAnnot::try_new('?', Some(num_unknown_losses), frag_charge as i8, 0)?;
+            let ion_annot = unknown_ions
+                .next_unknown(frag_charge as i8)
+                .map_err(SpectronautPrecursorParsingError::ion(i))?;
             buffers.fragment_labels.push(ion_annot);
             fragment_mzs.push(fragment_mz);
             relative_intensities.push((ion_annot, rel_intensity));
@@ -327,7 +343,8 @@ fn parse_precursor_group(
             SpectronautPrecursorParsingError::IonOverCapacity
         })?;
 
-        let ion_annot = IonAnnot::try_new(frag_char, Some(frag_num), frag_charge as i8, 0)?;
+        let ion_annot = IonAnnot::try_new(frag_char, Some(frag_num), frag_charge as i8, 0)
+            .map_err(SpectronautPrecursorParsingError::ion(i))?;
 
         buffers.fragment_labels.push(ion_annot);
         fragment_mzs.push(fragment_mz);

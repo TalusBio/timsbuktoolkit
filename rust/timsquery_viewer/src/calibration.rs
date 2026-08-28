@@ -653,7 +653,7 @@ impl ViewerCalibrationState {
     ///
     /// `indexed_data` and `elution_groups` are needed to enable the Start
     /// button (we need both loaded). `tolerance` is written when the user
-    /// clicks [Apply].
+    /// clicks `Apply`.
     pub fn render_panel(
         &mut self,
         ui: &mut egui::Ui,

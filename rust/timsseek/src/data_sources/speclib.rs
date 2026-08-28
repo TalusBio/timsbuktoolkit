@@ -176,7 +176,7 @@ fn strip_mods(s: &str) -> String {
     out
 }
 
-/// Summary of a [`finalize_reference_library`] call, for load-time logging.
+/// Summary of a `finalize_reference_library` call, for load-time logging.
 #[derive(Debug, Clone, Copy)]
 pub struct LoadReport {
     /// Physical stored rows (pre decoy expansion), i.e. `TargetColumns::n_rows`.

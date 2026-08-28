@@ -278,7 +278,7 @@ impl Default for TraceToggles {
 }
 
 /// Bottom panel: the apex-finder intermediate traces, min-max normalized to
-/// [0,1] so heterogeneous scales overlay legibly. Apex markers overlaid.
+/// `[0,1]` so heterogeneous scales overlay legibly. Apex markers overlaid.
 pub fn traces(ui: &mut egui::Ui, score: &ScoreResult, tog: &TraceToggles, true_apex: f32) {
     let t = &score.traces;
     let mut series: Vec<(&str, &[f32])> = Vec::new();
