@@ -824,48 +824,6 @@ mod tests {
         );
     }
 
-    /// The two DIA-NN TSV variants differ in whether they name the precursor:
-    /// `sample_lib.tsv` carries `transition_group_id`, `sample_lib.txt` does
-    /// not. The named one must come through as the library spelled it; the
-    /// unnamed one must still load and fall back.
-    #[test]
-    fn transition_group_id_is_propagated_when_the_file_has_one() {
-        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests")
-            .join("diann_io_files");
-
-        let named = read_targets(dir.join("sample_lib.tsv")).expect("named variant loads");
-        assert_eq!(
-            named[0].0.id(),
-            crate::models::SourceId::Text("AAAAAAALQAK2"),
-            "DIA-NN's own name for the precursor, not a counter"
-        );
-
-        let unnamed = read_targets(dir.join("sample_lib.txt")).expect("unnamed variant loads");
-        assert_eq!(unnamed[0].0.id(), crate::models::SourceId::Numeric(0));
-    }
-
-    /// Same for the parquet variant, where DIA-NN 2.2 spells the name
-    /// `Precursor.Id`. The Carafe-written fixture has no such column, so it
-    /// exercises the fallback.
-    #[test]
-    fn precursor_id_is_propagated_from_parquet_when_present() {
-        let dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .join("tests")
-            .join("diann_io_files");
-
-        let named = read_parquet_library_file(dir.join("sample_pq_speclib.parquet"))
-            .expect("named variant loads");
-        assert_eq!(
-            named[0].0.id(),
-            crate::models::SourceId::Text("GREEWESAALQNANTK3")
-        );
-
-        let unnamed = read_parquet_library_file(dir.join("carafe_pq_speclib.parquet"))
-            .expect("unnamed variant loads");
-        assert_eq!(unnamed[0].0.id(), crate::models::SourceId::Numeric(0));
-    }
-
     #[test]
     fn test_read_targets() {
         let manifest_dir = env!("CARGO_MANIFEST_DIR");

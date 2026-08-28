@@ -321,7 +321,7 @@ impl TargetTable {
             )));
         }
 
-        geom.seal();
+        seal_with_source_ids(&mut geom, &egs)?;
         Ok(TargetTable::Mzpaf {
             geom,
             frag_intens: Some(frag_intens),
@@ -364,8 +364,7 @@ impl TargetTable {
                         &[],
                     );
                 }
-                set_source_ids_from(&mut geom, &egs)?;
-                geom.seal();
+                seal_with_source_ids(&mut geom, &egs)?;
                 Ok(TargetTable::Mzpaf {
                     geom,
                     frag_intens: None,
@@ -392,8 +391,7 @@ impl TargetTable {
                         &[],
                     );
                 }
-                set_source_ids_from(&mut geom, &egs)?;
-                geom.seal();
+                seal_with_source_ids(&mut geom, &egs)?;
                 Ok(TargetTable::Str { geom })
             }
             ElutionGroupCollection::TinyIntLabels(..) | ElutionGroupCollection::IntLabels(..) => {
@@ -404,11 +402,14 @@ impl TargetTable {
     }
 }
 
-/// Carry the caller's `id` from the JSON payload into the arena.
+/// Carry the rows' ids into the arena, then seal it.
 ///
-/// Only this path has one: the tabular readers identify precursors by string
-/// (DIA-NN's `transition_group_id`) or not at all, and neither is stored yet.
-fn set_source_ids_from<L: KeyLike, T: KeyLike>(
+/// The two steps are one function because separating them is how the ids got
+/// lost: `mzpaf_with_intensities` sealed without them, so every DIA-NN library
+/// -- the formats that actually name their precursors -- minted `0..n` over the
+/// names it had just parsed, and the reader-level tests passed because they
+/// asserted on the `Target` rather than on the arena.
+fn seal_with_source_ids<L: KeyLike, T: KeyLike>(
     geom: &mut TargetColumns<L>,
     egs: &[Target<T>],
 ) -> Result<(), TargetReadingError> {
@@ -416,8 +417,9 @@ fn set_source_ids_from<L: KeyLike, T: KeyLike>(
         .iter()
         .map(|eg| eg.id().to_owned_id())
         .collect::<Vec<_>>();
-    geom.set_source_ids_owned(ids)
-        .map_err(TargetReadingError::SourceId)
+    geom.set_source_ids_owned(ids)?;
+    geom.seal();
+    Ok(())
 }
 
 /// A single spectral-library format reader. Adding a format = one struct + one
@@ -585,4 +587,59 @@ pub fn read_targets<T: AsRef<Path>>(path: T) -> Result<TargetTable, TargetReadin
     // Dead default in practice (JsonReader always sniffs true) — a harmless
     // defensive fallback.
     Err(last_err.unwrap_or(TargetReadingError::UnableToParseElutionGroups))
+}
+
+#[cfg(test)]
+mod tests {
+    use std::path::{
+        Path,
+        PathBuf,
+    };
+
+    /// What a result would actually be keyed by: the ids the sealed arena
+    /// holds, read back through the public funnel.
+    ///
+    /// Every id assertion belongs at this layer. The readers were setting
+    /// `Target::id` correctly the whole time while `mzpaf_with_intensities`
+    /// sealed without carrying it over, so tests one layer up passed against an
+    /// arena full of minted counters.
+    fn arena_ids(path: &Path) -> Vec<String> {
+        match super::read_targets(path).expect("fixture loads") {
+            super::TargetTable::Mzpaf { geom, .. } => {
+                geom.rows().map(|r| geom.output_id(r).to_string()).collect()
+            }
+            super::TargetTable::Str { geom } => {
+                geom.rows().map(|r| geom.output_id(r).to_string()).collect()
+            }
+        }
+    }
+
+    fn fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests/diann_io_files")
+            .join(name)
+    }
+
+    /// `sample_lib.tsv` carries `transition_group_id`; `sample_lib.txt` does
+    /// not, so between them they cover propagation and the minted fallback.
+    #[test]
+    fn a_diann_tsv_name_survives_into_the_arena() {
+        assert_eq!(
+            arena_ids(&fixture("sample_lib.tsv")),
+            ["AAAAAAALQAK2"],
+            "DIA-NN's own name for the precursor, not a counter"
+        );
+        assert_eq!(arena_ids(&fixture("sample_lib.txt")), ["0", "1"]);
+    }
+
+    /// Same, for the parquet variant, where DIA-NN 2.2 spells it
+    /// `Precursor.Id`. The Carafe-written fixture has no such column.
+    #[test]
+    fn a_diann_parquet_name_survives_into_the_arena() {
+        assert_eq!(
+            arena_ids(&fixture("sample_pq_speclib.parquet"))[0],
+            "GREEWESAALQNANTK3"
+        );
+        assert_eq!(arena_ids(&fixture("carafe_pq_speclib.parquet"))[0], "0");
+    }
 }
