@@ -278,7 +278,10 @@ fn finalize_reference_library(
     if let Some(example) = &first_unparsable {
         tracing::warn!(
             "{}/{} library entries have an unparsable modified sequence, so \
-             sequence features are off for the whole library (first: {:?})",
+             sequence features are off for the whole library (first: {:?}). \
+             Libraries spelled in ProForma (`PEPTC[UNIMOD:4]IDEK`) are strongly \
+             preferred. DIA-NN's `(UniMod:n)` is converted for you; other \
+             modification spellings may not be.",
             n_unparsable,
             n_rows,
             example
