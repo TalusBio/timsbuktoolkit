@@ -612,7 +612,7 @@ pub(crate) fn fold_weights<D: FoldDataset>(data: &D, rows: &[usize]) -> Vec<f64>
 
 /// [`FoldModel`] adapter for `forust`'s [`GradientBooster`]. A newtype only
 /// because `GradientBooster` is a foreign type; it also carries the lane width
-/// so [`FoldModel::importance`] can return a full-width, lane-indexed vector
+/// so `FoldModel::importance` can return a full-width, lane-indexed vector
 /// (forust reports only the columns it split on).
 pub(crate) struct GbmFoldModel {
     booster: GradientBooster,
@@ -667,7 +667,7 @@ impl FoldModel for GbmFoldModel {
     /// forust reports only the columns it actually split on. Every other lane
     /// is `NAN` -- "not reported" -- rather than `0.0`, because this model has no
     /// gain measurement for a column it never used. See the
-    /// [`FoldModel::importance`] contract.
+    /// `FoldModel::importance` contract.
     fn importance(&self) -> Vec<f32> {
         let raw = self
             .booster
@@ -755,10 +755,10 @@ pub struct FeatureStat {
 /// Per-fold feature statistics.
 ///
 /// `feature_stats` is in the dataset's own column order
-/// ([`FoldDataset::column_names`], i.e. the matrix's column order), one entry per
+/// (`FoldDataset::column_names`, i.e. the matrix's column order), one entry per
 /// column. `feature_importance` is sorted by importance DESCENDING (top features
 /// first), and carries only the columns the model reported a finite value for --
-/// see [`FoldModel::importance`] -- so it is generally shorter than
+/// see `FoldModel::importance` -- so it is generally shorter than
 /// `feature_stats` and in a different order.
 ///
 /// Descending because the two TSV sidecars `timsseek_cli` writes
@@ -798,7 +798,7 @@ pub(crate) fn fold_feature_stats<D: FoldDataset, M: FoldModel>(
     for (fold, rows) in fold_rows.iter().enumerate() {
         // --- Importance, back to the (name, gain) sidecar shape ---
         // UNREPORTED (`NAN`) columns are dropped; every REPORTED column is
-        // emitted, `0.0` included. See the [`FoldModel::importance`] contract
+        // emitted, `0.0` included. See the `FoldModel::importance` contract
         // for why those are different things. The drop matters because the
         // sidecar and the dashboard's fold-averaged gain both treat a feature
         // as "reported by this fold" simply by being present, so a model's
@@ -1472,7 +1472,7 @@ mod test {
         }
     }
 
-    /// THE [`FoldModel::importance`] sentinel contract, at the sidecar boundary:
+    /// THE `FoldModel::importance` sentinel contract, at the sidecar boundary:
     /// `NAN` means "this model reports nothing for this column" and is dropped;
     /// every FINITE value reaches the sidecar, `0.0` included.
     ///

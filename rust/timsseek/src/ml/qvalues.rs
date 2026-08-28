@@ -230,7 +230,7 @@ fn finalize(
 
 /// A cross-fit (leak-free) model over the canonical rescore fold partition.
 ///
-/// See [`crossfit`] for the partition contract.
+/// See `crossfit` for the partition contract.
 struct CrossFit<M: FoldModel> {
     /// Held-out score per row, row-aligned with the input matrix.
     scores: Vec<f64>,
@@ -259,7 +259,7 @@ impl<M: FoldModel> CrossFit<M> {
 /// Cross-fit a [`FoldModel`] over the canonical rescore fold partition and
 /// return each row's HELD-OUT score.
 ///
-/// The shared statement of leak-freedom for [`crossfit_lda`], `rescore_lda`,
+/// The shared statement of leak-freedom for `crossfit_lda`, `rescore_lda`,
 /// and `rescore_hybrid`.
 ///
 /// Generic over the model because the partition is independent of the fitted
@@ -380,7 +380,7 @@ where
     })
 }
 
-/// Cross-fit an [`LdaModel`] on [`LdaConfig::default`] -- see [`crossfit`] for
+/// Cross-fit an [`LdaModel`] on [`LdaConfig::default`] -- see `crossfit` for
 /// the partition and the failure policy.
 ///
 /// `N_RESCORE_FOLDS` fits instead of 1 is affordable precisely because the LDA
@@ -451,10 +451,10 @@ pub fn rescore(mut data: Vec<CompetedCandidate>) -> RescoreResult {
 /// only the discriminant score source changes.
 ///
 /// CROSS-FIT, not a single in-sample fit: every row's score comes from an LDA
-/// fitted without that row, via [`crossfit_lda`] -- see [`crossfit`] for the
+/// fitted without that row, via `crossfit_lda` -- see `crossfit` for the
 /// partition and why it is mandatory.
 ///
-/// Returns PER-FOLD [`FoldStats`] (one per fold, like the GBM path): feature
+/// Returns PER-FOLD `FoldStats` (one per fold, like the GBM path): feature
 /// means/NaN ratios over each fold's held-out rows, `|coef|` importance from
 /// that fold's model.
 ///
@@ -502,7 +502,7 @@ pub fn rescore_lda(mut data: Vec<CompetedCandidate>) -> RescoreResult {
 /// The fold count is `N_RESCORE_FOLDS`, i.e. the SAME
 /// `get_fold` the GBM's [`CrossValidatedScorer`] derives its partition from
 /// below. That shared definition is what makes "the same fold assignment on both
-/// sides" structural rather than a comment; see [`crossfit`].
+/// sides" structural rather than a comment; see `crossfit`.
 fn hybrid_linear_dataset(data: &[CompetedCandidate]) -> StreamingDataset<'_, CompetedCandidate> {
     StreamingDataset::new(
         data,
@@ -559,7 +559,7 @@ fn hybrid_frame(
 /// `lda_score` as one extra column into the NONLINEAR lane, then train the GBM
 /// CV on `nonlinear + lda_score` instead of the full feature frame.
 ///
-/// LEAK-FREEDOM: `lda_score` is cross-fit via [`crossfit`] -- see there for the
+/// LEAK-FREEDOM: `lda_score` is cross-fit via `crossfit` -- see there for the
 /// partition, why a label-aware feature fed to a CV'd GBM in particular must be
 /// leak-free, and why the fold ASSIGNMENT has to match the one
 /// `CrossValidatedScorer` derives its own partition from. ASSIGNMENT, not
@@ -645,7 +645,7 @@ fn rescore_mlp_with(mut data: Vec<CompetedCandidate>, config: MlpConfig) -> Resc
 /// [`rescore`] gives the GBM, so the two are directly comparable. The one
 /// [`crate::ml::RescoreModel::Mlp`] selects.
 ///
-/// See [`rescore_mlp_with`] for the cross-fit and determinism contracts.
+/// See `rescore_mlp_with` for the cross-fit and determinism contracts.
 ///
 /// Runtime and sensitivity comparisons are not constant across candidate counts.
 pub fn rescore_mlp(data: Vec<CompetedCandidate>) -> RescoreResult {
@@ -817,7 +817,7 @@ fn build_all_matrix<'a>(
     out
 }
 
-/// Competed candidates in the shape [`build_all_matrix`] consumes.
+/// Competed candidates in the shape `build_all_matrix` consumes.
 fn competed_rows(
     data: &[CompetedCandidate],
 ) -> impl ExactSizeIterator<Item = (&ScoringFields, ResultMeta)> {
@@ -833,7 +833,7 @@ pub fn feature_frame(data: &[FinalResult]) -> (Vec<Arc<str>>, Vec<f64>) {
     (all_feature_name_set(), build_all_matrix(rows))
 }
 
-/// LINEAR-lane feature names (LDA), in [`project_linear_row`]'s order.
+/// LINEAR-lane feature names (LDA), in `project_linear_row`'s order.
 pub fn linear_feature_name_set() -> Vec<Arc<str>> {
     let mut n = NameSink::new();
     <ScoringFields as ScoreBlock>::linear_feature_names(&mut n);
@@ -842,7 +842,7 @@ pub fn linear_feature_name_set() -> Vec<Arc<str>> {
     n.into_names()
 }
 
-/// NONLINEAR-lane feature names, in [`project_nonlinear_row`]'s order. The
+/// NONLINEAR-lane feature names, in `project_nonlinear_row`'s order. The
 /// `sequence_counts` names are unconditional -- a peptide with no parsed
 /// sequence contributes NaN values under them, not a shorter row.
 pub fn nonlinear_feature_name_set() -> Vec<Arc<str>> {
@@ -855,7 +855,7 @@ pub fn nonlinear_feature_name_set() -> Vec<Arc<str>> {
 }
 
 /// The ALL-lane feature names (GBM) = linear ++ nonlinear, matching
-/// [`build_all_matrix`]'s column order.
+/// `build_all_matrix`'s column order.
 pub fn all_feature_name_set() -> Vec<Arc<str>> {
     let mut v = linear_feature_name_set();
     v.extend(nonlinear_feature_name_set());

@@ -30,7 +30,7 @@ pub struct EntryFilters {
 
 /// Strip bracket-enclosed modifications from a sequence.
 ///
-/// "PEPTC[U:4]IDEK" → "PEPTCIDEK"
+/// `"PEPTC[U:4]IDEK"` -> `"PEPTCIDEK"`
 pub fn strip_mods(seq: &str) -> String {
     let mut out = String::with_capacity(seq.len());
     let mut depth = 0usize;

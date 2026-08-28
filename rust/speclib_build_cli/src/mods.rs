@@ -1,6 +1,6 @@
 /// Proforma-like modification parsing and application for speclib_build.
 ///
-/// Supports notations like "C[U:4]", "M[U:35]", "S[U:21]", "M[+15.995]".
+/// Supports notations like `C[U:4]`, `M[U:35]`, `S[U:21]`, `M[+15.995]`.
 /// Fixed mods are inserted after every matching residue in the sequence.
 /// Variable mods generate all combinations up to `max_mods` sites.
 
@@ -10,7 +10,7 @@
 pub struct Modification {
     /// Uppercase single-letter amino acid code.
     pub target_residue: char,
-    /// Bracket notation including brackets, e.g. "[U:4]" or "[+15.995]".
+    /// Bracket notation including brackets, e.g. `[U:4]` or `[+15.995]`.
     pub notation: String,
 }
 

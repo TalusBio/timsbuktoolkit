@@ -30,6 +30,12 @@ tasks:
       # dashboard.rs only exists under the opt-in feature; CI only `cargo check`s it.
       - cargo clippy -p timsseek_cli --features dashboard --all-targets -- -D warnings
 
+  # Broken and private intra-doc links only bite the reader, so nothing else
+  # catches them: CI does not build docs.
+  doc:
+    cmds:
+      - RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+
   todos:
     cmds:
       - grep -nH -R TODO rust/tims*/src

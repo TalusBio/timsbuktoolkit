@@ -8,12 +8,13 @@
 //! (little-endian, no padding, no section table); it must be parsed strictly in
 //! order, so there is no random access across sections.
 //!
-//! The reader is three layers:
-//!   1. Decode ([`Cursor`], [`Fragment`], [`Peptide`]): typed, zero-copy views
+//! The reader is three layers. The types named here are private to this module,
+//! so they are spelled rather than linked:
+//!   1. Decode (`Cursor`, `Fragment`, `Peptide`): typed, zero-copy views
 //!      over byte ranges of the in-memory file. No domain knowledge.
-//!   2. Emit ([`SpecLib`] + [`EntryIter`]): a pull parser that walks the
-//!      variable-length envelope and yields one [`EntryView`] per precursor.
-//!   3. Map ([`map_entry`]): [`EntryView`] -> rows pushed directly into a
+//!   2. Emit (`SpecLib` + `EntryIter`): a pull parser that walks the
+//!      variable-length envelope and yields one `EntryView` per precursor.
+//!   3. Map (`map_entry`): `EntryView` -> rows pushed directly into a
 //!      columnar `TargetColumns<IonAnnot>` (plus a parallel reference-intensity
 //!      sidecar). This is where the ion-type table, dedup, and drop stats live.
 //!
@@ -569,9 +570,11 @@ fn bounded_capacity(count: usize, remaining_bytes: usize, min_record_bytes: usiz
 #[derive(Debug, Default, Clone, Copy)]
 pub struct SpeclibDecodeStats {
     /// Fragments flagged `ExcludeFromAssay` (`type & 0x80`). Kept (see
-    /// [`map_entry`]); counted for reporting only.
+    /// `map_entry`); counted for reporting only.
     pub exclude_flagged: usize,
-    /// Fragments with a neutral loss (`loss != 0`) -- `IonAnnot` cannot hold loss.
+    /// Fragments with a neutral loss (`loss != 0`). `IonAnnot` can represent
+    /// these; what is missing is the DIA-NN loss-code mapping (see #105), so
+    /// they are dropped and counted to keep the cost visible.
     pub loss_dropped: usize,
     /// Fragments whose ion-type code or recovered series was unusable.
     pub unknown_ion_dropped: usize,
@@ -809,11 +812,29 @@ fn map_entry(
             continue;
         }
 
-        let ion = match IonAnnot::try_new(type_char, Some(series as u8), f.charge() as i8, 0) {
+        // `charge` is a raw wire byte. `as i8` would reinterpret anything above
+        // 127 as negative and hand a plausible-looking charge to the
+        // constructor, so it is range-checked instead. Note the sibling `typ()`
+        // is masked `& 0x7F` because DIA-NN sets a flag bit there; if this byte
+        // carries flags too, this is where it will surface (see #105).
+        let charge = match i8::try_from(f.charge()) {
+            Ok(charge) => charge,
+            Err(_) => {
+                warn!(
+                    "speclib entry {:?}: fragment charge byte {} is not a charge; dropping",
+                    name,
+                    f.charge()
+                );
+                stats.unknown_ion_dropped += 1;
+                continue;
+            }
+        };
+
+        let ion = match IonAnnot::try_new(type_char, Some(series as u8), charge, 0) {
             Ok(ion) => ion,
             Err(e) => {
                 warn!(
-                    "speclib entry {:?}: failed to build IonAnnot ({:?}); dropping fragment",
+                    "speclib entry {:?}: failed to build IonAnnot ({}); dropping fragment",
                     name, e
                 );
                 stats.unknown_ion_dropped += 1;
@@ -874,7 +895,7 @@ type ParsedSpeclib = (TargetColumns<IonAnnot>, Vec<f32>, SpeclibDecodeStats, boo
 /// structural desync.
 ///
 /// Reads the file, parses the header, then parses+maps entries in parallel
-/// ([`SpecLib::open`] + [`SpecLib::parse_parallel`]).
+/// (`SpecLib::open` + `SpecLib::parse_parallel`).
 pub fn parse_speclib_reader<R: Read>(reader: R) -> Result<ParsedSpeclib, TargetReadingError> {
     SpecLib::open(reader)?.parse_parallel()
 }

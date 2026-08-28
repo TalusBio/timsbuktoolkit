@@ -17,7 +17,7 @@ use tracing::{
 pub enum SpectronautReadingError {
     Io,
     Csv,
-    PrecursorParsing,
+    PrecursorParsing(SpectronautPrecursorParsingError),
 }
 
 /// Error type for library format detection (sniffing)
@@ -36,8 +36,8 @@ impl std::fmt::Display for SpectronautReadingError {
         match self {
             SpectronautReadingError::Io => write!(f, "IO error"),
             SpectronautReadingError::Csv => write!(f, "CSV parsing error"),
-            SpectronautReadingError::PrecursorParsing => {
-                write!(f, "Spectronaut precursor parsing error")
+            SpectronautReadingError::PrecursorParsing(err) => {
+                write!(f, "Spectronaut precursor parsing error: {}", err)
             }
         }
     }
@@ -47,22 +47,39 @@ impl std::error::Error for SpectronautReadingError {}
 
 #[derive(Debug)]
 pub enum SpectronautPrecursorParsingError {
-    IonParsingError,
+    /// Which fragment row failed, and why. One failure aborts the whole library
+    /// load, and nothing upstream knows where it happened.
+    IonParsing {
+        row: usize,
+        source: IonParsingError,
+    },
     IonOverCapacity,
     EmptyIonString,
     Other,
 }
 
-impl From<IonParsingError> for SpectronautPrecursorParsingError {
-    fn from(err: IonParsingError) -> Self {
-        error!("Ion parsing error: {:?}", err);
-        SpectronautPrecursorParsingError::IonParsingError
+impl std::fmt::Display for SpectronautPrecursorParsingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::IonParsing { row, source } => write!(f, "fragment row {}: {}", row, source),
+            Self::IonOverCapacity => write!(f, "fragment ordinal or charge out of range"),
+            Self::EmptyIonString => write!(f, "empty FragmentType"),
+            Self::Other => write!(f, "malformed precursor group"),
+        }
+    }
+}
+
+impl SpectronautPrecursorParsingError {
+    /// `map_err` adaptor that stamps the fragment row onto an ion-parsing
+    /// failure. Replaces a `From` impl, which had no way to see the row.
+    fn ion(row: usize) -> impl Fn(IonParsingError) -> Self {
+        move |source| Self::IonParsing { row, source }
     }
 }
 
 impl From<SpectronautPrecursorParsingError> for SpectronautReadingError {
-    fn from(_err: SpectronautPrecursorParsingError) -> Self {
-        SpectronautReadingError::PrecursorParsing
+    fn from(err: SpectronautPrecursorParsingError) -> Self {
+        SpectronautReadingError::PrecursorParsing(err)
     }
 }
 
@@ -304,7 +321,9 @@ fn parse_precursor_group(
                 row.fragment_loss_type, i
             );
 
-            let ion_annot = unknown_ions.next_unknown(frag_charge as i8)?;
+            let ion_annot = unknown_ions
+                .next_unknown(frag_charge as i8)
+                .map_err(SpectronautPrecursorParsingError::ion(i))?;
             buffers.fragment_labels.push(ion_annot);
             fragment_mzs.push(fragment_mz);
             relative_intensities.push((ion_annot, rel_intensity));
@@ -327,7 +346,8 @@ fn parse_precursor_group(
             SpectronautPrecursorParsingError::IonOverCapacity
         })?;
 
-        let ion_annot = IonAnnot::try_new(frag_char, Some(frag_num), frag_charge as i8, 0)?;
+        let ion_annot = IonAnnot::try_new(frag_char, Some(frag_num), frag_charge as i8, 0)
+            .map_err(SpectronautPrecursorParsingError::ion(i))?;
 
         buffers.fragment_labels.push(ion_annot);
         fragment_mzs.push(fragment_mz);

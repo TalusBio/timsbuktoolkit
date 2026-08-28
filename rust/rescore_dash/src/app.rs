@@ -294,7 +294,7 @@ fn available() -> bool {
 /// would unwind past the caller's warn-only `if let Err` -- after the results
 /// have already been written to disk.
 ///
-/// The terminal is restored on every returning path. [`catch_panics`] covers
+/// The terminal is restored on every returning path. `catch_panics` covers
 /// the event loop, but only in a debug build; see its doc.
 pub fn run(dash: Dashboard) -> std::io::Result<()> {
     if !available() {

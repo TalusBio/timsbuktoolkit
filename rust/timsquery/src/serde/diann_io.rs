@@ -27,7 +27,7 @@ use tracing::{
 pub enum DiannReadingError {
     Io,
     Csv,
-    PrecursorParsing,
+    PrecursorParsing(DiannPrecursorParsingError),
     Parquet(String),
     Arrow(String),
 }
@@ -37,8 +37,8 @@ impl std::fmt::Display for DiannReadingError {
         match self {
             DiannReadingError::Io => write!(f, "IO error"),
             DiannReadingError::Csv => write!(f, "CSV parsing error"),
-            DiannReadingError::PrecursorParsing => {
-                write!(f, "DIA-NN precursor parsing error")
+            DiannReadingError::PrecursorParsing(err) => {
+                write!(f, "DIA-NN precursor parsing error: {}", err)
             }
             DiannReadingError::Parquet(msg) => write!(f, "Parquet error: {}", msg),
             DiannReadingError::Arrow(msg) => write!(f, "Arrow error: {}", msg),
@@ -50,7 +50,13 @@ impl std::error::Error for DiannReadingError {}
 
 #[derive(Debug)]
 pub enum DiannPrecursorParsingError {
-    IonParsingError,
+    /// Which fragment row failed, and why. The row index is the only handle the
+    /// user gets on a bad row: one failure aborts the whole library load, and
+    /// nothing upstream knows where it happened.
+    IonParsing {
+        row: usize,
+        source: IonParsingError,
+    },
     /// A library that names its other precursors left this one blank. See
     /// [`Naming`].
     UnnamedPrecursor,
@@ -59,16 +65,34 @@ pub enum DiannPrecursorParsingError {
     Other,
 }
 
-impl From<IonParsingError> for DiannPrecursorParsingError {
-    fn from(err: IonParsingError) -> Self {
-        error!("Ion parsing error: {:?}", err);
-        DiannPrecursorParsingError::IonParsingError
+impl std::fmt::Display for DiannPrecursorParsingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::IonParsing { row, source } => {
+                write!(f, "fragment row {}: {}", row, source)
+            }
+            Self::UnnamedPrecursor => write!(
+                f,
+                "a library that names its other precursors left this one blank"
+            ),
+            Self::IonOverCapacity => write!(f, "fragment ordinal or charge out of range"),
+            Self::EmptyIonString => write!(f, "empty FragmentType"),
+            Self::Other => write!(f, "malformed precursor group"),
+        }
+    }
+}
+
+impl DiannPrecursorParsingError {
+    /// `map_err` adaptor that stamps the fragment row onto an ion-parsing
+    /// failure. Replaces a `From` impl, which had no way to see the row.
+    fn ion(row: usize) -> impl Fn(IonParsingError) -> Self {
+        move |source| Self::IonParsing { row, source }
     }
 }
 
 impl From<DiannPrecursorParsingError> for DiannReadingError {
-    fn from(_err: DiannPrecursorParsingError) -> Self {
-        DiannReadingError::PrecursorParsing
+    fn from(err: DiannPrecursorParsingError) -> Self {
+        DiannReadingError::PrecursorParsing(err)
     }
 }
 
@@ -434,7 +458,9 @@ fn parse_precursor_group(
                 row.fragment_loss_type, i
             );
 
-            let ion_annot = unknown_ions.next_unknown(frag_charge as i8)?;
+            let ion_annot = unknown_ions
+                .next_unknown(frag_charge as i8)
+                .map_err(DiannPrecursorParsingError::ion(i))?;
             buffers.fragment_labels.push(ion_annot);
             fragment_mzs.push(fragment_mz);
             relative_intensities.push((ion_annot, rel_intensity));
@@ -457,7 +483,8 @@ fn parse_precursor_group(
             DiannPrecursorParsingError::IonOverCapacity
         })?;
 
-        let ion_annot = IonAnnot::try_new(frag_char, Some(frag_num), frag_charge as i8, 0)?;
+        let ion_annot = IonAnnot::try_new(frag_char, Some(frag_num), frag_charge as i8, 0)
+            .map_err(DiannPrecursorParsingError::ion(i))?;
 
         buffers.fragment_labels.push(ion_annot);
         fragment_mzs.push(fragment_mz);
@@ -765,7 +792,9 @@ fn parse_precursor_group_from_parquet(
                 columns.fragment_loss_types[idx], i
             );
 
-            let ion_annot = unknown_ions.next_unknown(frag_charge as i8)?;
+            let ion_annot = unknown_ions
+                .next_unknown(frag_charge as i8)
+                .map_err(DiannPrecursorParsingError::ion(i))?;
             buffers.fragment_labels.push(ion_annot);
             fragment_mzs.push(fragment_mz);
             rel_intensities.push((ion_annot, rel_intensity));
@@ -788,7 +817,8 @@ fn parse_precursor_group_from_parquet(
             DiannPrecursorParsingError::IonOverCapacity
         })?;
 
-        let ion_annot = IonAnnot::try_new(frag_char, Some(frag_num), frag_charge as i8, 0)?;
+        let ion_annot = IonAnnot::try_new(frag_char, Some(frag_num), frag_charge as i8, 0)
+            .map_err(DiannPrecursorParsingError::ion(i))?;
 
         buffers.fragment_labels.push(ion_annot);
         fragment_mzs.push(fragment_mz);
@@ -867,7 +897,9 @@ AAAAAAALQAK\tAAAAAAALQAK\t478.7\t2\t11.0\t0.9\tP2\t0\t300.0\ty\t3\t1\tnoloss\t1.
         assert!(
             matches!(
                 read_targets(blank.path()),
-                Err(DiannReadingError::PrecursorParsing)
+                Err(DiannReadingError::PrecursorParsing(
+                    DiannPrecursorParsingError::UnnamedPrecursor
+                ))
             ),
             "a blank name in a naming library must not load"
         );

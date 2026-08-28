@@ -21,7 +21,7 @@ use tracing::{
 pub enum SkylineReadingError {
     Io,
     Csv,
-    PrecursorParsing,
+    PrecursorParsing(SkylinePrecursorParsingError),
 }
 
 #[derive(Debug)]
@@ -37,8 +37,8 @@ impl std::fmt::Display for SkylineReadingError {
         match self {
             SkylineReadingError::Io => write!(f, "IO error"),
             SkylineReadingError::Csv => write!(f, "CSV parsing error"),
-            SkylineReadingError::PrecursorParsing => {
-                write!(f, "Skyline precursor parsing error")
+            SkylineReadingError::PrecursorParsing(err) => {
+                write!(f, "Skyline precursor parsing error: {}", err)
             }
         }
     }
@@ -48,21 +48,37 @@ impl std::error::Error for SkylineReadingError {}
 
 #[derive(Debug)]
 pub enum SkylinePrecursorParsingError {
-    IonParsingError,
+    /// Which fragment row failed, and why. One failure aborts the whole library
+    /// load, and nothing upstream knows where it happened.
+    IonParsing {
+        row: usize,
+        source: IonParsingError,
+    },
     IonOverCapacity,
     Other,
 }
 
-impl From<IonParsingError> for SkylinePrecursorParsingError {
-    fn from(err: IonParsingError) -> Self {
-        error!("Ion parsing error: {:?}", err);
-        SkylinePrecursorParsingError::IonParsingError
+impl std::fmt::Display for SkylinePrecursorParsingError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::IonParsing { row, source } => write!(f, "fragment row {}: {}", row, source),
+            Self::IonOverCapacity => write!(f, "fragment ordinal or charge out of range"),
+            Self::Other => write!(f, "malformed precursor group"),
+        }
+    }
+}
+
+impl SkylinePrecursorParsingError {
+    /// `map_err` adaptor that stamps the fragment row onto an ion-parsing
+    /// failure. Replaces a `From` impl, which had no way to see the row.
+    fn ion(row: usize) -> impl Fn(IonParsingError) -> Self {
+        move |source| Self::IonParsing { row, source }
     }
 }
 
 impl From<SkylinePrecursorParsingError> for SkylineReadingError {
-    fn from(_err: SkylinePrecursorParsingError) -> Self {
-        SkylineReadingError::PrecursorParsing
+    fn from(err: SkylinePrecursorParsingError) -> Self {
+        SkylineReadingError::PrecursorParsing(err)
     }
 }
 
@@ -341,7 +357,8 @@ fn parse_precursor_group(
                     );
                     SkylinePrecursorParsingError::IonOverCapacity
                 })?;
-                IonAnnot::try_new(frag_char, Some(frag_num), frag_charge as i8, 0)?
+                IonAnnot::try_new(frag_char, Some(frag_num), frag_charge as i8, 0)
+                    .map_err(SkylinePrecursorParsingError::ion(i))?
             }
             None => {
                 warn!(
@@ -349,7 +366,9 @@ fn parse_precursor_group(
                      falling back to unknown ion",
                     frag_type, i
                 );
-                unknown_ions.next_unknown(frag_charge as i8)?
+                unknown_ions
+                    .next_unknown(frag_charge as i8)
+                    .map_err(SkylinePrecursorParsingError::ion(i))?
             }
         };
 

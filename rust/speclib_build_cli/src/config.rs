@@ -91,9 +91,11 @@ impl Default for DigestionConfig {
 #[derive(Debug, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 pub struct ModificationsConfig {
-    /// Fixed modifications applied to every matching residue, e.g. ["Carbamidomethyl@C"].
+    /// Fixed modifications applied to every matching residue, e.g.
+    /// `["Carbamidomethyl@C"]`.
     pub fixed: Vec<String>,
-    /// Variable modifications considered during peptide generation, e.g. ["Oxidation@M"].
+    /// Variable modifications considered during peptide generation, e.g.
+    /// `["Oxidation@M"]`.
     pub variable: Vec<String>,
     /// Maximum number of variable modifications per peptide.
     pub max_variable: usize,

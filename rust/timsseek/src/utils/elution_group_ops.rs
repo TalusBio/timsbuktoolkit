@@ -16,9 +16,12 @@ pub fn apply_isotope_offset_fragments_into(
 ) {
     dst.reset_from(src);
     for (k, v) in dst.iter_fragments_refs_mut() {
-        let new_ions = k.try_with_offset_neutrons(offset).expect(
-            "Isotope offset overflow - this should never happen with realistic isotope offsets",
-        );
+        // The error names the representable range, so a library carrying an
+        // isotope offset too close to the ceiling says what the limit is rather
+        // than asserting the situation is impossible.
+        let new_ions = k.try_with_offset_neutrons(offset).unwrap_or_else(|e| {
+            panic!("fragment {k} cannot take a {offset:+} isotope offset: {e}")
+        });
         let mz_offset = (C13_C12_MASS_DIFF / k.get_charge() as f64) * offset as f64;
         *v += mz_offset;
         *k = new_ions;

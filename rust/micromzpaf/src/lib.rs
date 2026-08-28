@@ -107,13 +107,15 @@ const LOSS_BITS: u32 = 6;
 const PAYLOAD_SHIFT: u32 = 18;
 const PAYLOAD_BITS: u32 = 12;
 
-/// Widest charge the 4-bit zigzag field holds. Observed maximum is 3.
+/// Charge bounds. Observed maximum in the HUPO-PSI corpus is 3.
 ///
-/// The bias applied when packing makes `-7..=8` representable, but the range is
-/// capped symmetrically: nothing has ever needed charge 8, and an asymmetric
-/// public bound invites the reader to check the arithmetic rather than trust it.
+/// Asymmetric because the field stores `charge - 1` zigzagged: that shifts the
+/// whole window up by one, so `8` fits and `-8` does not. The `const` assertion
+/// below is what holds these to the field rather than to this comment --
+/// `CHARGE_MIN = -8` would zigzag to 17 and truncate to 1, silently decoding as
+/// charge 0.
 pub const CHARGE_MIN: i8 = -7;
-pub const CHARGE_MAX: i8 = 7;
+pub const CHARGE_MAX: i8 = 8;
 /// Widest isotope offset the 4-bit field holds. Observed maximum is 3.
 ///
 /// Isotope offsets are unsigned. mzPAF spells a negative offset `-Ni`, which
@@ -569,13 +571,37 @@ impl IonAnnot {
     }
 }
 
+/// Guards the one-shot warning in [`IonAnnot::try_from`].
+static MASS_ERROR_DISCARDED: std::sync::Once = std::sync::Once::new();
+
 impl TryFrom<&str> for IonAnnot {
     type Error = IonParsingError;
 
-    /// Parses an annotation, discarding any mass-error suffix. Use
-    /// [`split_mass_error`] first to keep it.
+    /// Parses an annotation, **discarding any mass-error suffix**, and warns
+    /// once per process the first time it discards a real one.
+    ///
+    /// The suffix is a property of one observed peak, not of the ion: two peaks
+    /// annotated `b12` in different spectra carry different errors, so keeping
+    /// it on the annotation would make two `b12`s unequal and break the
+    /// per-precursor label uniqueness the whole crate keys on.
+    ///
+    /// A caller that needs the error wants it for the *m/z*, not the label:
+    /// call [`split_mass_error`] first, recover the theoretical m/z with
+    /// [`MassError::theoretical_from_observed`], and store that. Nothing is
+    /// lost that way -- only the residual, which belongs to the measurement.
     fn try_from(value: &str) -> Result<Self, Self::Error> {
-        Self::parse_ion(split_mass_error(value)?.0)
+        let (ion, mass_error) = split_mass_error(value)?;
+        if mass_error.is_some() {
+            MASS_ERROR_DISCARDED.call_once(|| {
+                tracing::warn!(
+                    "annotation {value:?} carries a mass-error suffix, which \
+                     `IonAnnot` does not store; the m/z used is whatever the \
+                     caller supplied. Use `split_mass_error` to recover the \
+                     theoretical m/z. Warning once per process."
+                );
+            });
+        }
+        Self::parse_ion(ion)
     }
 }
 

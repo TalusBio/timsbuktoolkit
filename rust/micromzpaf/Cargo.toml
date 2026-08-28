@@ -7,6 +7,8 @@ license.workspace = true
 [dependencies]
 serde = { workspace = true, features = ["derive"] }
 thiserror = { workspace = true }
+# Only to warn once when the lossy `TryFrom<&str>` drops a mass-error suffix.
+tracing = { workspace = true }
 
 [dev-dependencies]
 # Only to pin that `IonAnnot` serialises as its mzPAF string rather than the
