@@ -154,11 +154,22 @@ pub enum SourceIdError {
     Duplicate { id: String },
     #[error("source id blob exceeds u32 offset range")]
     BlobTooLarge,
-    /// A library names its rows or it does not. Storing both shapes together
-    /// would mean rendering the numbers as strings, which is the coercion the
-    /// whole type exists to avoid.
-    #[error("source ids mix numeric and text shapes; a format carries one or the other")]
-    MixedShapes,
+    /// A library names its rows one way or the other. Storing both shapes
+    /// together would mean rendering the numbers as strings, which is the
+    /// coercion this type exists to avoid, and would make `7` and `"7"` two
+    /// different ids in one column.
+    ///
+    /// Names the offending row: the check runs over the whole library, so
+    /// without it a caller has no way to find the row that broke it.
+    #[error(
+        "row {row} has a text id ({value:?}) but row {first_text_free_row} has a numeric one; \
+         a library names its rows one way or the other"
+    )]
+    MixedShapes {
+        row: usize,
+        value: String,
+        first_text_free_row: usize,
+    },
 }
 
 impl SourceIds {
@@ -215,25 +226,37 @@ impl SourceIds {
             });
         }
         // All-numeric stays numeric so the common JSON path keeps its dense
-        // integer column instead of paying for a blob.
-        let n_numeric = ids
+        // integer column instead of paying for a blob. Collecting decides the
+        // shape and reports the first row that disagrees in one pass.
+        let numeric: Option<Vec<LibraryId>> = ids
             .iter()
-            .filter(|id| matches!(id, OwnedSourceId::Numeric(_)))
-            .count();
-        if n_numeric != 0 && n_numeric != ids.len() {
-            return Err(SourceIdError::MixedShapes);
+            .map(|id| match id {
+                OwnedSourceId::Numeric(n) => Some(LibraryId::new(*n)),
+                OwnedSourceId::Text(_) => None,
+            })
+            .collect();
+
+        match numeric {
+            Some(nums) => Self::numeric(nums, n_rows),
+            None => {
+                if let Some((row, value)) = ids.iter().enumerate().find_map(|(i, id)| match id {
+                    OwnedSourceId::Text(s) => Some((i, s.clone())),
+                    OwnedSourceId::Numeric(_) => None,
+                }) && ids.iter().any(|id| matches!(id, OwnedSourceId::Numeric(_)))
+                {
+                    let first_text_free_row = ids
+                        .iter()
+                        .position(|id| matches!(id, OwnedSourceId::Numeric(_)))
+                        .expect("just checked one exists");
+                    return Err(SourceIdError::MixedShapes {
+                        row,
+                        value,
+                        first_text_free_row,
+                    });
+                }
+                Self::text(ids.iter().map(|id| id.to_string()), n_rows)
+            }
         }
-        if n_numeric == ids.len() {
-            let nums = ids
-                .iter()
-                .map(|id| match id {
-                    OwnedSourceId::Numeric(n) => LibraryId::new(*n),
-                    OwnedSourceId::Text(_) => unreachable!("checked above"),
-                })
-                .collect();
-            return Self::numeric(nums, n_rows);
-        }
-        Self::text(ids.iter().map(|id| id.to_string()), n_rows)
     }
 
     /// Self-incremental ids for a format that carries none, so results still
@@ -298,7 +321,15 @@ mod tests {
             OwnedSourceId::Numeric(7),
             OwnedSourceId::Text("AAAK2".into()),
         ];
-        assert_eq!(SourceIds::owned(mixed, 2), Err(SourceIdError::MixedShapes));
+        assert_eq!(
+            SourceIds::owned(mixed, 2),
+            Err(SourceIdError::MixedShapes {
+                row: 1,
+                value: "AAAK2".to_string(),
+                first_text_free_row: 0,
+            }),
+            "the error has to name the row that broke it"
+        );
 
         // Either shape on its own is fine, and numeric keeps the dense column.
         assert!(matches!(
