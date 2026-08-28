@@ -330,22 +330,46 @@ pub fn read_targets<T: AsRef<Path>>(
 /// only some is malformed (a blank `transition_group_id` cell, say), and the
 /// arena cannot hold both shapes at once, so fall the whole file back to minted
 /// ids rather than half-labelling it.
+///
+/// One blank cell therefore costs the whole library its names, which is a large
+/// consequence for a small defect — so the warning names the row that triggered
+/// it. The check is library-wide, and without that the caller gets a warning
+/// they cannot act on.
 fn unify_source_ids(egs: &mut [(Target<IonAnnot>, DiannPrecursorExtras)]) {
-    let named = egs
-        .iter()
-        .filter(|(eg, _)| matches!(eg.id(), SourceId::Text(_)))
-        .count();
+    let named = egs.iter().filter(|(eg, _)| is_named(eg)).count();
     if named == 0 || named == egs.len() {
         return;
     }
+    let total = egs.len();
+    let (index, extras) = first_unnamed(egs).expect("named < total, so some precursor is unnamed");
     warn!(
-        "{named} of {} precursors carry a name; the rest do not. Falling back to \
-         minted ids for the whole library.",
-        egs.len()
+        "{named} of {total} DIA-NN precursors carry a name and {} do not, so the whole \
+         library falls back to minted ids: every result's `library_id` will be a row \
+         number instead of the name the file gave it. The first unnamed one is precursor \
+         {index}, {:?} — fill in its `transition_group_id` / `Precursor.Id` to keep the \
+         file's own names.",
+        total - named,
+        extras,
     );
     for (i, (eg, _)) in egs.iter_mut().enumerate() {
         eg.set_id(OwnedSourceId::Numeric(i as u64));
     }
+}
+
+fn is_named(eg: &Target<IonAnnot>) -> bool {
+    matches!(eg.id(), SourceId::Text(_))
+}
+
+/// The first precursor the file left unnamed, as `(index, modified peptide)`.
+///
+/// Split out from the warning so what it reports is testable: the fallback
+/// rewrites every id, so by the time a caller sees the library there is nothing
+/// left to identify the row from.
+fn first_unnamed(egs: &[(Target<IonAnnot>, DiannPrecursorExtras)]) -> Option<(usize, &str)> {
+    egs.iter()
+        .enumerate()
+        .find(|(_, (eg, _))| !is_named(eg))
+        .map(|(i, (_, extras))| (i, extras.modified_peptide.as_str()))
 }
 
 fn parse_precursor_group(
@@ -799,6 +823,41 @@ fn parse_precursor_group_from_parquet(
 mod tests {
     use super::*;
     use std::path::PathBuf;
+
+    /// One blank `transition_group_id` costs the *whole* library its names,
+    /// because the arena holds one id shape and not two. That trade is
+    /// deliberate; what it must not be is quiet. This pins both halves: the
+    /// fallback rewrites every id, and the precursor that triggered it is
+    /// identifiable before it does.
+    #[test]
+    fn one_unnamed_precursor_downgrades_the_library_and_is_named_first() {
+        // This fixture has no `transition_group_id` column, so both precursors
+        // come back minted. Naming one of them is the mixed library a blank cell
+        // produces.
+        let path = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("tests")
+            .join("diann_io_files")
+            .join("sample_lib.txt");
+        let mut egs = read_targets(path).expect("reads");
+        assert_eq!(egs.len(), 2, "fixture should hold two precursors");
+        egs[0].0.set_id(OwnedSourceId::Text("MGRYSGK2".into()));
+
+        let named = egs[1].1.modified_peptide.clone();
+        assert_eq!(
+            first_unnamed(&egs),
+            Some((1, named.as_str())),
+            "the warning has to name the precursor that caused the downgrade"
+        );
+
+        unify_source_ids(&mut egs);
+        for (i, (eg, _)) in egs.iter().enumerate() {
+            assert_eq!(
+                eg.id(),
+                SourceId::Numeric(i as u64),
+                "a mixed library falls back to minted ids for every row"
+            );
+        }
+    }
 
     #[test]
     fn test_sniff_diann_library_file() {
