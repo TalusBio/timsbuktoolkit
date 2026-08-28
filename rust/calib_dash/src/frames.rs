@@ -24,11 +24,11 @@ pub const REPLAY_BUDGET_BYTES: usize = 1 << 20;
 /// needs a stable identity for a calibrant: RT coordinates are not unique and
 /// cannot distinguish "same peptide, re-scored" from "different peptide, same
 /// RT".
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, PartialEq)]
 pub struct CalibrantPoint {
     pub library_rt: f64,
     pub observed_rt: f64,
-    pub library_id: u64,
+    pub library_id: String,
 }
 
 struct FrameIndex {
@@ -73,7 +73,7 @@ impl FrameStore {
             CalibrantPoint {
                 library_rt: 0.0,
                 observed_rt: 0.0,
-                library_id: 0
+                library_id: String::new()
             };
             (stride_capacity + 1) * n_calibrants
         ];
@@ -148,7 +148,7 @@ mod tests {
         CalibrantPoint {
             library_rt: i as f64,
             observed_rt: i as f64 * 2.0,
-            library_id: i as u64,
+            library_id: i.to_string(),
         }
     }
 
@@ -156,7 +156,7 @@ mod tests {
     /// pass for another's.
     fn pt_in(chunk: usize, i: usize) -> CalibrantPoint {
         CalibrantPoint {
-            library_id: (chunk * 100 + i) as u64,
+            library_id: (chunk * 100 + i).to_string(),
             ..pt(i)
         }
     }

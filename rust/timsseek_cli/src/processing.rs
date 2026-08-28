@@ -174,7 +174,7 @@ mod calib_dash_hook {
                 calibrants.map(|c| calib_dash::CalibrantPoint {
                     library_rt: c.library_rt.0 as f64,
                     observed_rt: c.apex_rt.0 as f64,
-                    library_id: c.library_id,
+                    library_id: c.library_id.to_string(),
                 }),
             );
             if matches!(flow, calib_dash::Flow::Abort) {
