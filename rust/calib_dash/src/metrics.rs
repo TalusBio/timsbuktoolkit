@@ -59,8 +59,8 @@ pub fn curve_delta(
 
 /// `(admitted, evicted)` between two heap snapshots, by `library_id`.
 pub fn churn(prev: &[CalibrantPoint], cur: &[CalibrantPoint]) -> (usize, usize) {
-    let prev_set: HashSet<&str> = prev.iter().map(|p| p.library_id.as_str()).collect();
-    let cur_set: HashSet<&str> = cur.iter().map(|p| p.library_id.as_str()).collect();
+    let prev_set: HashSet<u64> = prev.iter().map(|p| p.identity).collect();
+    let cur_set: HashSet<u64> = cur.iter().map(|p| p.identity).collect();
     let admitted = cur_set.difference(&prev_set).count();
     let evicted = prev_set.difference(&cur_set).count();
     (admitted, evicted)
@@ -78,7 +78,7 @@ mod tests {
         CalibrantPoint {
             library_rt: 1.0,
             observed_rt: 1.0,
-            library_id: idx.to_string(),
+            identity: idx as u64,
         }
     }
 

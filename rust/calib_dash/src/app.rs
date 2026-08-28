@@ -593,7 +593,7 @@ impl CalibDash {
         self.current_points.extend(points.take(self.n_calibrants));
 
         self.frames
-            .record(chunk, self.current_points.iter().cloned());
+            .record(chunk, self.current_points.iter().copied());
         self.sync_frame_summary();
 
         let metrics = self.refit_live(chunk);
@@ -688,7 +688,7 @@ impl CalibDash {
 
         let (admitted, evicted) = churn(&self.prev_points, &self.current_points);
         self.prev_points.clear();
-        self.prev_points.extend(self.current_points.iter().cloned());
+        self.prev_points.extend(self.current_points.iter().copied());
 
         BatchMetrics {
             chunk,
@@ -832,12 +832,12 @@ mod tests {
             .map(|i| CalibrantPoint {
                 library_rt: i as f64 + 0.5,
                 observed_rt: (i as f64 + 0.5) * slope,
-                library_id: (chunk * n + i).to_string(),
+                identity: (chunk * n + i) as u64,
             })
             .collect()
     }
 
-    /// Points at explicit `library_id`es, so a test can choose the two sets `churn`
+    /// Points at explicit `identity`s, so a test can choose the two sets `churn`
     /// diffs. On the identity line, so the fit succeeds.
     fn indexed_points(indices: &[usize]) -> Vec<CalibrantPoint> {
         indices
@@ -846,7 +846,7 @@ mod tests {
             .map(|(i, &idx)| CalibrantPoint {
                 library_rt: i as f64 + 0.5,
                 observed_rt: i as f64 + 0.5,
-                library_id: idx.to_string(),
+                identity: idx as u64,
             })
             .collect()
     }

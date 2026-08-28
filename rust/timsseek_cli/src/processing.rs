@@ -89,7 +89,24 @@ mod calib_dash_hook {
             CalibrationConfig,
             CalibrationResult,
         };
+        use std::hash::{
+            DefaultHasher,
+            Hash,
+            Hasher,
+        };
         use std::io::IsTerminal;
+        use timsquery::models::OwnedSourceId;
+
+        /// The dashboard compares calibrant identity across batches but never
+        /// displays it, so it takes a hash instead of the id. That keeps its
+        /// point type `Copy` and, more importantly, keeps `size_of` the true
+        /// cost of a point — which is what its replay memory budget is computed
+        /// from. Only meaningful within one process.
+        fn identity_hash(id: &OwnedSourceId) -> u64 {
+            let mut hasher = DefaultHasher::new();
+            id.hash(&mut hasher);
+            hasher.finish()
+        }
 
         /// The dashboard for a whole run. Stays `None` inside unless
         /// `TIMSSEEK_CALIB_DASHBOARD` asks for it, so an ordinary run of a
@@ -173,7 +190,7 @@ mod calib_dash_hook {
                 calibrants.map(|c| calib_dash::CalibrantPoint {
                     library_rt: c.library_rt.0 as f64,
                     observed_rt: c.apex_rt.0 as f64,
-                    library_id: c.library_id.to_string(),
+                    identity: identity_hash(&c.library_id),
                 }),
             );
             if matches!(flow, calib_dash::Flow::Abort) {
