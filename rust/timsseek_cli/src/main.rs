@@ -992,6 +992,7 @@ fn run() -> std::result::Result<(), errors::CliError> {
     }
 
     // ARTIFACT-LIST (run-level): keep in sync with validate_inputs.
+    alloc_track::snap!("Search complete");
     let finalize_step = TimedStep::begin("Finalize run");
     // Must happen before serialization so the report self-describes where to
     // fetch everything.

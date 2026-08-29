@@ -92,6 +92,10 @@ use tracing::warn;
 ///   `Target` has no `Default` (bon builder with required fields) --
 ///   init lazily on first peptide.
 pub struct ScoringWorker {
+    /// Largest fragment count in the library, pre-scanned by the caller. Every
+    /// reusable buffer that holds one item's fragments is sized to this so the
+    /// hot loop never grows one.
+    pub max_frags: usize,
     pub scorer: TraceScorer,
     pub extraction: Option<Extraction<IonAnnot>>,
     pub inner_collector: Option<SpectralCollector<IonAnnot, MzMobilityStatsCollector>>,
@@ -102,6 +106,7 @@ pub struct ScoringWorker {
 impl ScoringWorker {
     pub fn new(num_cycles: usize, max_frags: usize) -> Self {
         Self {
+            max_frags,
             scorer: TraceScorer::new(num_cycles, max_frags),
             extraction: None,
             inner_collector: None,
@@ -585,6 +590,7 @@ impl<I: ScorerQueriable> Scorer<I> {
             &self.index,
             &tolerance,
             Some(TOP_N_FRAGMENTS),
+            worker.max_frags,
         )?;
 
         Ok(super::apex_finding::PeptideMetadata {
@@ -808,6 +814,7 @@ impl<I: ScorerQueriable> Scorer<I> {
                     &self.index,
                     &self.broad_tolerance,
                     Some(TOP_N_FRAGMENTS),
+                    worker.max_frags,
                 )
             })
         )?;

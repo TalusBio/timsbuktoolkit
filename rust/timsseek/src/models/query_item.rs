@@ -3,11 +3,12 @@ use serde::{
     Serialize,
 };
 use timsquery::KeyLike;
+use timsquery::tinyvec::TinyVec;
 
 /// Fragment and precursor intensity pairs. Reused in place on the scoring hot
 /// path, so the buffer is allocated once per worker rather than per item.
-pub type FragmentIntensityVec<T> = Vec<(T, f32)>;
-pub type PrecursorIntensityVec = Vec<(i8, f32)>;
+pub type FragmentIntensityVec<T> = TinyVec<[(T, f32); 13]>;
+pub type PrecursorIntensityVec = TinyVec<[(i8, f32); 13]>;
 
 /// Linear lookup for a `(key, value)` slice. Used throughout scoring for
 /// `ExpectedIntensities`-shaped arrays, which hold a dozen entries in a
@@ -72,8 +73,8 @@ impl<T: KeyLike + Default> ExpectedIntensities<T> {
     /// mid-run.
     pub fn with_capacity(fragments: usize) -> Self {
         Self {
-            fragment_intensities: Vec::with_capacity(fragments),
-            precursor_intensities: Vec::with_capacity(PRECURSOR_ENVELOPE_LEN),
+            fragment_intensities: TinyVec::with_capacity(fragments),
+            precursor_intensities: TinyVec::with_capacity(PRECURSOR_ENVELOPE_LEN),
         }
     }
 }
@@ -81,8 +82,8 @@ impl<T: KeyLike + Default> ExpectedIntensities<T> {
 impl<T: KeyLike + Default> Default for ExpectedIntensities<T> {
     fn default() -> Self {
         Self {
-            fragment_intensities: Vec::new(),
-            precursor_intensities: Vec::new(),
+            fragment_intensities: TinyVec::new(),
+            precursor_intensities: TinyVec::new(),
         }
     }
 }
@@ -305,7 +306,9 @@ mod tests {
             cap,
             "a library-sized refill must not reallocate"
         );
-        assert_eq!(ei.precursor_intensities.capacity(), PRECURSOR_ENVELOPE_LEN);
+        // `>=` not `==`: an inline-capable container may report more than was
+        // asked for. What matters is that the envelope always fits.
+        assert!(ei.precursor_intensities.capacity() >= PRECURSOR_ENVELOPE_LEN);
     }
 
     #[test]
