@@ -41,11 +41,10 @@ impl std::error::Error for DuplicateKeyError {}
 /// A `Vec` per field, each entry keeping its key alongside the intensity for
 /// diagnostics and by-key lookup.
 ///
-/// These were `TinyVec`s with 13 inline slots. Inline storage only paid off
-/// because the scoring hot path rebuilt the whole value per item; now that
-/// [`refill_from_pairs`](Self::refill_from_pairs) reuses the buffer, a `Vec`
-/// is allocation-free after the first item too, and it is 48 bytes against
-/// 224. `examples/expected_intensities_bench.rs` has the numbers.
+/// On the scoring path the buffers are sized once per worker via
+/// [`with_capacity`](Self::with_capacity) and reused per item through
+/// [`refill_from_pairs`](Self::refill_from_pairs), so scoring does not
+/// allocate.
 ///
 /// # Invariants
 ///
@@ -59,6 +58,24 @@ impl std::error::Error for DuplicateKeyError {}
 pub struct ExpectedIntensities<T: KeyLike + Default> {
     pub fragment_intensities: FragmentIntensityVec<T>,
     pub precursor_intensities: PrecursorIntensityVec,
+}
+
+/// Precursor isotope slots. `isotope_dist_or_averagine` returns `[f32; 3]` and
+/// every `IsotopeStrategy::FromComposition` site sets `n_isotopes: 3`, so the
+/// envelope is this long by construction.
+pub const PRECURSOR_ENVELOPE_LEN: usize = 3;
+
+impl<T: KeyLike + Default> ExpectedIntensities<T> {
+    /// Allocate both buffers up front. Callers on the scoring path pass the
+    /// library's maximum fragment count so that
+    /// [`refill_from_pairs`](Self::refill_from_pairs) never grows a buffer
+    /// mid-run.
+    pub fn with_capacity(fragments: usize) -> Self {
+        Self {
+            fragment_intensities: Vec::with_capacity(fragments),
+            precursor_intensities: Vec::with_capacity(PRECURSOR_ENVELOPE_LEN),
+        }
+    }
 }
 
 impl<T: KeyLike + Default> Default for ExpectedIntensities<T> {
@@ -84,11 +101,11 @@ impl<T: KeyLike + Default + std::fmt::Debug> ExpectedIntensities<T> {
         Ok(out)
     }
 
-    /// [`try_from_pairs`](Self::try_from_pairs) in place, reusing whichever
-    /// backing each `TinyVec` already holds. Same uniqueness check.
+    /// [`try_from_pairs`](Self::try_from_pairs) in place, keeping the buffers
+    /// already allocated. Same uniqueness check.
     ///
-    /// Use this on the scoring hot path. Assigning a fresh value moves 224
-    /// bytes per item and drops the old buffer; this reuses it.
+    /// Use this on the scoring hot path: assigning a fresh value drops the
+    /// buffer the next item would have reused.
     ///
     /// On a duplicate key both fields are left empty, so a rejected refill
     /// never leaves a partially filled set behind.
@@ -277,20 +294,18 @@ mod tests {
     }
 
     #[test]
-    fn refill_matches_try_from_pairs() {
-        let frags = [(yi("y1"), 1.0), (yi("y2"), 2.0)];
-        let precs = [(0i8, 0.5), (1, 0.3)];
-        let built = ExpectedIntensities::try_from_pairs(frags, precs).unwrap();
-        let mut refilled = ExpectedIntensities::<IonAnnot>::default();
-        refilled.refill_from_pairs(frags, precs).unwrap();
+    fn with_capacity_survives_a_refill_without_growing() {
+        let mut ei = ExpectedIntensities::<IonAnnot>::with_capacity(32);
+        let cap = ei.fragment_intensities.capacity();
+        let frags: Vec<_> = (1..=32).map(|i| (yi(&format!("y{i}")), i as f32)).collect();
+        ei.refill_from_pairs(frags, [(0i8, 0.5), (1, 0.3), (2, 0.1)])
+            .unwrap();
         assert_eq!(
-            built.fragment_intensities, refilled.fragment_intensities,
-            "fragments must match"
+            ei.fragment_intensities.capacity(),
+            cap,
+            "a library-sized refill must not reallocate"
         );
-        assert_eq!(
-            built.precursor_intensities, refilled.precursor_intensities,
-            "precursors must match"
-        );
+        assert_eq!(ei.precursor_intensities.capacity(), PRECURSOR_ENVELOPE_LEN);
     }
 
     #[test]
