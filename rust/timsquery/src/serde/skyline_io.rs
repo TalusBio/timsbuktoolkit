@@ -1,3 +1,4 @@
+use super::precursor_extras::PrecursorExtras;
 use crate::Target;
 use crate::ion::{
     IonAnnot,
@@ -91,15 +92,6 @@ impl From<std::io::Error> for SkylineReadingError {
         error!("IO error: {:?}", err);
         SkylineReadingError::Io
     }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct SkylinePrecursorExtras {
-    pub modified_peptide: String,
-    pub stripped_peptide: String,
-    pub protein_id: String,
-    pub is_decoy: bool,
-    pub relative_intensities: Vec<(IonAnnot, f32)>,
 }
 
 /// Deserializer that treats Skyline's `#N/A` sentinel as `None`.
@@ -235,7 +227,7 @@ struct ParsingBuffers {
 
 pub fn read_targets<T: AsRef<Path>>(
     file: T,
-) -> Result<Vec<(Target<IonAnnot>, SkylinePrecursorExtras)>, SkylineReadingError> {
+) -> Result<Vec<(Target<IonAnnot>, PrecursorExtras)>, SkylineReadingError> {
     let file_handle = std::fs::File::open(file.as_ref())?;
 
     let mut rdr = csv::ReaderBuilder::new()
@@ -288,7 +280,7 @@ fn parse_precursor_group(
     id: u64,
     rows: &[SkylineLibraryRow],
     buffers: &mut ParsingBuffers,
-) -> Result<Option<(Target<IonAnnot>, SkylinePrecursorExtras)>, SkylinePrecursorParsingError> {
+) -> Result<Option<(Target<IonAnnot>, PrecursorExtras)>, SkylinePrecursorParsingError> {
     if rows.is_empty() {
         error!("Empty precursor group encountered on {id}");
         return Err(SkylinePrecursorParsingError::Other);
@@ -377,7 +369,7 @@ fn parse_precursor_group(
     let modified_peptide = first_row.peptide_modified_sequence.clone();
     let stripped_peptide = strip_modifications(&modified_peptide);
 
-    let precursor_extras = SkylinePrecursorExtras {
+    let precursor_extras = PrecursorExtras {
         modified_peptide,
         stripped_peptide,
         protein_id: first_row.protein_name.clone(),

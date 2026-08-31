@@ -1,3 +1,4 @@
+use super::precursor_extras::PrecursorExtras;
 use crate::Target;
 use crate::ion::{
     IonAnnot,
@@ -92,15 +93,6 @@ impl From<std::io::Error> for SpectronautReadingError {
         error!("IO error: {:?}", err);
         SpectronautReadingError::Io
     }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct SpectronautPrecursorExtras {
-    pub modified_peptide: String,
-    pub stripped_peptide: String,
-    pub protein_id: String,
-    pub is_decoy: bool,
-    pub relative_intensities: Vec<(IonAnnot, f32)>,
 }
 
 /// Represents a single row from a Spectronaut library TSV file
@@ -209,7 +201,7 @@ struct ParsingBuffers {
 
 pub fn read_targets<T: AsRef<Path>>(
     file: T,
-) -> Result<Vec<(Target<IonAnnot>, SpectronautPrecursorExtras)>, SpectronautReadingError> {
+) -> Result<Vec<(Target<IonAnnot>, PrecursorExtras)>, SpectronautReadingError> {
     let file_handle = std::fs::File::open(file.as_ref())?;
 
     let mut rdr = csv::ReaderBuilder::new()
@@ -259,8 +251,7 @@ fn parse_precursor_group(
     id: u64,
     rows: &[SpectronautLibraryRow],
     buffers: &mut ParsingBuffers,
-) -> Result<Option<(Target<IonAnnot>, SpectronautPrecursorExtras)>, SpectronautPrecursorParsingError>
-{
+) -> Result<Option<(Target<IonAnnot>, PrecursorExtras)>, SpectronautPrecursorParsingError> {
     if rows.is_empty() {
         error!("Empty precursor group encountered on {id}");
         return Err(SpectronautPrecursorParsingError::Other);
@@ -354,7 +345,7 @@ fn parse_precursor_group(
     // Spectronaut libraries are target-only, so is_decoy is always false
     let is_decoy = false;
 
-    let precursor_extras = SpectronautPrecursorExtras {
+    let precursor_extras = PrecursorExtras {
         modified_peptide: first_row.modified_peptide.clone(),
         stripped_peptide: first_row.stripped_peptide.clone(),
         protein_id: first_row.protein_groups.clone(),

@@ -1,4 +1,3 @@
-pub use super::diann_io::DiannPrecursorExtras;
 use super::diann_io::{
     read_parquet_library_file as read_diann_parquet,
     read_targets as read_diann_tsv,
@@ -17,12 +16,11 @@ use super::mzspeclib_io::{
     read_mzspeclib_library_file,
     sniff_mzspeclib_library_file,
 };
-pub use super::skyline_io::SkylinePrecursorExtras;
+use super::precursor_extras::PrecursorExtras;
 use super::skyline_io::{
     read_targets as read_skyline_csv,
     sniff_skyline_library_file,
 };
-pub use super::spectronaut_io::SpectronautPrecursorExtras;
 use super::spectronaut_io::{
     read_targets as read_spectronaut_tsv,
     sniff_spectronaut_library_file,
@@ -77,16 +75,9 @@ impl From<ElutionGroupInputError> for TargetReadingError {
 }
 
 #[derive(Debug)]
-pub enum FileReadingExtras {
-    Diann(Vec<DiannPrecursorExtras>),
-    Spectronaut(Vec<SpectronautPrecursorExtras>),
-    Skyline(Vec<SkylinePrecursorExtras>),
-}
-
-#[derive(Debug)]
 pub enum ElutionGroupCollection {
-    StringLabels(Vec<Target<String>>, Option<FileReadingExtras>),
-    MzpafLabels(Vec<Target<IonAnnot>>, Option<FileReadingExtras>),
+    StringLabels(Vec<Target<String>>, Option<Vec<PrecursorExtras>>),
+    MzpafLabels(Vec<Target<IonAnnot>>, Option<Vec<PrecursorExtras>>),
 }
 
 impl ElutionGroupCollection {
@@ -189,48 +180,6 @@ pub enum TargetTable {
     },
 }
 
-/// The reader-extras fields the arena consumes, flattened out of the
-/// otherwise-identical DIA-NN/Skyline/Spectronaut `*PrecursorExtras` structs.
-struct PrecursorExtrasRow {
-    modified: String,
-    stripped: String,
-    is_decoy: bool,
-    relative_intensities: Vec<(IonAnnot, f32)>,
-}
-
-impl From<DiannPrecursorExtras> for PrecursorExtrasRow {
-    fn from(e: DiannPrecursorExtras) -> Self {
-        Self {
-            modified: e.modified_peptide,
-            stripped: e.stripped_peptide,
-            is_decoy: e.is_decoy,
-            relative_intensities: e.relative_intensities,
-        }
-    }
-}
-
-impl From<SkylinePrecursorExtras> for PrecursorExtrasRow {
-    fn from(e: SkylinePrecursorExtras) -> Self {
-        Self {
-            modified: e.modified_peptide,
-            stripped: e.stripped_peptide,
-            is_decoy: e.is_decoy,
-            relative_intensities: e.relative_intensities,
-        }
-    }
-}
-
-impl From<SpectronautPrecursorExtras> for PrecursorExtrasRow {
-    fn from(e: SpectronautPrecursorExtras) -> Self {
-        Self {
-            modified: e.modified_peptide,
-            stripped: e.stripped_peptide,
-            is_decoy: e.is_decoy,
-            relative_intensities: e.relative_intensities,
-        }
-    }
-}
-
 impl TargetTable {
     /// Build an `Mzpaf` arena WITH the reference-intensity sidecar from
     /// `IonAnnot`-labelled groups plus their reader extras.
@@ -247,16 +196,8 @@ impl TargetTable {
     fn mzpaf_with_intensities(
         decoys: DecoyHandling,
         egs: Vec<Target<IonAnnot>>,
-        extras: FileReadingExtras,
+        rows: Vec<PrecursorExtras>,
     ) -> Result<Self, TargetReadingError> {
-        let rows: Vec<PrecursorExtrasRow> = match extras {
-            FileReadingExtras::Diann(v) => v.into_iter().map(PrecursorExtrasRow::from).collect(),
-            FileReadingExtras::Skyline(v) => v.into_iter().map(PrecursorExtrasRow::from).collect(),
-            FileReadingExtras::Spectronaut(v) => {
-                v.into_iter().map(PrecursorExtrasRow::from).collect()
-            }
-        };
-
         if egs.len() != rows.len() {
             return Err(TargetReadingError::SpeclibParse(format!(
                 "elution groups ({}) and reader extras ({}) length mismatch",
@@ -284,7 +225,7 @@ impl TargetTable {
                 let intensity = lookup.get(label).ok_or_else(|| {
                     TargetReadingError::SpeclibParse(format!(
                         "fragment {label:?} of precursor {:?} has no reference intensity",
-                        row.modified
+                        row.modified_peptide
                     ))
                 })?;
                 frag_intens.push(*intensity);
@@ -295,8 +236,8 @@ impl TargetTable {
                 rt_seconds: eg.rt_seconds(),
                 mobility: eg.mobility_ook0(),
                 frags: &frags,
-                seq_strip: &row.stripped,
-                seq_mod: &row.modified,
+                seq_strip: &row.stripped_peptide,
+                seq_mod: &row.modified_peptide,
                 is_decoy: row.is_decoy,
                 id: Some(eg.id().to_owned_id()),
                 ..Default::default()
@@ -427,7 +368,7 @@ impl LibraryReader for DiannParquetReader {
         })?;
         let (egs, extras): (Vec<_>, Vec<_>) = egs.into_iter().unzip();
         TargetTable::from_elution_groups(
-            ElutionGroupCollection::MzpafLabels(egs, Some(FileReadingExtras::Diann(extras))),
+            ElutionGroupCollection::MzpafLabels(egs, Some(extras)),
             decoys,
         )
     }
@@ -449,7 +390,7 @@ impl LibraryReader for DiannTsvReader {
         })?;
         let (egs, extras): (Vec<_>, Vec<_>) = egs.into_iter().unzip();
         TargetTable::from_elution_groups(
-            ElutionGroupCollection::MzpafLabels(egs, Some(FileReadingExtras::Diann(extras))),
+            ElutionGroupCollection::MzpafLabels(egs, Some(extras)),
             decoys,
         )
     }
@@ -471,7 +412,7 @@ impl LibraryReader for SpectronautReader {
         })?;
         let (egs, extras): (Vec<_>, Vec<_>) = egs.into_iter().unzip();
         TargetTable::from_elution_groups(
-            ElutionGroupCollection::MzpafLabels(egs, Some(FileReadingExtras::Spectronaut(extras))),
+            ElutionGroupCollection::MzpafLabels(egs, Some(extras)),
             decoys,
         )
     }
@@ -493,7 +434,7 @@ impl LibraryReader for SkylineReader {
         })?;
         let (egs, extras): (Vec<_>, Vec<_>) = egs.into_iter().unzip();
         TargetTable::from_elution_groups(
-            ElutionGroupCollection::MzpafLabels(egs, Some(FileReadingExtras::Skyline(extras))),
+            ElutionGroupCollection::MzpafLabels(egs, Some(extras)),
             decoys,
         )
     }
