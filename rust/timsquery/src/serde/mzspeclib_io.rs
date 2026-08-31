@@ -18,7 +18,6 @@
 //! suffix when it does not, and the peak's own m/z when the spectrum declares
 //! its masses calculated rather than measured. See [`theoretical_mz`].
 
-use std::collections::HashMap;
 use std::io::BufRead;
 use std::path::Path;
 use std::sync::OnceLock;
@@ -33,7 +32,10 @@ use mzannotate::fragment::{
     Fragment,
     FragmentType,
 };
-use mzannotate::mzdata::params::ParamValue;
+use mzannotate::mzdata::params::{
+    ControlledVocabulary,
+    ParamValue,
+};
 use mzannotate::mzdata::prelude::PeakCollection;
 use mzannotate::mzspeclib::{
     AnalyteTarget,
@@ -54,6 +56,7 @@ use super::library_file::{
     TargetReadingError,
     TargetTable,
 };
+use super::psims_origin_type;
 use crate::models::{
     Row,
     TargetCapabilities,
@@ -78,15 +81,26 @@ fn ontologies() -> &'static mzcore::ontology::Ontologies {
 }
 
 // ── The controlled vocabulary ────────────────────────────────────────────────
+//
+// Every bare `u32` accession in this file is a PSI-MS accession, and comparing
+// them as integers is only correct because the namespace is established first.
+// There are exactly two places that establish it, and every integer downstream
+// of them has already passed through one:
+//
+//   - `is_ms_term`, for values mzannotate flattened into an mzdata `Param`,
+//     which splits the CURIE into a number and a namespace.
+//   - the `MS:` prefix check in `origin_types`, for a term arriving as text.
+//
+// It matters because PSI-MS and the Unit Ontology both allocate 7-digit
+// accessions in overlapping ranges: UO already reaches 1010060, above every
+// accession named here. No colliding term is allocated today, so this guards a
+// range overlap rather than a live bug.
+//
+// Where the whole `Curie` survives, `mzcv::curie!` compares both halves at once
+// and no constant is needed.
 
 /// `MS:1003072|spectrum origin type`.
 const SPECTRUM_ORIGIN_TYPE: u32 = 1_003_072;
-/// `MS:1003192|decoy spectrum`, the term every decoy subtype descends from.
-const DECOY_SPECTRUM: &str = "MS:1003192";
-/// `MS:1003212|library attribute set name`.
-const ATTRIBUTE_SET_NAME: u32 = 1_003_212;
-/// `MS:1003259|related spectrum keys`, SpectraST's decoy-to-target link.
-const RELATED_SPECTRUM_KEYS: u32 = 1_003_259;
 /// `MS:1002815|inverse reduced ion mobility`, the timsTOF mobility axis.
 const INVERSE_REDUCED_MOBILITY: u32 = 1_002_815;
 /// `MS:1002476|ion mobility drift time`, the drift-tube spelling.
@@ -95,64 +109,20 @@ const ION_MOBILITY_DRIFT_TIME: u32 = 1_002_476;
 /// pair because no PSI-MS term identifies the target a decoy was derived from.
 const MSSPECULATOR_PAIR_ID: &str = "msspeculator:decoy_pair_id";
 
-/// The two `spectrum origin type` values whose definitions state that the peak
-/// m/z values are theoretical rather than measured.
+/// Whether `accession` names a decoy spectrum.
 ///
-/// Named rather than subsumed, because there is no parent term meaning "these
-/// masses are calculated": `MS:1003074|predicted spectrum` says the whole
-/// spectrum was predicted, and `MS:1003424|selected fragment theoretical m/z
-/// observed intensity spectrum` says so of the m/z alone. Their subtypes
-/// inherit through the same `is_a` walk `subsumes_decoy` uses.
-const THEORETICAL_MZ_ORIGIN_TYPES: [&str; 2] = ["MS:1003074", "MS:1003424"];
-
-/// The `spectrum origin type` subtree, as `accession -> (name, parents)`.
-const ORIGIN_TYPE_CV: &str = include_str!("../../assets/spectrum_origin_type.tsv");
-
-fn origin_type_parents() -> &'static HashMap<&'static str, Vec<&'static str>> {
-    static PARENTS: OnceLock<HashMap<&'static str, Vec<&'static str>>> = OnceLock::new();
-    PARENTS.get_or_init(|| {
-        ORIGIN_TYPE_CV
-            .lines()
-            .filter(|line| !line.starts_with('#') && !line.trim().is_empty())
-            .filter_map(|line| {
-                let mut cols = line.split('\t');
-                let accession = cols.next()?;
-                let _name = cols.next()?;
-                let parents = cols.next().unwrap_or("").split_whitespace().collect();
-                Some((accession, parents))
-            })
-            .collect()
-    })
-}
-
-/// Whether `accession` is a `decoy spectrum` or one of its subtypes, walking
-/// `is_a` rather than matching the leaves. `None` when the term is outside the
-/// vendored subtree, which is a term this build has never heard of.
-fn subsumes_decoy(accession: &str) -> Option<bool> {
-    subsumes(accession, DECOY_SPECTRUM)
-}
-
-/// Whether `accession` is `ancestor` or descends from it.
-fn subsumes(accession: &str, ancestor: &str) -> Option<bool> {
-    let parents = origin_type_parents();
-    if !parents.contains_key(accession) {
-        return None;
-    }
-    let mut frontier = vec![accession];
-    let mut seen = 0usize;
-    while let Some(term) = frontier.pop() {
-        if term == ancestor {
-            return Some(true);
-        }
-        // The subtree is a DAG of ten terms; the bound is a guard against a
-        // hand-edited cycle, not a real limit.
-        seen += 1;
-        if seen > parents.len() * parents.len() {
-            return None;
-        }
-        frontier.extend(parents.get(term).into_iter().flatten().copied());
-    }
-    Some(false)
+/// `None` for a term outside [`psims_origin_type::ALL`], which is a term this
+/// build has never heard of. The caller reports those rather than reading them
+/// as targets: guessing wrong on an unknown decoy subtype yields an FDR that is
+/// wrong instead of absent.
+///
+/// The `is_a` closure was resolved against the published vocabulary by
+/// `scripts/gen_psims_origin_type.py`, so this is a lookup rather than a walk.
+fn subsumes_decoy(accession: u32) -> Option<bool> {
+    psims_origin_type::ALL
+        .binary_search(&accession)
+        .ok()
+        .map(|_| psims_origin_type::DECOY.binary_search(&accession).is_ok())
 }
 
 /// Whether this spectrum's peak m/z values are calculated rather than measured.
@@ -161,10 +131,10 @@ fn subsumes(accession: &str, ancestor: &str) -> Option<bool> {
 /// means. On a predicted spectrum the peak m/z already *is* the theoretical
 /// mass, so the peak is usable; on an observed one there is no theoretical mass
 /// to be had and the peak is skipped rather than mixed in at its observed m/z.
-fn declares_theoretical_mz(accession: &str) -> bool {
-    THEORETICAL_MZ_ORIGIN_TYPES
-        .iter()
-        .any(|ancestor| subsumes(accession, ancestor) == Some(true))
+fn declares_theoretical_mz(accession: u32) -> bool {
+    psims_origin_type::THEORETICAL_MZ
+        .binary_search(&accession)
+        .is_ok()
 }
 
 // ── Reading a file ───────────────────────────────────────────────────────────
@@ -285,7 +255,7 @@ struct Degradation {
     unrepresentable_labels: usize,
     peaks_without_theoretical_mz: usize,
     rows_without_sequence: usize,
-    unrecognised_origin_types: Vec<String>,
+    unrecognised_origin_types: Vec<u32>,
 }
 
 impl Degradation {
@@ -315,9 +285,12 @@ impl Degradation {
                 self.rows_without_sequence
             );
         }
-        for term in &self.unrecognised_origin_types {
+        for accession in &self.unrecognised_origin_types {
             warn!(
-                "mzSpecLib: spectrum origin type {term} is outside this build's vocabulary and was read as a target"
+                "mzSpecLib: spectrum origin type MS:{accession} is outside this build's copy of \
+                 the vocabulary (psi-ms {}) and was read as a target. Re-run \
+                 scripts/gen_psims_origin_type.py if the term is newer than that.",
+                psims_origin_type::DATA_VERSION,
             );
         }
     }
@@ -361,8 +334,7 @@ impl SpectrumRow {
             }
         };
 
-        let peak_mz_is_theoretical =
-            origin_types(spectrum).any(|term| declares_theoretical_mz(&term));
+        let peak_mz_is_theoretical = origin_types(spectrum).any(declares_theoretical_mz);
         let mut counter = UnknownIonCounter::default();
         let mut frags = Vec::with_capacity(spectrum.peaks.len());
         for peak in spectrum.peaks.iter() {
@@ -430,9 +402,9 @@ fn reject_unresolved_attribute_sets<M: mzcore::chemistry::MassOutputMode>(
         .description
         .params
         .iter()
-        .any(|p| p.accession == Some(SPECTRUM_ORIGIN_TYPE));
+        .any(|p| is_ms_term(p, SPECTRUM_ORIGIN_TYPE));
     for attribute in spectrum.attributes.iter().flatten() {
-        if attribute.name.accession.accession != mzcv::AccessionCode::Numeric(ATTRIBUTE_SET_NAME) {
+        if attribute.name.accession != mzcv::curie!(MS:1003212) {
             continue;
         }
         if !origin_type_present {
@@ -552,7 +524,7 @@ fn mobility<M: mzcore::chemistry::MassOutputMode>(spectrum: &AnnotatedSpectrum<M
         scan.params
             .iter()
             .flat_map(|p| p.iter())
-            .find(|p| p.accession == Some(accession))
+            .find(|p| is_ms_term(p, accession))
             .and_then(|p| p.value.to_f32().ok())
     };
     read(INVERSE_REDUCED_MOBILITY)
@@ -560,18 +532,18 @@ fn mobility<M: mzcore::chemistry::MassOutputMode>(spectrum: &AnnotatedSpectrum<M
         .unwrap_or(0.0)
 }
 
-/// Decided by walking `is_a` up to `MS:1003192|decoy spectrum`.
+/// Whether the library shipped this entry as a decoy.
 ///
-/// `spectrum origin type` is not repeatable, so more than one value on an entry
-/// is a malformed file. The subsumption walk is why a library naming
-/// `MS:1003195` reads as a decoy whether the writer meant SpectraST's old
-/// spelling or the current one.
+/// A library naming `MS:1003195` reads as a decoy whether the writer meant
+/// SpectraST's old spelling of shuffle-and-reposition or the current
+/// unnatural-peptidoform one, because membership comes from the `is_a` closure
+/// rather than from the term's name.
 fn is_decoy<M: mzcore::chemistry::MassOutputMode>(
     spectrum: &AnnotatedSpectrum<M>,
     degradation: &mut Degradation,
 ) -> bool {
     for accession in origin_types(spectrum) {
-        match subsumes_decoy(&accession) {
+        match subsumes_decoy(accession) {
             Some(decoy) => return decoy,
             None => degradation.unrecognised_origin_types.push(accession),
         }
@@ -582,25 +554,35 @@ fn is_decoy<M: mzcore::chemistry::MassOutputMode>(
 /// The `spectrum origin type` accessions on this entry.
 ///
 /// The term is not repeatable, so more than one is a malformed file rather than
-/// a case to reconcile; the callers take the first one they can resolve. Values
-/// arrive as the stringified term, `MS:1003195|name`.
+/// a case to reconcile; the callers take the first one they can resolve.
+///
+/// The value arrives as the stringified term, `MS:1003195|name`, so only the
+/// CURIE half is parsed. A value in another namespace yields nothing rather than
+/// a bare number: this is one of the two namespace boundaries described at the
+/// top of this file.
 fn origin_types<M: mzcore::chemistry::MassOutputMode>(
     spectrum: &AnnotatedSpectrum<M>,
-) -> impl Iterator<Item = String> + '_ {
+) -> impl Iterator<Item = u32> + '_ {
     spectrum
         .description
         .params
         .iter()
-        .filter(|param| param.accession == Some(SPECTRUM_ORIGIN_TYPE))
-        .map(|param| {
-            param
-                .value
-                .to_string()
-                .split('|')
-                .next()
-                .unwrap_or_default()
-                .to_string()
+        .filter(|param| is_ms_term(param, SPECTRUM_ORIGIN_TYPE))
+        .filter_map(|param| {
+            let value = param.value.to_string();
+            let (curie, _name) = value.split_once('|')?;
+            curie.strip_prefix("MS:")?.parse().ok()
         })
+}
+
+/// Whether an mzdata param is the named PSI-MS term.
+///
+/// mzannotate flattens a recognised attribute into an mzdata `Param`, which
+/// splits the CURIE into `Option<u32>` plus `Option<ControlledVocabulary>`, so
+/// there is no `Curie` left to compare in one go.
+fn is_ms_term(param: &mzannotate::mzdata::params::Param, accession: u32) -> bool {
+    param.controlled_vocabulary == Some(ControlledVocabulary::MS)
+        && param.accession == Some(accession)
 }
 
 /// Which entries compete. msspeculator's project-defined pair id first, then
@@ -623,7 +605,7 @@ fn declared_group<M: mzcore::chemistry::MassOutputMode>(
         .attributes
         .iter()
         .flatten()
-        .find(|a| a.name.accession.accession == mzcv::AccessionCode::Numeric(RELATED_SPECTRUM_KEYS))
+        .find(|a| a.name.accession == mzcv::curie!(MS:1003259))
         .map(|a| match &a.value {
             AttributeValue::Scalar(v) => v.to_string(),
             other => other.to_string(),
@@ -936,39 +918,48 @@ mod tests {
         );
     }
 
-    /// Re-derive the table from the published CV with:
-    ///
-    /// ```text
-    /// curl -sLO https://raw.githubusercontent.com/HUPO-PSI/psi-ms-CV/master/psi-ms.obo
-    /// ```
-    ///
-    /// then keep every term with an `is_a` path to `MS:1003072` and the edges
-    /// between them. This asserts the shape the walk depends on, not the
-    /// membership: every term reaches the root, and the decoy subtype count is
-    /// what the file says.
+    /// `binary_search` is only correct on a sorted slice, and the generator is
+    /// what sorts them. If a hand edit or a generator change breaks the order,
+    /// lookups start missing terms that are present, which is silent.
     #[test]
-    fn every_origin_type_reaches_the_root() {
-        let parents = origin_type_parents();
-        assert!(parents.contains_key("MS:1003072"), "the root is present");
-        for accession in parents.keys() {
+    fn the_generated_lists_are_sorted() {
+        for (name, list) in [
+            ("ALL", psims_origin_type::ALL),
+            ("DECOY", psims_origin_type::DECOY),
+            ("THEORETICAL_MZ", psims_origin_type::THEORETICAL_MZ),
+        ] {
+            assert!(list.is_sorted(), "{name} is not sorted: {list:?}");
+            assert!(!list.is_empty(), "{name} is empty");
+        }
+    }
+
+    /// Every subset has to be a subset. A term in `DECOY` but not in `ALL`
+    /// would be unreachable, because `subsumes_decoy` gates on `ALL` first.
+    #[test]
+    fn every_subset_is_contained_in_the_whole_subtree() {
+        for accession in psims_origin_type::DECOY
+            .iter()
+            .chain(psims_origin_type::THEORETICAL_MZ)
+        {
             assert!(
-                subsumes_decoy(accession).is_some(),
-                "{accession} does not resolve"
+                psims_origin_type::ALL.binary_search(accession).is_ok(),
+                "MS:{accession} is in a subset but not in ALL"
             );
         }
     }
 
-    /// The decision is the `is_a` walk, so a subtype is a decoy without being
-    /// named anywhere in this file, and a sibling of `decoy spectrum` is not.
+    /// Membership comes from the `is_a` closure the generator resolved, so a
+    /// subtype is a decoy without being named here, and a sibling of `decoy
+    /// spectrum` is not.
     #[test]
     fn decoy_subtypes_subsume_and_siblings_do_not() {
-        assert_eq!(subsumes_decoy("MS:1003192"), Some(true), "decoy spectrum");
-        assert_eq!(subsumes_decoy("MS:1003193"), Some(true), "a subtype");
-        assert_eq!(subsumes_decoy("MS:1003195"), Some(true), "another subtype");
-        assert_eq!(subsumes_decoy("MS:1003073"), Some(false), "observed");
-        assert_eq!(subsumes_decoy("MS:1003074"), Some(false), "predicted");
+        assert_eq!(subsumes_decoy(1_003_192), Some(true), "decoy spectrum");
+        assert_eq!(subsumes_decoy(1_003_193), Some(true), "a subtype");
+        assert_eq!(subsumes_decoy(1_003_195), Some(true), "another subtype");
+        assert_eq!(subsumes_decoy(1_003_073), Some(false), "observed");
+        assert_eq!(subsumes_decoy(1_003_074), Some(false), "predicted");
         assert_eq!(
-            subsumes_decoy("MS:1003424"),
+            subsumes_decoy(1_003_424),
             Some(false),
             "Spectronaut's origin type"
         );
@@ -978,7 +969,49 @@ mod tests {
     /// reports it rather than deciding silently.
     #[test]
     fn a_term_outside_the_subtree_does_not_resolve() {
-        assert_eq!(subsumes_decoy("MS:9999999"), None);
-        assert_eq!(subsumes_decoy(""), None);
+        assert_eq!(subsumes_decoy(9_999_999), None);
+        assert_eq!(subsumes_decoy(0), None);
+    }
+
+    /// Both terms whose definitions state the m/z is calculated, and one whose
+    /// definition states the opposite.
+    #[test]
+    fn only_calculated_mz_origin_types_declare_theoretical_mz() {
+        assert!(declares_theoretical_mz(1_003_074), "predicted spectrum");
+        assert!(declares_theoretical_mz(1_003_424), "Spectronaut's");
+        assert!(!declares_theoretical_mz(1_003_073), "observed spectrum");
+    }
+
+    /// The namespace boundary. Comparing accessions as integers is correct only
+    /// after the vocabulary is established, so the same number in another
+    /// vocabulary must not match. UO reaches 1010060, above every accession
+    /// this file names, so the ranges genuinely overlap.
+    #[test]
+    fn an_accession_in_another_vocabulary_is_not_an_ms_term() {
+        use mzannotate::mzdata::params::{
+            Param,
+            Value,
+        };
+
+        let term = |cv: Option<ControlledVocabulary>| Param {
+            name: "spectrum origin type".to_string(),
+            value: Value::String("MS:1003192|decoy spectrum".to_string()),
+            accession: Some(SPECTRUM_ORIGIN_TYPE),
+            controlled_vocabulary: cv,
+            unit: Default::default(),
+        };
+
+        assert!(is_ms_term(
+            &term(Some(ControlledVocabulary::MS)),
+            SPECTRUM_ORIGIN_TYPE
+        ));
+        assert!(
+            !is_ms_term(&term(Some(ControlledVocabulary::UO)), SPECTRUM_ORIGIN_TYPE),
+            "the same number in the Unit Ontology is a different term"
+        );
+        assert!(
+            !is_ms_term(&term(None), SPECTRUM_ORIGIN_TYPE),
+            "a param with no vocabulary names no controlled term"
+        );
     }
 }

@@ -5,6 +5,7 @@ mod elution_group_inputs;
 pub mod index_serde;
 mod library_file;
 mod mzspeclib_io;
+mod psims_origin_type;
 mod skyline_io;
 mod spectronaut_io;
 

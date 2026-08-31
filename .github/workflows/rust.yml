@@ -71,3 +71,22 @@ jobs:
         run: cargo test --verbose -p calibrt -p calib_dash
       - name: Check timsseek_cli with the calib-dashboard feature
         run: cargo check --verbose -p timsseek_cli --features calib-dashboard --all-targets
+
+  # The PSI-MS `spectrum origin type` subtree is vendored as generated Rust
+  # (`rust/timsquery/src/serde/psims_origin_type.rs`), because no crate in the
+  # tree carries the PSI-MS vocabulary and the reader needs `is_a` to tell a
+  # decoy from a target. A vendored snapshot can go stale silently, so this job
+  # compares its `data-version` against the published ontology.
+  #
+  # `continue-on-error` on purpose: the check reaches the network, and a HUPO-PSI
+  # release is not a reason to block a merge. It has to be loud, not fatal. When
+  # it fails, re-run the generator and look at whether any new term is a decoy
+  # subtype.
+  psims-vocabulary:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      # ubuntu-latest ships python3, and the script is standard library only.
+      - name: PSI-MS vocabulary snapshot is current
+        run: python3 scripts/gen_psims_origin_type.py --check
