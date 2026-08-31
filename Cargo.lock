@@ -159,7 +159,7 @@ dependencies = [
 
 [[package]]
 name = "alloc_track"
-version = "0.33.0"
+version = "0.34.0"
 
 [[package]]
 name = "allocator-api2"
@@ -259,7 +259,7 @@ checksum = "7f202df86484c868dbad7eaa557ef785d5c66295e41b460ef922eca0723b842c"
 
 [[package]]
 name = "apex_sim"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "eframe",
  "egui",
@@ -301,7 +301,7 @@ dependencies = [
 
 [[package]]
 name = "array2d"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "serde",
 ]
@@ -1405,7 +1405,7 @@ dependencies = [
 
 [[package]]
 name = "calib_dash"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "calibrt",
  "insta",
@@ -1417,7 +1417,7 @@ dependencies = [
 
 [[package]]
 name = "calibrt"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "array2d",
  "rand 0.9.3",
@@ -4082,7 +4082,7 @@ dependencies = [
 
 [[package]]
 name = "micromzpaf"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "serde",
  "serde_json",
@@ -5772,7 +5772,7 @@ dependencies = [
 
 [[package]]
 name = "rescore_dash"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "ratatui",
  "rayon",
@@ -6450,7 +6450,7 @@ dependencies = [
 
 [[package]]
 name = "speclib_build_cli"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "bloomfilter",
  "clap",
@@ -6790,7 +6790,7 @@ dependencies = [
 
 [[package]]
 name = "tims_stage"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "bytes",
  "filetime",
@@ -6806,7 +6806,7 @@ dependencies = [
 
 [[package]]
 name = "timscentroid"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "arrow",
  "async-trait",
@@ -6840,7 +6840,7 @@ dependencies = [
 
 [[package]]
 name = "timsquery"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "array2d",
  "arrow",
@@ -6864,7 +6864,7 @@ dependencies = [
 
 [[package]]
 name = "timsquery_cli"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "base64 0.22.1",
  "clap",
@@ -6884,7 +6884,7 @@ dependencies = [
 
 [[package]]
 name = "timsquery_pyo3"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "numpy",
  "pyo3",
@@ -6895,7 +6895,7 @@ dependencies = [
 
 [[package]]
 name = "timsquery_viewer"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "calibrt",
  "clap",
@@ -6938,7 +6938,7 @@ dependencies = [
 
 [[package]]
 name = "timsseek"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "array2d",
  "arrow",
@@ -6968,7 +6968,7 @@ dependencies = [
 
 [[package]]
 name = "timsseek_cli"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "alloc_track",
  "calib_dash",
@@ -6995,7 +6995,7 @@ dependencies = [
 
 [[package]]
 name = "timsseek_macros"
-version = "0.33.0"
+version = "0.34.0"
 dependencies = [
  "proc-macro2",
  "quote",

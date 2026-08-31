@@ -21,9 +21,10 @@
 chunk_size = 20000
 
 ## Decoy generation strategy.
-## "if_missing"  -- generate ±12 Da mass-shift decoys when the library has none
-## "always"      -- always generate decoys (replace any existing ones)
-## "never"       -- trust the library's decoy labels
+## "if_missing"  -- generate ±CH2 mass-shift decoys when the library has none
+## "force"       -- always generate decoys (replace any existing ones)
+## "never"       -- trust the library's decoy labels, generating none even when
+##                 the library ships none, which leaves FDR estimated from no decoys
 decoy_strategy = "if_missing"
 
 ## Rescore model applied in Phase 5 (`--rescore-model` overrides this).

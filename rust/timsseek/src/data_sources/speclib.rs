@@ -239,6 +239,15 @@ fn finalize_reference_library(
                     n_stored_decoys,
                 );
             }
+            DecoyStrategy::None if n_stored_decoys == 0 => {
+                tracing::warn!(
+                    "Decoy strategy None and the library ships no decoys; scoring {} \
+                     stored rows as-is. FDR will be estimated with nothing to \
+                     estimate it from. Use --decoy-strategy if-missing to generate \
+                     mass-shift decoys.",
+                    n_rows
+                );
+            }
             DecoyStrategy::None => {
                 tracing::info!(
                     "Decoy strategy None; scoring {} stored rows as-is (targets + any \
