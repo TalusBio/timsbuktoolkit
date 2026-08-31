@@ -13,7 +13,6 @@ members = [
     "rust/timsquery_cli",
     "rust/timsquery_viewer",
     "rust/apex_sim",
-    "rust/speclib_build_cli",
     "rust/tims_stage",
     "rust/timsseek_macros",
     "rust/rescore_dash",
@@ -33,7 +32,6 @@ default-members = [
     "rust/timsquery_cli",
     "rust/timsquery_viewer",
     "rust/apex_sim",
-    "rust/speclib_build_cli",
     "rust/tims_stage",
     "rust/timsseek_macros"
 ]

@@ -16,7 +16,6 @@ mass spectrometry data. The project consists of several components:
 - `timsquery_cli`: Command-line interface for querying timsTOF data using the timsquery library.
 - `timsseek`: Implement spectral library reading+build and core logic to score peptide-data matches.
 - `timsseek_cli`: Command-line interface for a peptide-centric search engine.
-- `speclib_build_cli`: CLI that builds a spectral library from FASTA using Koina.
 - `timscentroid`: Internal library for indexing and centroiding timsTOF data.
 - `calibrt`: Internal library for retention time calibration.
 - `alloc_track`: Dev-only tracking global allocator. Opt-in via `--features track-alloc` on `timsseek_cli`; emits per-phase allocation deltas on stderr.
@@ -88,9 +87,6 @@ Both CLIs accept `s3://` URIs anywhere a path is accepted (AWS / MinIO / R2). `.
 timsseek --raw-inputs s3://bkt/sample.d.tar \
          --speclib-uri s3://bkt/lib.mzspeclib.txt.gz \
          --output-uri s3://bkt/runs/out
-
-speclib_build_cli --fasta s3://bkt/proteome.fasta \
-                  --output s3://bkt/lib.msgpack.zst
 ```
 
 Auth via AWS default chain. MinIO/R2: set `AWS_ENDPOINT_URL`. See `docs/development.md` for `[staging]` config + env var list.

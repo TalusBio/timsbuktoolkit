@@ -12,7 +12,7 @@ on:
 env:
   CARGO_TERM_COLOR: always
   CARGO_INCREMENTAL: 0
-  RELEASE_BINARIES: timsseek timsquery_cli timsquery_viewer speclib_build
+  RELEASE_BINARIES: timsseek timsquery_cli timsquery_viewer
   SCCACHE_GHA_ENABLED: "true"
   RUSTC_WRAPPER: "sccache"
 

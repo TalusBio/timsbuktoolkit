@@ -9,172 +9,11 @@ use crate::models::sequence::{
     normalize_to_proforma,
     parse_sequence,
 };
-use serde::{
-    Deserialize,
-    Serialize,
-};
-use std::io::{
-    BufRead,
-    BufReader,
-    Read,
-};
-use std::path::{
-    Path,
-    PathBuf,
-};
+use std::path::Path;
+use timsquery::models::TargetColumns;
 use timsquery::models::capabilities::SeqFeatureState;
-use timsquery::models::{
-    OwnedSourceId,
-    Row,
-    TargetColumns,
-};
 use timsquery::serde::read_targets as read_timsquery_library;
 use timsquery::utils::constants::PROTON_MASS;
-
-/// The serializable, on-disk form of a native speclib element. Kept backwards
-/// compatible; the load path builds the columnar `ReferenceLibrary` arena
-/// directly from these elements (see `Speclib::from_file_with_format`).
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct SerSpeclibElement {
-    precursor: PrecursorEntry,
-    elution_group: ReferenceEG,
-}
-
-impl SerSpeclibElement {
-    pub fn new(precursor: PrecursorEntry, elution_group: ReferenceEG) -> Self {
-        Self {
-            precursor,
-            elution_group,
-        }
-    }
-
-    pub fn sample() -> Self {
-        SerSpeclibElement {
-            precursor: PrecursorEntry {
-                sequence: "PEPTIDESEK".into(),
-                charge: 2,
-                decoy: false,
-                decoy_group: 32,
-            },
-            elution_group: ReferenceEG {
-                id: 32,
-                precursor_mz: 512.2,
-                precursor_labels: vec![0, 2],
-                fragment_mzs: vec![312.2, 675.7],
-                fragment_labels: vec![
-                    IonAnnot::try_from("y1").unwrap(),
-                    IonAnnot::try_from("y2").unwrap(),
-                ],
-                precursor_intensities: vec![1.0, 0.5],
-                fragment_intensities: vec![0.8, 0.3],
-                mobility_ook0: 0.75,
-                rt_seconds: 120.0,
-            },
-        }
-    }
-
-    pub fn sample_json() -> &'static str {
-        r#"{
-            "precursor": {
-                "sequence": "PEPTIDEPINK",
-                "charge": 2,
-                "decoy": false,
-                "decoy_group": 0
-            },
-            "elution_group": {
-                "id": 0,
-                "precursor_mz": 876.5432,
-                "precursor_labels": [ 0, 1 ],
-                "fragment_mzs": [ 123.0, 123.0, 123.0 ],
-                "fragment_labels": ["a1", "b1", "c1^2"],
-                "precursor_intensities": [1.0, 1.0],
-                "fragment_intensities": [1.0, 1.0, 1.0],
-                "precursor_charge": 2,
-                "mobility_ook0": 0.8,
-                "rt_seconds": 0.0
-            }
-        }"#
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct PrecursorEntry {
-    sequence: String,
-    charge: u8,
-    decoy: bool,
-    decoy_group: u32,
-}
-
-impl PrecursorEntry {
-    pub fn new(sequence: String, charge: u8, decoy: bool, decoy_group: u32) -> Self {
-        Self {
-            sequence,
-            charge,
-            decoy,
-            decoy_group,
-        }
-    }
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct ReferenceEG {
-    id: u32,
-    precursor_mz: f64,
-    precursor_labels: Vec<i8>,
-    #[serde(alias = "fragment_mz")]
-    fragment_mzs: Vec<f64>,
-    fragment_labels: Vec<IonAnnot>,
-    precursor_intensities: Vec<f32>,
-    fragment_intensities: Vec<f32>,
-    #[serde(alias = "mobility")]
-    mobility_ook0: f32,
-    rt_seconds: f32,
-}
-
-impl ReferenceEG {
-    #[allow(clippy::too_many_arguments)]
-    pub fn new(
-        id: u32,
-        precursor_mz: f64,
-        precursor_labels: Vec<i8>,
-        fragment_mzs: Vec<f64>,
-        fragment_labels: Vec<IonAnnot>,
-        precursor_intensities: Vec<f32>,
-        fragment_intensities: Vec<f32>,
-        mobility_ook0: f32,
-        rt_seconds: f32,
-    ) -> Self {
-        Self {
-            id,
-            precursor_mz,
-            precursor_labels,
-            fragment_mzs,
-            fragment_labels,
-            precursor_intensities,
-            fragment_intensities,
-            mobility_ook0,
-            rt_seconds,
-        }
-    }
-}
-
-/// Strip mod annotations -- anything inside `(...)` or `[...]` -- from a
-/// sequence, leaving the bare residue string. The native format ships one
-/// (modified) sequence per precursor; the arena's composition-isotope path
-/// needs the stripped residues.
-fn strip_mods(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut depth: i32 = 0;
-    for c in s.chars() {
-        match c {
-            '(' | '[' => depth += 1,
-            ')' | ']' => depth = (depth - 1).max(0),
-            _ if depth == 0 => out.push(c),
-            _ => {}
-        }
-    }
-    out
-}
 
 /// Summary of a `finalize_reference_library` call, for load-time logging.
 #[derive(Debug, Clone, Copy)]
@@ -325,176 +164,24 @@ fn finalize_reference_library(
 /// iterates `RefQuery` flyweights via [`ReferenceLibrary::item_at`].
 pub type Speclib = ReferenceLibrary;
 
-#[derive(Debug, Clone, Copy)]
-pub enum SpeclibFormat {
-    NdJson,
-    NdJsonZstd,
-    MessagePack,
-    MessagePackZstd,
-}
-
-impl SpeclibFormat {
-    /// Detect a native timsseek format by EXTENSION ONLY. Returns `None` for
-    /// anything else (including `.speclib`), which routes to the timsquery
-    /// bridge.
-    ///
-    /// Extension-only is deliberate: msgpack has no reliable magic byte, so a
-    /// content sniff would misclaim raw binaries like `.speclib` as msgpack.
-    pub fn detect_from_extension(path: &Path) -> Option<Self> {
-        let path_str = path.to_string_lossy().to_lowercase();
-
-        // Accept both `.zst` and `.zstd` -- DIA-NN/user pipelines use either.
-        if path_str.ends_with(".msgpack.zst") || path_str.ends_with(".msgpack.zstd") {
-            Some(SpeclibFormat::MessagePackZstd)
-        } else if path_str.ends_with(".msgpack") {
-            Some(SpeclibFormat::MessagePack)
-        } else if path_str.ends_with(".ndjson.zst") || path_str.ends_with(".ndjson.zstd") {
-            Some(SpeclibFormat::NdJsonZstd)
-        } else if path_str.ends_with(".ndjson") {
-            Some(SpeclibFormat::NdJson)
-        } else {
-            None
-        }
-    }
-}
-
-/// Streams raw `SerSpeclibElement`s out of a native timsseek library file.
+/// The formats this project used to write and no longer reads.
 ///
-/// The native path builds the columnar arena directly from these elements (see
-/// `Speclib::from_file_with_format`), so the reader stays at the serializable
-/// element and does not eagerly build per-row scoring items.
-pub struct SpeclibReader<'a> {
-    inner: Box<dyn Iterator<Item = Result<SerSpeclibElement, TargetReadingError>> + Send + 'a>,
-}
-
-impl<'a> SpeclibReader<'a> {
-    pub fn new<R: Read + Send + 'a>(
-        reader: R,
-        format: SpeclibFormat,
-    ) -> Result<Self, TargetReadingError> {
-        let inner: Box<dyn Iterator<Item = Result<SerSpeclibElement, TargetReadingError>> + Send> =
-            match format {
-                SpeclibFormat::NdJson => Box::new(NdJsonReader::new(BufReader::new(reader))),
-                SpeclibFormat::NdJsonZstd => {
-                    let decoder = zstd::Decoder::new(reader).map_err(|e| {
-                        TargetReadingError::SpeclibParsingError {
-                            source: serde_json::Error::io(std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                e,
-                            )),
-                            context: "Error creating ZSTD decoder",
-                        }
-                    })?;
-                    Box::new(NdJsonReader::new(BufReader::new(decoder)))
-                }
-                SpeclibFormat::MessagePack => Box::new(MessagePackReader::new(reader)),
-                SpeclibFormat::MessagePackZstd => {
-                    let decoder = zstd::Decoder::new(reader).map_err(|e| {
-                        TargetReadingError::SpeclibParsingError {
-                            source: serde_json::Error::io(std::io::Error::new(
-                                std::io::ErrorKind::InvalidData,
-                                e,
-                            )),
-                            context: "Error creating ZSTD decoder",
-                        }
-                    })?;
-                    Box::new(MessagePackReader::new(decoder))
-                }
-            };
-
-        Ok(SpeclibReader { inner })
-    }
-}
-
-impl Iterator for SpeclibReader<'_> {
-    type Item = Result<SerSpeclibElement, TargetReadingError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        self.inner.next()
-    }
-}
-
-struct NdJsonReader<R: BufRead> {
-    reader: R,
-}
-
-impl<R: BufRead> NdJsonReader<R> {
-    fn new(reader: R) -> Self {
-        Self { reader }
-    }
-}
-
-impl<R: BufRead> Iterator for NdJsonReader<R> {
-    type Item = Result<SerSpeclibElement, TargetReadingError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        let mut line = String::new();
-        match self.reader.read_line(&mut line) {
-            Ok(0) => None, // EOF
-            Ok(_) => {
-                if line.trim().is_empty() {
-                    return self.next(); // Skip empty lines
-                }
-
-                let elem: SerSpeclibElement = match serde_json::from_str(&line) {
-                    Ok(x) => x,
-                    Err(e) => {
-                        return Some(Err(TargetReadingError::SpeclibParsingError {
-                            source: e,
-                            context: "Error parsing NDJSON line",
-                        }));
-                    }
-                };
-
-                Some(Ok(elem))
-            }
-            Err(e) => Some(Err(TargetReadingError::FileReadingError {
-                source: e,
-                context: "Error reading line",
-                path: PathBuf::new(),
-            })),
-        }
-    }
-}
-
-struct MessagePackReader<R: Read> {
-    deserializer: rmp_serde::Deserializer<rmp_serde::decode::ReadReader<R>>,
-}
-
-impl<R: Read> MessagePackReader<R> {
-    fn new(reader: R) -> Self {
-        Self {
-            deserializer: rmp_serde::Deserializer::new(reader),
-        }
-    }
-}
-
-impl<R: Read> Iterator for MessagePackReader<R> {
-    type Item = Result<SerSpeclibElement, TargetReadingError>;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        use serde::Deserialize;
-
-        match SerSpeclibElement::deserialize(&mut self.deserializer) {
-            Ok(elem) => Some(Ok(elem)),
-            Err(rmp_serde::decode::Error::InvalidMarkerRead(ref io_err))
-                if io_err.kind() == std::io::ErrorKind::UnexpectedEof =>
-            {
-                None
-            } // EOF
-            Err(rmp_serde::decode::Error::InvalidDataRead(ref io_err))
-                if io_err.kind() == std::io::ErrorKind::UnexpectedEof =>
-            {
-                None
-            } // EOF
-            Err(e) => Some(Err(TargetReadingError::SpeclibParsingError {
-                source: serde_json::Error::io(std::io::Error::new(
-                    std::io::ErrorKind::InvalidData,
-                    e,
-                )),
-                context: "Error reading MessagePack",
-            })),
-        }
+/// Nothing produces either one after this change, so a user holding one has a
+/// file that can only be rebuilt. Matched by extension and reported by name,
+/// because the alternative is a parse error from whichever reader the registry
+/// happens to try last, which says nothing about what to do next.
+fn retired_format(path: &Path) -> Option<&'static str> {
+    let name = path.to_string_lossy().to_lowercase();
+    let stem = name
+        .strip_suffix(".zst")
+        .or_else(|| name.strip_suffix(".zstd"))
+        .unwrap_or(&name);
+    if stem.ends_with(".msgpack") {
+        Some("MessagePack")
+    } else if stem.ends_with(".ndjson") {
+        Some("the native NDJSON library format")
+    } else {
+        None
     }
 }
 
@@ -521,17 +208,15 @@ impl Speclib {
         path: &Path,
         decoy_policy: crate::models::DecoyPolicy,
     ) -> Result<Self, TargetReadingError> {
-        // Native timsseek formats are matched by EXTENSION ONLY: a native
-        // extension commits to the native reader and surfaces its error. A
-        // `.speclib` matches no native extension and falls through to the
-        // bridge -> timsquery registry -> binary reader.
-        if let Some(format) = SpeclibFormat::detect_from_extension(path) {
-            tracing::info!(
-                "Loading native speclib format ({:?}) from {}",
-                format,
-                path.display()
-            );
-            return Self::from_file_with_format(path, format, decoy_policy);
+        if let Some(format) = retired_format(path) {
+            return Err(TargetReadingError::UnsupportedFormat {
+                message: format!(
+                    "{} is {format}, which timsseek no longer reads. Nothing writes it either; \
+                     rebuild the library with `timsseek build-library --fasta <FASTA> \
+                     -o <NAME>.mzspeclib.txt.gz`.",
+                    path.display(),
+                ),
+            });
         }
 
         // Terminal source: bridge to the timsquery reader registry (DIA-NN
@@ -555,85 +240,6 @@ impl Speclib {
         Ok(lib)
     }
 
-    pub fn from_file_with_format(
-        path: &Path,
-        format: SpeclibFormat,
-        decoy_policy: crate::models::DecoyPolicy,
-    ) -> Result<Self, TargetReadingError> {
-        let file = std::fs::File::open(path).map_err(|e| TargetReadingError::FileReadingError {
-            source: e,
-            context: "Error opening speclib file",
-            path: PathBuf::from(path),
-        })?;
-
-        let reader = SpeclibReader::new(file, format)?;
-
-        // Build the columnar arena directly from the streamed elements (same
-        // lazy shape as the `.speclib` path), instead of collecting per-row
-        // scoring items into an intermediate Vec. Each element's fragment labels/mzs/
-        // intensities are parallel vectors in the native format, so the
-        // reference-intensity sidecar is filled in fragment-push order.
-        let mut geom = TargetColumns::with_capabilities(
-            timsquery::models::TargetCapabilities::default_diann(),
-        );
-        let mut frag_intens: Vec<f32> = Vec::new();
-        let mut decoy_groups: Vec<u64> = Vec::new();
-
-        for elem in reader {
-            let elem = elem?;
-            let eg = &elem.elution_group;
-            if eg.fragment_labels.len() != eg.fragment_mzs.len()
-                || eg.fragment_labels.len() != eg.fragment_intensities.len()
-            {
-                return Err(TargetReadingError::UnsupportedFormat {
-                    message: format!(
-                        "speclib element {:?}: fragment labels ({}), mzs ({}) and intensities ({}) must be parallel",
-                        elem.precursor.sequence,
-                        eg.fragment_labels.len(),
-                        eg.fragment_mzs.len(),
-                        eg.fragment_intensities.len(),
-                    ),
-                });
-            }
-
-            let frags: Vec<(IonAnnot, f64)> = eg
-                .fragment_labels
-                .iter()
-                .cloned()
-                .zip(eg.fragment_mzs.iter().cloned())
-                .collect();
-            frag_intens.extend_from_slice(&eg.fragment_intensities);
-
-            // The native format ships a single (modified) sequence; strip mod
-            // annotations for the composition-isotope path.
-            let modified = &elem.precursor.sequence;
-            let stripped = strip_mods(modified);
-            geom.push_row(Row {
-                precursor_mz: eg.precursor_mz,
-                charge: elem.precursor.charge,
-                rt_seconds: eg.rt_seconds,
-                mobility: eg.mobility_ook0,
-                frags: &frags,
-                seq_strip: &stripped,
-                seq_mod: modified,
-                is_decoy: elem.precursor.decoy,
-                // The format names its own precursors and declares its own
-                // competition groups; carry both rather than minting over them.
-                id: Some(OwnedSourceId::Numeric(eg.id as u64)),
-                ..Default::default()
-            });
-            decoy_groups.push(u64::from(elem.precursor.decoy_group));
-        }
-
-        geom.set_decoy_groups(decoy_groups)?;
-
-        // Decoy resolution + seal happen inside the one shared finalize path,
-        // exactly as the `.speclib` bridge above.
-        let (lib, _report) = finalize_reference_library(geom, frag_intens, decoy_policy)?;
-        lib.log_entry_stats();
-        Ok(lib)
-    }
-
     /// Log a one-line summary of the lazy arena's shape at load time.
     fn log_entry_stats(&self) {
         tracing::info!(
@@ -645,46 +251,6 @@ impl Speclib {
     }
 }
 
-pub struct SpeclibWriter<W: std::io::Write> {
-    inner: SpeclibWriterInner<W>,
-}
-
-enum SpeclibWriterInner<W: std::io::Write> {
-    MsgpackZstd(zstd::Encoder<'static, W>),
-}
-
-impl<W: std::io::Write> SpeclibWriter<W> {
-    pub fn new_msgpack_zstd(writer: W) -> Result<Self, std::io::Error> {
-        let encoder = zstd::Encoder::new(writer, 3)?;
-        Ok(Self {
-            inner: SpeclibWriterInner::MsgpackZstd(encoder),
-        })
-    }
-
-    pub fn append(&mut self, elem: &SerSpeclibElement) -> Result<(), TargetReadingError> {
-        match &mut self.inner {
-            SpeclibWriterInner::MsgpackZstd(encoder) => {
-                rmp_serde::encode::write(encoder, elem).map_err(|e| {
-                    TargetReadingError::SpeclibParsingError {
-                        source: serde_json::Error::io(std::io::Error::new(
-                            std::io::ErrorKind::InvalidData,
-                            e,
-                        )),
-                        context: "Error writing MessagePack",
-                    }
-                })?;
-            }
-        }
-        Ok(())
-    }
-
-    pub fn finish(self) -> Result<W, std::io::Error> {
-        match self.inner {
-            SpeclibWriterInner::MsgpackZstd(encoder) => encoder.finish(),
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -693,33 +259,42 @@ mod tests {
         RefQuery,
     };
 
+    /// A user upgrading with a MessagePack library in hand gets told what the
+    /// file is and how to replace it, rather than a parse error from whichever
+    /// reader the registry tried last.
     #[test]
-    fn test_detect_native_format_by_extension() {
-        use std::path::Path;
-        // Both .zst and .zstd must map to the native zstd readers.
-        for ext in ["lib.msgpack.zst", "lib.msgpack.zstd"] {
-            assert!(matches!(
-                SpeclibFormat::detect_from_extension(Path::new(ext)),
-                Some(SpeclibFormat::MessagePackZstd)
-            ));
+    fn a_retired_format_says_what_it_is_and_how_to_rebuild() {
+        for name in [
+            "lib.msgpack",
+            "lib.msgpack.zst",
+            "lib.msgpack.zstd",
+            "lib.ndjson",
+            "lib.ndjson.zst",
+        ] {
+            let err = Speclib::from_file(
+                std::path::Path::new(name),
+                crate::models::DecoyPolicy::default(),
+            )
+            .expect_err("a format nothing writes must not be read");
+            let msg = format!("{err:?}");
+            assert!(msg.contains("no longer reads"), "{name}: {msg}");
+            assert!(msg.contains("build-library"), "{name}: {msg}");
         }
-        for ext in ["lib.ndjson.zst", "lib.ndjson.zstd"] {
-            assert!(matches!(
-                SpeclibFormat::detect_from_extension(Path::new(ext)),
-                Some(SpeclibFormat::NdJsonZstd)
-            ));
+    }
+
+    /// Every format the registry still handles has to reach it, so the check
+    /// above cannot grow into a gate on things that do load.
+    #[test]
+    fn a_live_format_is_not_mistaken_for_a_retired_one() {
+        for name in [
+            "lib.speclib",
+            "lib.tsv",
+            "lib.parquet",
+            "lib.mzspeclib.txt",
+            "lib.mzspeclib.txt.gz",
+        ] {
+            assert_eq!(retired_format(std::path::Path::new(name)), None, "{name}");
         }
-        assert!(matches!(
-            SpeclibFormat::detect_from_extension(Path::new("lib.msgpack")),
-            Some(SpeclibFormat::MessagePack)
-        ));
-        assert!(matches!(
-            SpeclibFormat::detect_from_extension(Path::new("lib.ndjson")),
-            Some(SpeclibFormat::NdJson)
-        ));
-        // A .speclib must NOT be claimed as native -> routes to the bridge.
-        assert!(SpeclibFormat::detect_from_extension(Path::new("lib.speclib")).is_none());
-        assert!(SpeclibFormat::detect_from_extension(Path::new("lib.tsv")).is_none());
     }
 
     /// `Speclib` is now a type alias for `ReferenceLibrary` (Task 9 collapsed
@@ -1114,22 +689,6 @@ mod tests {
         }
     }
 
-    #[test]
-    fn test_speclib_writer_roundtrip() {
-        let elem = SerSpeclibElement::sample();
-        let mut buf = Vec::new();
-        {
-            let mut writer = SpeclibWriter::new_msgpack_zstd(&mut buf).unwrap();
-            writer.append(&elem).unwrap();
-            writer.append(&elem).unwrap();
-            writer.finish().unwrap();
-        }
-        let reader =
-            SpeclibReader::new(std::io::Cursor::new(&buf), SpeclibFormat::MessagePackZstd).unwrap();
-        let items: Vec<_> = reader.collect::<Result<Vec<_>, _>>().unwrap();
-        assert_eq!(items.len(), 2);
-    }
-
     /// End-to-end `Speclib::from_file` over the real DIA-NN HeLa `.speclib`
     /// fixture (the actual workload path). Proves: the arena narrows to a lazy
     /// library with targets, variant-0 is a target, and the intensity sidecar
@@ -1161,159 +720,52 @@ mod tests {
         );
     }
 
-    /// Native `SerSpeclibElement` reader (ndjson) builds the lazy arena
-    /// directly. The fixture ships one target + one stored decoy, so the
-    /// Task-4 seal gate downgrades `LazyMassShift -> Passthrough`: the arena is
-    /// 1:1 with the stored rows (no synthetic mass-shift expansion). Proves the
-    /// native path produces a lazy `ReferenceLibrary` with the right length, target/
-    /// decoy flags, and per-fragment reference intensities.
+    /// The OFF branch of the library-scale parse gate, and the only test of it.
+    ///
+    /// One row parses (`PEPTIDEK`) and one does not (`GARBAGE!!!`, which both
+    /// the byte-walk parser and the mzcore fallback reject). Feature
+    /// availability is library-scale on purpose, so the one bad row has to
+    /// disable sequence features for the good one too: targets and decoys
+    /// scored with different features make FDR meaningless.
+    ///
+    /// Written against `finalize_reference_library` rather than a file, since
+    /// the gate is a property of that seam and not of any format.
     #[test]
-    fn from_file_with_format_native_ndjson_builds_lazy_arena() {
-        use crate::data_sources::reference_library::ScoredIdentity;
+    fn one_unparsable_sequence_disables_sequence_features_library_wide() {
+        use timsquery::models::{
+            Row,
+            TargetCapabilities,
+        };
 
-        let target = SerSpeclibElement::new(
-            PrecursorEntry::new("PEPTIDEK".to_string(), 2, false, 0),
-            ReferenceEG::new(
-                0,
-                500.0,
-                vec![0, 1, 2],
-                vec![300.0, 400.0],
-                vec![
-                    IonAnnot::try_from("y1").unwrap(),
-                    IonAnnot::try_from("y2").unwrap(),
-                ],
-                vec![1.0, 0.5, 0.2],
-                vec![0.8, 0.3],
-                0.75,
-                120.0,
-            ),
-        );
-        let decoy = SerSpeclibElement::new(
-            PrecursorEntry::new("KEDITPEP".to_string(), 2, true, 0),
-            ReferenceEG::new(
-                1,
-                500.0,
-                vec![0, 1, 2],
-                vec![300.0, 400.0],
-                vec![
-                    IonAnnot::try_from("y1").unwrap(),
-                    IonAnnot::try_from("y2").unwrap(),
-                ],
-                vec![1.0, 0.5, 0.2],
-                vec![0.6, 0.4],
-                0.75,
-                120.0,
-            ),
-        );
-
-        let mut ndjson = String::new();
-        ndjson.push_str(&serde_json::to_string(&target).unwrap());
-        ndjson.push('\n');
-        ndjson.push_str(&serde_json::to_string(&decoy).unwrap());
-        ndjson.push('\n');
-
-        let path = std::env::temp_dir().join(format!(
-            "timsseek_native_fixture_{}.ndjson",
-            std::process::id()
-        ));
-        std::fs::write(&path, ndjson).unwrap();
-
-        let speclib = Speclib::from_file(&path, crate::models::DecoyPolicy::default())
-            .expect("native ndjson should load");
-        std::fs::remove_file(&path).ok();
-
-        let lib = expect_lazy(&speclib);
-        // Ships a decoy -> Passthrough -> 1 variant/row -> flat len == n_rows.
-        assert_eq!(lib.geom.variants_per_row(), 1, "downgraded to Passthrough");
-        assert_eq!(lib.len(), 2, "one target + one stored decoy, 1:1");
-
-        assert!(
-            lib.item_at(lib.geom.flats().next().unwrap()).is_target(),
-            "row 0 is the target"
-        );
-        assert!(
-            !lib.item_at(lib.geom.flats().nth(1).unwrap()).is_target(),
-            "row 1 is the stored decoy"
-        );
-
-        let frags: Vec<_> = lib
-            .item_at(lib.geom.flats().next().unwrap())
-            .iter_expected_fragments()
-            .collect();
-        assert_eq!(frags.len(), 2, "target ships two reference fragments");
-        for (_label, intensity) in frags {
-            assert!(intensity > 0.0, "reference intensities are positive");
+        let frags = [
+            (IonAnnot::try_from("y1").unwrap(), 300.0),
+            (IonAnnot::try_from("y2").unwrap(), 400.0),
+        ];
+        let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
+        for (mz, sequence) in [(500.0, "PEPTIDEK"), (600.0, "GARBAGE!!!")] {
+            geom.push_row(Row {
+                precursor_mz: mz,
+                charge: 2,
+                rt_seconds: 120.0,
+                mobility: 0.75,
+                frags: &frags,
+                seq_strip: sequence,
+                seq_mod: sequence,
+                ..Default::default()
+            });
         }
-    }
 
-    /// Negative parse-gate coverage on the arena path. `finalize_reference_library`
-    /// walks every target's MODIFIED sequence blob; if ANY row fails
-    /// `parse_sequence(normalize_to_proforma(..))`, sequence-derived features are
-    /// disabled library-wide (`SeqFeatureState::Unavailable`). Here one target
-    /// parses (`PEPTIDEK`) and one is poisoned (`GARBAGE!!!`). The byte-walk
-    /// parser and mzcore fallback both reject the `!` bytes, so the gate must
-    /// report `!parsable_sequences()`. This is the inverse of
-    /// `test_diann_tsv_parsable_gate`, and the only test of the OFF branch after
-    /// the AOS `test_parse_gate_off_on_poisoned_row` was removed in Task 9.
-    #[test]
-    fn from_file_native_ndjson_poisoned_row_disables_sequence_features() {
-        let good = SerSpeclibElement::new(
-            PrecursorEntry::new("PEPTIDEK".to_string(), 2, false, 0),
-            ReferenceEG::new(
-                0,
-                500.0,
-                vec![0, 1, 2],
-                vec![300.0, 400.0],
-                vec![
-                    IonAnnot::try_from("y1").unwrap(),
-                    IonAnnot::try_from("y2").unwrap(),
-                ],
-                vec![1.0, 0.5, 0.2],
-                vec![0.8, 0.3],
-                0.75,
-                120.0,
-            ),
-        );
-        // Unparseable modified sequence: `!` is rejected by parse_sequence_fast
-        // Both the byte-walk parser and the mzcore ProForma parser reject `!`.
-        let poisoned = SerSpeclibElement::new(
-            PrecursorEntry::new("GARBAGE!!!".to_string(), 2, false, 1),
-            ReferenceEG::new(
-                1,
-                600.0,
-                vec![0, 1, 2],
-                vec![300.0, 400.0],
-                vec![
-                    IonAnnot::try_from("y1").unwrap(),
-                    IonAnnot::try_from("y2").unwrap(),
-                ],
-                vec![1.0, 0.5, 0.2],
-                vec![0.7, 0.4],
-                0.75,
-                120.0,
-            ),
-        );
+        let (library, report) = finalize_reference_library(
+            geom,
+            vec![0.8, 0.3, 0.7, 0.4],
+            crate::models::DecoyPolicy::default(),
+        )
+        .expect("an unparseable sequence degrades the library rather than failing the load");
 
-        let mut ndjson = String::new();
-        ndjson.push_str(&serde_json::to_string(&good).unwrap());
-        ndjson.push('\n');
-        ndjson.push_str(&serde_json::to_string(&poisoned).unwrap());
-        ndjson.push('\n');
-
-        let path = std::env::temp_dir().join(format!(
-            "timsseek_poisoned_fixture_{}.ndjson",
-            std::process::id()
-        ));
-        std::fs::write(&path, ndjson).unwrap();
-
-        let speclib = Speclib::from_file(&path, crate::models::DecoyPolicy::default())
-            .expect("native ndjson should load even with an unparseable sequence");
-        std::fs::remove_file(&path).ok();
-
-        // The poisoned row flips the whole-library gate OFF.
+        assert_eq!(report.n_unparsable_sequences, 1);
         assert!(
-            !speclib.parsable_sequences(),
-            "an unparseable modified sequence must disable sequence features library-wide"
+            !library.parsable_sequences(),
+            "one unparsable row turns the gate off for the whole library"
         );
     }
 
@@ -1323,8 +775,11 @@ mod tests {
     /// causes the disclosed DIA-NN/Skyline regression).
     #[test]
     fn reference_library_rejects_mzpaf_without_intensities() {
-        use timsquery::models::TargetColumns;
         use timsquery::models::capabilities::TargetCapabilities;
+        use timsquery::models::{
+            Row,
+            TargetColumns,
+        };
         use timsquery::serde::TargetTable;
 
         let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());

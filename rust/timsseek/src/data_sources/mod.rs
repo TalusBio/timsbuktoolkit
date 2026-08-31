@@ -6,10 +6,4 @@ pub use reference_library::{
     RefQuery,
     ReferenceLibrary,
 };
-pub use speclib::{
-    PrecursorEntry,
-    ReferenceEG,
-    SerSpeclibElement,
-    Speclib,
-    SpeclibWriter,
-};
+pub use speclib::Speclib;
