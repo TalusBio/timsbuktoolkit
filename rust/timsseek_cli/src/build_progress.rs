@@ -186,7 +186,11 @@ fn log_line(progress: Progress) {
         info!("{}", capitalized(phase));
         return;
     }
+    // A phase opens by saying it has done nothing, and nothing is exact however
+    // approximate the phase's later counts are -- "about 0/16" reads as though
+    // the zero were a guess.
     let about = match phase.exactness() {
+        _ if progress.done == 0 => "",
         Exactness::Exact => "",
         Exactness::Approximate => "about ",
     };

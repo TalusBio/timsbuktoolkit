@@ -15,10 +15,10 @@ tempfile = { workspace = true }
 # Library prediction. The digestion, modification and prediction logic lives
 # there; this crate owns only the flag surface. Pinned to a revision rather than
 # a branch, and unpublished, so it is a git reference until it reaches crates.io.
-msspeculator-inference = { git = "https://github.com/TalusBio/msspeculator", rev = "de9ca7e0182bdabf70149f85689590eca2222d07" }
+msspeculator-inference = { git = "https://github.com/TalusBio/msspeculator", rev = "650815b6531ada49eda253ec36b81e7f0922ee1c" }
 # For `builtin::BUILTIN_PREFIX` and `builtin::names()`, which the inference
 # crate does not re-export. Same revision, already in the graph.
-msspeculator-core = { git = "https://github.com/TalusBio/msspeculator", rev = "de9ca7e0182bdabf70149f85689590eca2222d07" }
+msspeculator-core = { git = "https://github.com/TalusBio/msspeculator", rev = "650815b6531ada49eda253ec36b81e7f0922ee1c" }
 calib_dash = { path = "../calib_dash", optional = true }
 
 regex = "1.11.1"
