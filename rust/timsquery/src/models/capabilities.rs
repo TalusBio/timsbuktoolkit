@@ -35,6 +35,29 @@ pub enum DecoyStrategy {
     None,
 }
 
+/// What a reader does with decoy rows the file ships.
+///
+/// Decided before reading rather than after, so a caller that is going to
+/// generate its own decoys never pays to parse the file's. It also makes the
+/// arena's own `LazyMassShift -> Passthrough` downgrade an observation instead
+/// of an override: with no shipped decoys in the arena there is nothing to
+/// downgrade, so the strategy the caller asked for is the one that runs.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum DecoyHandling {
+    /// Read them. What a search wants unless it is replacing them.
+    #[default]
+    Keep,
+    /// Drop them at the row level, before they reach the arena.
+    Skip,
+}
+
+impl DecoyHandling {
+    /// Whether a row with this decoy flag should be read.
+    pub fn accepts(self, is_decoy: bool) -> bool {
+        !(is_decoy && self == Self::Skip)
+    }
+}
+
 /// The ±CH2 mass-shift offset (Da) and variant count for lazily-generated
 /// decoys. Every construction of [`DecoyStrategy::LazyMassShift`] uses these,
 /// including the test profiles, so a change here reaches all of them.

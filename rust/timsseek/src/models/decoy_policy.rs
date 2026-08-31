@@ -5,6 +5,7 @@ use serde::{
 use timsquery::models::capabilities::{
     DECOY_CH2_OFFSET_DA,
     DECOY_N_DECOYS,
+    DecoyHandling,
     DecoyStrategy,
 };
 
@@ -24,6 +25,22 @@ pub enum DecoyPolicy {
 
     /// Never generate decoys, use library as-is
     Never,
+}
+
+impl DecoyPolicy {
+    /// What the reader should do with decoy rows the file ships.
+    ///
+    /// `Force` is the only policy that drops them, and dropping them is what
+    /// makes it mean anything: `map_decoy_strategy` returns `LazyMassShift` for
+    /// it, but `seal()` rewrites that to `Passthrough` whenever the arena holds
+    /// a shipped decoy. Filtering at the reader leaves nothing to rewrite, so
+    /// the mass-shift decoys the user asked for are the ones that get scored.
+    pub fn decoy_handling(self) -> DecoyHandling {
+        match self {
+            Self::Force => DecoyHandling::Skip,
+            Self::IfMissing | Self::Never => DecoyHandling::Keep,
+        }
+    }
 }
 
 impl std::fmt::Display for DecoyPolicy {
@@ -93,6 +110,25 @@ mod map_decoy_strategy_tests {
                 }
             );
         }
+    }
+
+    /// The half that `map_decoy_strategy` alone cannot deliver.
+    ///
+    /// `Force` resolves to `LazyMassShift`, and `seal()` rewrites that to
+    /// `Passthrough` whenever the arena holds a shipped decoy -- so asserting
+    /// the mapping proves nothing about what runs. What makes `Force` mean
+    /// "replace them" is the reader dropping them, leaving `seal()` nothing to
+    /// rewrite.
+    #[test]
+    fn only_force_drops_the_decoys_a_file_ships() {
+        assert_eq!(DecoyPolicy::Force.decoy_handling(), DecoyHandling::Skip);
+        assert_eq!(DecoyPolicy::IfMissing.decoy_handling(), DecoyHandling::Keep);
+        assert_eq!(DecoyPolicy::Never.decoy_handling(), DecoyHandling::Keep);
+
+        // `Skip` rejects only decoys, so targets survive either way.
+        assert!(!DecoyHandling::Skip.accepts(true));
+        assert!(DecoyHandling::Skip.accepts(false));
+        assert!(DecoyHandling::Keep.accepts(true));
     }
 
     #[test]

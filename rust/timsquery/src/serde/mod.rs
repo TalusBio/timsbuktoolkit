@@ -20,5 +20,6 @@ pub use library_file::{
     TargetReadingError,
     TargetTable,
     read_targets,
+    read_targets_with,
 };
 pub use spectronaut_io::LibrarySniffError;

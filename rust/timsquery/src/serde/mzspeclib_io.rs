@@ -61,6 +61,7 @@ use super::library_file::{
 };
 use super::psims_origin_type;
 use crate::chemistry::ontologies;
+use crate::models::capabilities::DecoyHandling;
 use crate::models::{
     Row,
     TargetCapabilities,
@@ -178,7 +179,10 @@ fn open_reader(path: &Path) -> Result<Box<dyn BufRead>, TargetReadingError> {
 /// Builds the arena directly rather than going through
 /// [`ElutionGroupCollection`](super::library_file::ElutionGroupCollection),
 /// because the decoy groups a library declares have no representation there.
-pub fn read_mzspeclib_library_file(path: &Path) -> Result<TargetTable, TargetReadingError> {
+pub fn read_mzspeclib_library_file(
+    path: &Path,
+    decoys: DecoyHandling,
+) -> Result<TargetTable, TargetReadingError> {
     let reader = open_reader(path)?;
     let parser = MzSpecLibTextParser::open(reader, Some(path.to_path_buf()), ontologies())
         .map_err(|e| TargetReadingError::SpeclibParse(format!("mzSpecLib header: {e}")))?;
@@ -196,6 +200,11 @@ pub fn read_mzspeclib_library_file(path: &Path) -> Result<TargetTable, TargetRea
             TargetReadingError::SpeclibParse(format!("mzSpecLib spectrum {}: {e}", index + 1))
         })?;
         let row = SpectrumRow::extract(&spectrum, &mut degradation)?;
+        // Dropped here, so the decoy's peaks are never pushed and its group
+        // never interns.
+        if !decoys.accepts(row.is_decoy) {
+            continue;
+        }
 
         // Both halves of a pair have to land in one namespace. A decoy names
         // its target by `<Spectrum=N>` key, so an unpaired row is its own key
@@ -731,6 +740,35 @@ mod tests {
         assert_eq!(geom.n_rows(), 10);
         let decoys = geom.rows().filter(|r| geom.is_decoy(*r)).count();
         assert_eq!(decoys, 5, "five shipped decoys, declared only by set name");
+    }
+
+    /// `DecoyHandling::Skip` drops shipped decoys at the row level, which is
+    /// what makes `--decoy-strategy force` mean anything: with none in the
+    /// arena, `seal()` has no reason to rewrite `LazyMassShift` to
+    /// `Passthrough`, so the mass-shift decoys the user asked for are the ones
+    /// scored.
+    #[test]
+    fn skipping_shipped_decoys_leaves_only_targets() {
+        let path = fixture("target_decoy_attribute_set.mzspeclib.txt");
+        let TargetTable::Mzpaf { geom, .. } =
+            read_mzspeclib_library_file(&path, DecoyHandling::Skip).expect("fixture loads")
+        else {
+            panic!("mzSpecLib carries ion chemistry");
+        };
+        assert_eq!(geom.n_rows(), 5, "the five targets, without their decoys");
+        assert_eq!(geom.n_stored_decoys(), 0);
+
+        // The intensity sidecar has to shrink with the rows, or it stops being
+        // parallel to the fragment arena.
+        let TargetTable::Mzpaf { frag_intens, .. } =
+            read_mzspeclib_library_file(&path, DecoyHandling::Skip).expect("fixture loads")
+        else {
+            unreachable!()
+        };
+        assert_eq!(
+            frag_intens.expect("mzSpecLib fills the sidecar").len(),
+            geom.n_fragments()
+        );
     }
 
     /// `MS:1003259|related spectrum keys` names the target a decoy came from,

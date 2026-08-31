@@ -12,7 +12,7 @@ use crate::models::sequence::{
 use std::path::Path;
 use timsquery::models::TargetColumns;
 use timsquery::models::capabilities::SeqFeatureState;
-use timsquery::serde::read_targets as read_timsquery_library;
+use timsquery::serde::read_targets_with as read_timsquery_library;
 use timsquery::utils::constants::PROTON_MASS;
 
 /// Summary of a `finalize_reference_library` call, for load-time logging.
@@ -230,7 +230,7 @@ impl Speclib {
             "Loading library via timsquery format detection: {}",
             path.display()
         );
-        let arena = read_timsquery_library(path)?;
+        let arena = read_timsquery_library(path, decoy_policy.decoy_handling())?;
         let ReferenceLibrary { geom, frag_intens } = ReferenceLibrary::try_from(arena)?;
 
         // Decoy resolution + seal + parse gate + averagine tally + `LoadReport`

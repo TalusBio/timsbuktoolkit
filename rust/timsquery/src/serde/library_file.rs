@@ -29,6 +29,7 @@ use super::spectronaut_io::{
 };
 use crate::Target;
 use crate::ion::IonAnnot;
+use crate::models::capabilities::DecoyHandling;
 use crate::models::{
     Row,
     SourceIdError,
@@ -266,6 +267,7 @@ impl TargetTable {
     /// too, so `seal()` sees shipped decoys and the timsseek parse gate sees the
     /// modified sequence.
     fn mzpaf_with_intensities(
+        decoys: DecoyHandling,
         egs: Vec<Target<IonAnnot>>,
         extras: FileReadingExtras,
     ) -> Result<Self, TargetReadingError> {
@@ -289,6 +291,13 @@ impl TargetTable {
         let mut frag_intens: Vec<f32> = Vec::new();
 
         for (eg, row) in egs.iter().zip(rows) {
+            // The one filter point for every format that reaches the arena
+            // through this adapter. Dropping a shipped decoy here rather than
+            // after sealing means its fragments are never parsed and the
+            // arena's own `LazyMassShift` downgrade never sees it.
+            if !decoys.accepts(row.is_decoy) {
+                continue;
+            }
             // Reference intensities keyed by fragment label (see fn docs).
             let lookup: std::collections::HashMap<IonAnnot, f32> =
                 row.relative_intensities.into_iter().collect();
@@ -345,10 +354,13 @@ impl TargetTable {
     /// no extras were supplied (e.g. plain `IonAnnot` JSON, which only exercises
     /// the extraction/geometry path), `frag_intens` stays `None` -- matching the
     /// historical behavior where timsseek rejected that shape.
-    fn from_elution_groups(egc: ElutionGroupCollection) -> Result<Self, TargetReadingError> {
+    fn from_elution_groups(
+        egc: ElutionGroupCollection,
+        decoys: DecoyHandling,
+    ) -> Result<Self, TargetReadingError> {
         match egc {
             ElutionGroupCollection::MzpafLabels(egs, Some(extras)) => {
-                Self::mzpaf_with_intensities(egs, extras)
+                Self::mzpaf_with_intensities(decoys, egs, extras)
             }
             ElutionGroupCollection::MzpafLabels(egs, None) => {
                 let mut geom =
@@ -520,7 +532,23 @@ fn registry() -> &'static [&'static dyn LibraryReader] {
     ]
 }
 
+/// Read a library, keeping whatever decoy rows it ships.
+///
+/// The common case, and the one every caller wanted before decoy handling
+/// became a parameter. Use [`read_targets_with`] to drop them at read time.
 pub fn read_targets<T: AsRef<Path>>(path: T) -> Result<TargetTable, TargetReadingError> {
+    read_targets_with(path, DecoyHandling::Keep)
+}
+
+/// Read a library, deciding up front what to do with the decoys it ships.
+///
+/// `Skip` drops them before they reach the arena, so a caller regenerating its
+/// own never pays to parse the file's and the arena never sees a shipped decoy
+/// to downgrade `LazyMassShift` over.
+pub fn read_targets_with<T: AsRef<Path>>(
+    path: T,
+    decoys: DecoyHandling,
+) -> Result<TargetTable, TargetReadingError> {
     let path = path.as_ref();
     // The DIA-NN `.speclib` reader builds the columnar arena directly (with the
     // reference-intensity sidecar); every other format still produces the legacy
@@ -535,14 +563,14 @@ pub fn read_targets<T: AsRef<Path>>(path: T) -> Result<TargetTable, TargetReadin
     // have no representation in `ElutionGroupCollection`.
     if sniff_mzspeclib_library_file(path) {
         info!("Dispatching library read to mzspeclib (direct arena build)");
-        return read_mzspeclib_library_file(path);
+        return read_mzspeclib_library_file(path, decoys);
     }
     let mut last_err = None;
     for reader in registry() {
         if reader.sniff(path) {
             info!("Dispatching library read to {}", reader.name());
             match reader.read(path) {
-                Ok(egs) => return TargetTable::from_elution_groups(egs),
+                Ok(egs) => return TargetTable::from_elution_groups(egs, decoys),
                 // A sniff can fire on a file the reader then fails to parse
                 // (overlapping sniffs). Fall through to the next candidate
                 // instead of committing to the first sniff. Keep the FIRST
@@ -562,7 +590,7 @@ pub fn read_targets<T: AsRef<Path>>(path: T) -> Result<TargetTable, TargetReadin
     // got further, since a `.speclib` desync says more than "not valid JSON".
     info!("Dispatching library read to json (terminal)");
     match ElutionGroupCollection::try_read_json(path) {
-        Ok(egs) => TargetTable::from_elution_groups(egs),
+        Ok(egs) => TargetTable::from_elution_groups(egs, decoys),
         Err(e) => Err(last_err.unwrap_or(e)),
     }
 }
