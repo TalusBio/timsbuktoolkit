@@ -1,0 +1,21 @@
+# The `MS:1003072|spectrum origin type` subtree of the PSI-MS controlled
+# vocabulary, as `accession<TAB>name<TAB>is_a parents`.
+#
+# `is_decoy` is decided by walking these parents up to `MS:1003192|decoy
+# spectrum`, not by matching the leaves. A library that names a decoy subtype
+# this table has never heard of is reported as unrecognised rather than read as
+# a target, and a new subtype is one row here rather than a new match arm.
+#
+# Extracted from psi-ms.obo, https://github.com/HUPO-PSI/psi-ms-CV, by keeping
+# every term with an `is_a` path to MS:1003072 and the edges between them.
+# `origin_subtree_matches_the_published_cv` records what to re-run.
+MS:1003072	spectrum origin type
+MS:1003073	observed spectrum	MS:1003072
+MS:1003074	predicted spectrum	MS:1003072
+MS:1003075	demultiplexed spectrum	MS:1003072
+MS:1003192	decoy spectrum	MS:1003072
+MS:1003193	shuffle-and-reposition decoy spectrum	MS:1003192
+MS:1003194	precursor shift decoy spectrum	MS:1003192
+MS:1003195	unnatural peptidoform decoy spectrum	MS:1003192
+MS:1003196	unrelated species decoy spectrum	MS:1003192
+MS:1003424	selected fragment theoretical m/z observed intensity spectrum	MS:1003072

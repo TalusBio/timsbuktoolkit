@@ -83,8 +83,14 @@ insta = { version = "1.34.0" }
 bon = "3.8.1"
 tinyvec = { features = ["alloc", "serde"], version = "1.10.0" }
 smallvec = { version = "1.13", features = ["const_generics", "union"] }
-mzcore = { version = "0.2.0" }
-mzcv = { version = "0.3.0" }
+# `mzannotate` carries the mzSpecLib reader. Its released build never applied
+# named attribute sets, so every decoy in a target/decoy library read back as a
+# target; the branch below is the open upstream fix. `mzcore` and `mzcv` come
+# from the same source so the graph holds one copy of each and the ontology
+# types unify. All three become version numbers once the fix ships.
+mzannotate = { git = "https://github.com/jspaezp/rustyms", branch = "fix/mzspeclib-attribute-sets" }
+mzcore = { git = "https://github.com/jspaezp/rustyms", branch = "fix/mzspeclib-attribute-sets" }
+mzcv = { git = "https://github.com/jspaezp/rustyms", branch = "fix/mzspeclib-attribute-sets" }
 csv = "1.3"
 
 tempfile = "3.23.0"

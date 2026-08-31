@@ -1,0 +1,24 @@
+<mzSpecLib>
+MS:1003186|library format version=1.0
+MS:1003188|library name=undefined_attribute_set
+<AttributeSet Spectrum=all>
+MS:1000511|ms level=2
+<Spectrum=1>
+MS:1003061|library spectrum name=AQIPILR/2
+MS:1000744|selected ion m/z=405.763438
+MS:1000041|charge state=2
+MS:1003072|spectrum origin type=MS:1003074|predicted spectrum
+<Analyte=1>
+MS:1003270|proforma peptidoform ion notation=AQIPILR/2
+<Peaks>
+401.287080	3.344175	y3/0.0
+
+<Spectrum=2>
+MS:1003061|library spectrum name=AQIPILR/2 DECOY
+MS:1000744|selected ion m/z=405.763438
+MS:1000041|charge state=2
+MS:1003212|library attribute set name=DECOY
+<Analyte=1>
+MS:1003270|proforma peptidoform ion notation=RLIPIQA/2
+<Peaks>
+401.287080	3.344175	y3/0.0

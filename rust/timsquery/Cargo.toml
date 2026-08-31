@@ -27,6 +27,14 @@ parquet = { workspace = true }
 arrow = { workspace = true }
 thiserror = { workspace = true }
 
+# The mzSpecLib reader. Unconditional, like every other library format: the
+# chemistry stack is already in the workspace and unreferenced ontology data is
+# dropped by the linker.
+mzannotate = { workspace = true }
+mzcore = { workspace = true }
+mzcv = { workspace = true }
+flate2 = "1.1"
+
 [features]
 # Forward mzML/mzdata ingest support down to timscentroid, where the reader lives.
 # Not defaulted here (see timsseek_cli) so `--no-default-features` stays lean.

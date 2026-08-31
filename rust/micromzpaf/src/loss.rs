@@ -234,7 +234,11 @@ impl NeutralLoss {
     /// Resolve a loss expression (without the leading `-`) to a discriminant.
     ///
     /// `None` means the composition is valid but not in the supported table.
-    pub(crate) fn from_expression(s: &str) -> Result<Option<Self>, IonParsingError> {
+    ///
+    /// The lookup is by composition, so `CH3SOH` and `CH4OS` resolve to the
+    /// same loss. Callers holding a loss as a formula string, rather than as an
+    /// mzPAF annotation, come in here.
+    pub fn from_expression(s: &str) -> Result<Option<Self>, IonParsingError> {
         let comp = Composition::parse_expression(s)?;
         Ok(TABLE
             .iter()

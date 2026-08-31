@@ -4,6 +4,7 @@ pub mod diann_speclib_io;
 mod elution_group_inputs;
 pub mod index_serde;
 mod library_file;
+mod mzspeclib_io;
 mod skyline_io;
 mod spectronaut_io;
 

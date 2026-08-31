@@ -13,6 +13,10 @@ use super::elution_group_inputs::{
     ElutionGroupInput,
     ElutionGroupInputError,
 };
+use super::mzspeclib_io::{
+    read_mzspeclib_library_file,
+    sniff_mzspeclib_library_file,
+};
 pub use super::skyline_io::SkylinePrecursorExtras;
 use super::skyline_io::{
     read_targets as read_skyline_csv,
@@ -540,6 +544,12 @@ pub fn read_targets<T: AsRef<Path>>(path: T) -> Result<TargetTable, TargetReadin
     if sniff_diann_speclib_library_file(path) {
         info!("Dispatching library read to diann-speclib (direct arena build)");
         return read_diann_speclib_library_file(path);
+    }
+    // Also a direct arena build: the decoy groups an mzSpecLib file declares
+    // have no representation in `ElutionGroupCollection`.
+    if sniff_mzspeclib_library_file(path) {
+        info!("Dispatching library read to mzspeclib (direct arena build)");
+        return read_mzspeclib_library_file(path);
     }
     let mut last_err = None;
     for reader in registry() {
