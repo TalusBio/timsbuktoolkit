@@ -91,6 +91,8 @@ timsseek --raw-inputs s3://bkt/sample.d.tar \
 
 `timsseek build-library` is local-only: `--fasta` and `--out` are filesystem paths and a remote URI is rejected rather than staged.
 
+A proteome build takes minutes and reports as it goes: a progress bar per phase on a terminal, a log line every 30s when stderr is redirected. Per-phase wall times land in the `.config.json` sidecar.
+
 Auth via AWS default chain. MinIO/R2: set `AWS_ENDPOINT_URL`. See `docs/development.md` for `[staging]` config + env var list.
 
 ## Development

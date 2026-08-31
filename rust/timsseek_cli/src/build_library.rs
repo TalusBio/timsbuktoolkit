@@ -20,6 +20,7 @@ use msspeculator_inference::{
 };
 use tracing::info;
 
+use crate::build_progress::BuildProgress;
 use crate::cli::BuildLibraryArgs;
 use crate::config::{
     BuildConfig,
@@ -212,11 +213,16 @@ pub fn run(resolved: &ResolvedBuild) -> Result<(), CliError> {
         resolved.fasta.display(),
         resolved.model
     );
+    // Held in a binding: the callback borrows it, so a temporary would be
+    // dropped before `write_library` is called.
+    let progress = BuildProgress::new();
+    let report = progress.callback();
     let stats = write_library(&LibraryOptions {
         out: &resolved.out,
         config_out: resolved.config_out.as_deref(),
         stream: StreamOptions {
             model,
+            progress: Some(&report),
             fasta: &resolved.fasta,
             activation: None,
             ms_context: ms_context.as_ref(),
@@ -237,6 +243,9 @@ pub fn run(resolved: &ResolvedBuild) -> Result<(), CliError> {
     .map_err(|e| CliError::LibraryBuild {
         source: format!("{}: {e:#}", resolved.out.display()),
     })?;
+    // Before anything else writes: an open bar is a line the summary below
+    // would land on the end of.
+    progress.finish();
 
     println!(
         "{} proteins -> {} peptides -> {} precursors ({} decoys) -> {} fragments -> {}",

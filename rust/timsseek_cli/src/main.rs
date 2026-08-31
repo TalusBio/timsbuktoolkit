@@ -1,4 +1,5 @@
 mod build_library;
+mod build_progress;
 mod cli;
 mod config;
 #[cfg(feature = "dashboard")]
