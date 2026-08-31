@@ -4178,7 +4178,7 @@ dependencies = [
 [[package]]
 name = "mzannotate"
 version = "0.2.0"
-source = "git+https://github.com/jspaezp/rustyms?branch=fix%2Fmzspeclib-attribute-sets#6a4f74ff365cffbe0612dd5f983db930c9f1b751"
+source = "git+https://github.com/jspaezp/rustyms?rev=142c96ed1d31c56936c003af5f599d0c8f740005#142c96ed1d31c56936c003af5f599d0c8f740005"
 dependencies = [
  "context_error",
  "indexmap",
@@ -4197,7 +4197,7 @@ dependencies = [
 [[package]]
 name = "mzcore"
 version = "0.2.0"
-source = "git+https://github.com/jspaezp/rustyms?branch=fix%2Fmzspeclib-attribute-sets#6a4f74ff365cffbe0612dd5f983db930c9f1b751"
+source = "git+https://github.com/jspaezp/rustyms?rev=142c96ed1d31c56936c003af5f599d0c8f740005#142c96ed1d31c56936c003af5f599d0c8f740005"
 dependencies = [
  "bincode",
  "context_error",
@@ -4216,7 +4216,7 @@ dependencies = [
 [[package]]
 name = "mzcv"
 version = "0.3.0"
-source = "git+https://github.com/jspaezp/rustyms?branch=fix%2Fmzspeclib-attribute-sets#6a4f74ff365cffbe0612dd5f983db930c9f1b751"
+source = "git+https://github.com/jspaezp/rustyms?rev=142c96ed1d31c56936c003af5f599d0c8f740005#142c96ed1d31c56936c003af5f599d0c8f740005"
 dependencies = [
  "bincode",
  "chrono",

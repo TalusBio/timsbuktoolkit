@@ -28,6 +28,26 @@ _Avoid_: spectral library (ambiguous), speclib
 The mzPAF annotation identifying a fragment ion (`y3`, `b2^2`, `y5-H2O`). Carries
 ion chemistry; distinct from an opaque string label, which does not.
 
+**Retention time**:
+Two different quantities share the name, and a target's `rt_seconds` may hold
+either.
+
+- A _measured_ retention time: when the analyte left the column, a duration.
+- A _normalized_ retention time, or index: where the analyte sits on a reference
+  scale anchored by standard peptides. Biognosys iRT spans about -20 to 120;
+  msspeculator writes a PROCAL scale anchored `TFAHTESHISK = 0`,
+  `SILDYVSLVEK = 100`. It is dimensionless.
+
+So on a normalized scale **zero and negative values are ordinary**, zero being an
+anchor rather than an absence, and a conversion between time units is arithmetic
+on an index. Only the source file knows which it wrote, and the arena does not
+record it: absent, zero and "index that happens to be zero" are one value.
+
+Treat `rt_seconds` as ordered, not as a duration. Calibration fits a monotone
+path from it to observed time, which is why a library on either scale searches
+correctly and why nothing has forced the distinction yet.
+_Avoid_: iRT (says normalized without saying it is an index), RT (says neither)
+
 ### How rows are named
 
 **Arena index**:

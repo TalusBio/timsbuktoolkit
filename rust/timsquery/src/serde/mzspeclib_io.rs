@@ -17,6 +17,10 @@
 //! again: the composition when the annotation carries one, the mzPAF mass-error
 //! suffix when it does not, and the peak's own m/z when the spectrum declares
 //! its masses calculated rather than measured. See [`theoretical_mz`].
+//!
+//! What a library loses on the way in is counted rather than logged per row,
+//! and reported once. A field being absent and a field being unreadable are
+//! different, and the counts are what tell them apart; see [`Degradation`].
 
 use std::io::BufRead;
 use std::path::Path;
@@ -238,7 +242,14 @@ struct Degradation {
     unrepresentable_labels: usize,
     peaks_without_theoretical_mz: usize,
     rows_without_sequence: usize,
-    unrecognised_origin_types: Vec<u32>,
+    // No count of entries missing a retention time. Zero is an ordinary value
+    // on a normalized scale rather than an absence -- it is an anchor point, and
+    // it is what msspeculator's own libraries write -- so there is nothing to
+    // test for. See the CONTEXT.md entry on retention time.
+    /// A set, not a list: this one is pushed per spectrum rather than per file,
+    /// so a five-million-row library with one unrecognised subtype would
+    /// otherwise hold a 20 MB `Vec` and print five million identical lines.
+    unrecognised_origin_types: std::collections::BTreeSet<u32>,
 }
 
 impl Degradation {
@@ -477,15 +488,15 @@ fn charge<M: mzcore::chemistry::MassOutputMode>(
         .unwrap_or(0)
 }
 
-/// Seconds, from a field mzannotate documents as minutes.
+/// Whatever the file's retention time is, scaled from the minutes mzannotate
+/// normalises every declared unit into.
 ///
-/// The absolute value is wrong today for the reasons in
-/// <https://github.com/jspaezp/rustyms/issues/3>: mzannotate's three retention
-/// time paths apply three different divisors. Within one library every entry
-/// takes the same path, so the ordering the search actually depends on survives,
-/// and calibration absorbs the scale. This becomes correct when that is fixed,
-/// and `retention_times_come_back_in_the_declared_order` fails loudly if the
-/// numbers move.
+/// Not necessarily a duration. `MS:1000896|normalized retention time` is an
+/// index on a reference scale, which is what msspeculator writes and what the
+/// Spectronaut export carries, so this can hold a dimensionless value where
+/// zero and negative numbers are ordinary. Calibration fits a monotone path
+/// from it to observed time, so ordering is what has to survive here, not
+/// units. See the CONTEXT.md entry on retention time.
 fn rt_seconds<M: mzcore::chemistry::MassOutputMode>(spectrum: &AnnotatedSpectrum<M>) -> f32 {
     const SECONDS_PER_MINUTE: f64 = 60.0;
     spectrum
@@ -528,7 +539,9 @@ fn is_decoy<M: mzcore::chemistry::MassOutputMode>(
     for accession in origin_types(spectrum) {
         match subsumes_decoy(accession) {
             Some(decoy) => return decoy,
-            None => degradation.unrecognised_origin_types.push(accession),
+            None => {
+                degradation.unrecognised_origin_types.insert(accession);
+            }
         }
     }
     false
@@ -884,21 +897,36 @@ mod tests {
         );
     }
 
-    /// Retention times are wrong in absolute terms until
-    /// <https://github.com/jspaezp/rustyms/issues/3> is fixed, and the search
-    /// depends on the ordering rather than the scale. Pinning the numbers means
-    /// the fix cannot land here unnoticed.
+    /// Every entry in this fixture declares `MS:1000894|retention time` in
+    /// `UO:0000010|second`, so every entry has to come back with the seconds it
+    /// declared.
+    ///
+    /// Six of ten used to read `0.0`. mzannotate gated its retention-time branch
+    /// on the attribute group holding exactly two members, and SpectraST groups a
+    /// consensus retention time with `MS:1003174|attribute maximum` and
+    /// `MS:1003175|attribute minimum`, so whether an entry kept its retention
+    /// time depended on what else its writer put in the group. Fixed upstream.
+    ///
+    /// Asserting the declared values rather than a distinctness property is what
+    /// makes that failure impossible to pass: six entries collapsing onto one
+    /// value satisfies "more than one distinct value".
     #[test]
-    fn retention_times_come_back_in_the_declared_order() {
+    fn every_declared_retention_time_survives_the_load() {
         let geom = arena("target_decoy_attribute_set.mzspeclib.txt");
         let rts: Vec<f32> = geom.rows().map(|r| geom.rt_seconds(r)).collect();
-        // 1189.6, declared `UO:0000010|second`, read as minutes and scaled.
-        assert!((rts[0] - 1189.6 * 60.0).abs() < 1.0, "got {}", rts[0]);
-        let distinct: std::collections::HashSet<_> = rts.iter().map(|rt| rt.to_bits()).collect();
-        assert!(
-            distinct.len() > 1,
-            "the entries elute at different times and the arena says so"
-        );
+
+        // Read straight off the fixture, target and decoy of each pair sharing
+        // one value.
+        let declared = [
+            1189.6, 1189.6, 2622.1, 2622.1, 4164.1, 4164.1, 1566.4, 1566.4, 1175.3, 1175.3,
+        ];
+        assert_eq!(rts.len(), declared.len());
+        for (row, (got, want)) in rts.iter().zip(declared).enumerate() {
+            assert!(
+                (got - want).abs() < 0.1,
+                "row {row} declares {want} s, got {got}"
+            );
+        }
     }
 
     /// `binary_search` is only correct on a sorted slice, and the generator is

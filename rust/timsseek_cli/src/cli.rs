@@ -47,12 +47,14 @@ impl From<RescoreModel> for CliRescoreModel {
 /// flattened at the top level and the subcommand is optional. Every existing
 /// invocation keeps parsing to the same values.
 ///
-/// Nothing is swallowed: every argument is a flag, so no positional can absorb
-/// a stray token. An unknown flag is an error and so is an unrecognised first
-/// word. `nothing_is_swallowed` pins that, because it holds only while that
-/// stays true.
+/// `args_conflicts_with_subcommands` is what makes the flattened arguments safe
+/// to have alongside a subcommand. Without it, `timsseek --speclib-uri lib.txt
+/// search` parses: the flags bind to the flattened copy, the subcommand supplies
+/// an empty one, and whichever the program reads discards the other silently.
+/// With it, mixing the two is a parse error naming the conflict.
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
+#[command(args_conflicts_with_subcommands = true)]
 pub struct Cli {
     #[command(subcommand)]
     pub command: Option<Command>,
@@ -63,21 +65,71 @@ pub struct Cli {
 
 #[derive(clap::Subcommand, Debug)]
 pub enum Command {
-    /// Search raw files against a library. The same thing a bare invocation
-    /// does, named.
+    /// Deprecated spelling of a bare invocation; use `timsseek <SEARCH ARGS>`.
+    /// Removed after 2026-12-31.
     Search(Box<SearchArgs>),
     /// Predict a spectral library from a FASTA and write it.
     BuildLibrary(Box<BuildLibraryArgs>),
 }
 
+/// Subcommand spelling put on a clock, warned about by
+/// [`warn_deprecated_spellings`].
+pub const DEPRECATED_SUBCOMMANDS: &[(&str, &str)] =
+    &[("search", "run timsseek with no subcommand")];
+
+/// The date the deprecated spellings stop being accepted, in the first release
+/// after it. Filed as its own issue so the removal is scheduled work rather
+/// than a comment nobody reads.
+pub const DEPRECATION_REMOVAL_DATE: &str = "2026-12-31";
+
 impl Cli {
     /// The search arguments this invocation resolved to, whether they were
-    /// given bare or under `search`.
+    /// given bare or under the deprecated `search`.
+    ///
+    /// Reading one and discarding the other is only safe because
+    /// `args_conflicts_with_subcommands` makes both-populated unrepresentable.
     pub fn search_args(&self) -> &SearchArgs {
         match &self.command {
             Some(Command::Search(args)) => args,
             _ => &self.search,
         }
+    }
+}
+
+/// Warn once per deprecated spelling actually typed.
+///
+/// clap resolves an alias to its canonical name and does not report which
+/// spelling produced it, so the raw arguments are what has to be scanned. That
+/// covers `--flag value` and `--flag=value` alike, and a subcommand name, which
+/// clap likewise reports only as the variant it selected.
+///
+/// Called before the subscriber is installed, so this writes to stderr rather
+/// than going through `tracing`.
+pub fn warn_deprecated_spellings<I, S>(argv: I)
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
+    let mut seen: Vec<&str> = Vec::new();
+    for arg in argv {
+        // `--flag=value` and `--flag value` both have to match, so compare the
+        // part left of any `=`.
+        let arg = arg.as_ref();
+        let spelling = arg.split('=').next().unwrap_or(arg);
+        let Some((spelling, replacement)) = DEPRECATED_SUBCOMMANDS
+            .iter()
+            .find(|(deprecated, _)| *deprecated == spelling)
+        else {
+            continue;
+        };
+        if seen.contains(spelling) {
+            continue;
+        }
+        seen.push(spelling);
+        eprintln!(
+            "warning: `{spelling}` is deprecated and will be removed after \
+             {DEPRECATION_REMOVAL_DATE}; {replacement} instead"
+        );
     }
 }
 

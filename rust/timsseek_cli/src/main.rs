@@ -547,6 +547,34 @@ struct TracingHandle {
     _empty: (),
 }
 
+/// The filter both subscribers use. `EnvFilter` is not `Clone`, so callers
+/// needing one per layer call this repeatedly.
+fn env_filter(level: &str) -> EnvFilter {
+    EnvFilter::builder()
+        .with_default_directive(level.parse().unwrap_or_else(|_| "info".parse().unwrap()))
+        .from_env_lossy()
+        .add_directive("forust_ml=warn".parse().unwrap())
+        .add_directive("timscentroid::storage=warn".parse().unwrap())
+}
+
+/// A stderr-only subscriber, for subcommands with no output directory to put a
+/// log file in.
+///
+/// `build-library` predicts for minutes and has nothing else to say meanwhile,
+/// so its progress has to reach the terminal. Without a subscriber installed
+/// every `info!` on that path is discarded and the command looks hung; the
+/// binary this replaced installed one for the same reason.
+fn init_stderr_logging() {
+    tracing_subscriber::registry()
+        .with(
+            fmt::layer()
+                .without_time()
+                .with_writer(std::io::stderr)
+                .with_filter(env_filter("info")),
+        )
+        .init();
+}
+
 /// Install the tracing subscriber. Log file resolution order:
 ///   1. `--log-path -`            → stderr-only, no file
 ///   2. `--log-path <p>`          → that path verbatim
@@ -572,17 +600,7 @@ fn init_tracing(args: &SearchArgs, resolved: &ResolvedInputs) -> TracingHandle {
         }
     };
 
-    let build_env_filter = || {
-        EnvFilter::builder()
-            .with_default_directive(
-                args.log_level
-                    .parse()
-                    .unwrap_or_else(|_| "info".parse().unwrap()),
-            )
-            .from_env_lossy()
-            .add_directive("forust_ml=warn".parse().unwrap())
-            .add_directive("timscentroid::storage=warn".parse().unwrap())
-    };
+    let build_env_filter = || env_filter(&args.log_level);
 
     let (file_layer, stderr_warn_layer, stderr_all_layer) =
         if let Some(ref log_path) = log_file_path {
@@ -681,8 +699,16 @@ fn main() {
 }
 
 fn run() -> std::result::Result<(), errors::CliError> {
+    // Before parsing: clap resolves a deprecated spelling to its canonical name
+    // and does not report which one was typed.
+    cli::warn_deprecated_spellings(std::env::args().skip(1));
+
     let cli = Cli::parse();
     if let Some(Command::BuildLibrary(build)) = &cli.command {
+        // Ahead of any work, so prediction is not silent. Search installs its
+        // own richer subscriber, which needs the resolved output directory to
+        // place the log file and so cannot be hoisted here.
+        init_stderr_logging();
         let config = load_config(build.config.as_deref())?;
         return build_library::run(&build_library::resolve_build(build, &config));
     }

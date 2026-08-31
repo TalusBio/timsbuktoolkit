@@ -351,4 +351,45 @@ uri = "config_results"
         .unwrap();
         assert_eq!(bare, named);
     }
+
+    /// Flags belong on one side of the subcommand or the other, never both.
+    ///
+    /// Two copies of `SearchArgs` exist -- the flattened one and the
+    /// subcommand's -- and `search_args()` returns one of them. Flags given
+    /// before the subcommand land in the copy it does not return, so without
+    /// `args_conflicts_with_subcommands` they parse and are then discarded:
+    /// `timsseek --speclib-uri lib.txt --raw-inputs a.d search` used to resolve
+    /// to no library and no raw inputs at all.
+    #[test]
+    fn flags_cannot_be_split_across_a_subcommand() {
+        for argv in [
+            vec!["timsseek", "--speclib-uri", "lib.ndjson", "search"],
+            vec!["timsseek", "--raw-inputs", "a.d", "search"],
+            vec!["timsseek", "--overwrite", "build-library"],
+        ] {
+            let err = Cli::try_parse_from(&argv)
+                .expect_err("a flag before a subcommand must not be silently dropped");
+            assert_eq!(
+                err.kind(),
+                clap::error::ErrorKind::ArgumentConflict,
+                "{argv:?}"
+            );
+        }
+    }
+
+    /// The deprecation notice is driven by the raw arguments, because clap
+    /// reports only the variant it selected and not the word that chose it.
+    #[test]
+    fn the_deprecated_subcommand_is_still_accepted() {
+        assert!(
+            crate::cli::DEPRECATED_SUBCOMMANDS
+                .iter()
+                .any(|(spelling, _)| *spelling == "search"),
+            "`search` is what the warning is keyed on"
+        );
+        assert!(
+            Cli::try_parse_from(["timsseek", "search", "--speclib-uri", "lib.ndjson"]).is_ok(),
+            "deprecated, not removed"
+        );
+    }
 }
