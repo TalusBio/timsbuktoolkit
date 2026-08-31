@@ -63,6 +63,7 @@ pub struct ResolvedBuild {
     pub min_intensity: f64,
     pub max_fragments: Option<usize>,
     pub decoys: bool,
+    pub overwrite: bool,
 }
 
 /// Fold the command line over the configuration file's `[library]` section.
@@ -128,7 +129,49 @@ pub fn resolve_build(args: &BuildLibraryArgs, config: &BuildConfig) -> ResolvedB
         // A boolean flag cannot say "not given", so the configuration is what
         // turns decoys on when the flag is absent.
         decoys: args.decoys || decoys.unwrap_or(false),
+        // No configuration counterpart: replacing a file is a decision about
+        // this invocation, not about how to predict.
+        overwrite: args.overwrite,
     }
+}
+
+/// A build reads and writes the filesystem directly, so a remote URI is
+/// rejected by name rather than reaching `File::open` and surfacing as "No such
+/// file or directory".
+///
+/// The staging machinery a search uses is right here in this crate, so wiring it
+/// through is a small change rather than an impossible one; until then the
+/// limitation is stated instead of discovered.
+fn reject_remote_paths(resolved: &ResolvedBuild) -> Result<(), CliError> {
+    for (flag, path) in [("--fasta", &resolved.fasta), ("--out", &resolved.out)] {
+        let uri = path.to_string_lossy();
+        if tims_stage::is_remote_uri(&uri) {
+            return Err(CliError::Config {
+                source: format!(
+                    "{flag} {uri} is a remote URI, and build-library reads and writes local \
+                     paths only. Build locally and copy, or run a search with --speclib-uri, \
+                     which does stage remote inputs."
+                ),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Refuse to replace an existing library unless asked.
+///
+/// Checked before the model loads, so a mistyped `--out` costs a second rather
+/// than the minutes a proteome takes to predict and then discard.
+fn reject_existing_output(resolved: &ResolvedBuild) -> Result<(), CliError> {
+    if resolved.overwrite || !resolved.out.exists() {
+        return Ok(());
+    }
+    Err(CliError::Config {
+        source: format!(
+            "{} already exists; pass --overwrite/-O to replace it",
+            resolved.out.display()
+        ),
+    })
 }
 
 /// `--config-out <path>`, `<out>.config.json` by default, `None` when
@@ -147,6 +190,8 @@ fn sidecar_path(args: &BuildLibraryArgs) -> Option<PathBuf> {
 
 /// Predict a library and write it, with no network and no server.
 pub fn run(resolved: &ResolvedBuild) -> Result<(), CliError> {
+    reject_remote_paths(resolved)?;
+    reject_existing_output(resolved)?;
     let model = parse_model_source(&resolved.model)?;
     let ms_context = resolved
         .ms_context
@@ -399,6 +444,54 @@ model = "builtin:from-config"
     fn no_config_out_skips_the_sidecar() {
         let resolved = resolve_build(&args(&["--no-config-out"]), &BuildConfig::default());
         assert_eq!(resolved.config_out, None);
+    }
+
+    /// `ResolvedBuild` for the guards, which read only the two paths.
+    fn paths(fasta: &str, out: &str) -> ResolvedBuild {
+        ResolvedBuild {
+            fasta: PathBuf::from(fasta),
+            out: PathBuf::from(out),
+            ..resolve_build(&args(&[]), &BuildConfig::default())
+        }
+    }
+
+    /// A remote URI is named, not left to surface as a missing file. A search
+    /// stages these; a build does not.
+    #[test]
+    fn a_remote_path_is_rejected_by_name() {
+        for (flag, resolved) in [
+            ("--fasta", paths("s3://bkt/p.fasta", "lib.mzspeclib.txt")),
+            ("--out", paths("p.fasta", "s3://bkt/lib.mzspeclib.txt")),
+        ] {
+            let err = reject_remote_paths(&resolved).expect_err("a remote URI must be rejected");
+            let msg = err.to_string();
+            assert!(msg.contains("remote URI"), "{flag}: {msg}");
+            assert!(msg.contains(flag), "names the flag: {msg}");
+        }
+    }
+
+    /// Predicting a proteome takes minutes, so replacing one by accident costs
+    /// the old library and the wait to rebuild it.
+    #[test]
+    fn an_existing_library_is_not_replaced_without_asking() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let out = dir.path().join("lib.mzspeclib.txt.gz");
+        std::fs::write(&out, b"existing").expect("write fixture");
+
+        let mut resolved = paths("p.fasta", &out.to_string_lossy());
+        let err = reject_existing_output(&resolved)
+            .expect_err("an existing library must not be clobbered");
+        assert!(err.to_string().contains("--overwrite"), "{err}");
+
+        resolved.overwrite = true;
+        assert!(reject_existing_output(&resolved).is_ok());
+
+        // A path that does not exist needs no flag.
+        let fresh = paths(
+            "p.fasta",
+            &dir.path().join("new.mzspeclib.txt.gz").to_string_lossy(),
+        );
+        assert!(reject_existing_output(&fresh).is_ok());
     }
 
     /// A search flag under `build-library` is an error, not an argument that is

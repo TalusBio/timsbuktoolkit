@@ -278,6 +278,14 @@ pub struct BuildLibraryArgs {
     #[arg(long)]
     pub decoys: bool,
 
+    /// Replace the library if it already exists.
+    ///
+    /// Predicting a proteome takes minutes, so overwriting one by accident is
+    /// expensive in both directions: the old library is gone and the new one
+    /// costs the same wait again.
+    #[arg(short = 'O', long)]
+    pub overwrite: bool,
+
     /// Where to write the resolved-configuration sidecar. Defaults to
     /// `<out>.config.json`.
     #[arg(long, value_name = "PATH", conflicts_with = "no_config_out")]

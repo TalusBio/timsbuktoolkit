@@ -81,13 +81,15 @@ cargo run --release --bin timsseek -- \
 
 ## S3 inputs
 
-Both CLIs accept `s3://` URIs anywhere a path is accepted (AWS / MinIO / R2). `.d` can be a directory, `.tar`, or S3 prefix; `.idx` sidecars short-circuit staging.
+A search accepts `s3://` URIs anywhere a path is accepted (AWS / MinIO / R2). `.d` can be a directory, `.tar`, or S3 prefix; `.idx` sidecars short-circuit staging.
 
 ```bash
 timsseek --raw-inputs s3://bkt/sample.d.tar \
          --speclib-uri s3://bkt/lib.mzspeclib.txt.gz \
          --output-uri s3://bkt/runs/out
 ```
+
+`timsseek build-library` is local-only: `--fasta` and `--out` are filesystem paths and a remote URI is rejected rather than staged.
 
 Auth via AWS default chain. MinIO/R2: set `AWS_ENDPOINT_URL`. See `docs/development.md` for `[staging]` config + env var list.
 
