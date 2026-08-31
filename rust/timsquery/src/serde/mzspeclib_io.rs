@@ -190,10 +190,6 @@ pub fn read_mzspeclib_library_file(
     let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
     let mut frag_intens: Vec<f32> = Vec::new();
     let mut degradation = Degradation::default();
-    // `None` until a row declares a pair, so a library that declares none never
-    // allocates a group per row. Filled retroactively when the first one shows
-    // up, since the rows before it are their own groups.
-    let mut groups: Option<Vec<String>> = None;
 
     for (index, spectrum) in parser.enumerate() {
         let spectrum = spectrum.map_err(|e| {
@@ -206,16 +202,16 @@ pub fn read_mzspeclib_library_file(
             continue;
         }
 
-        // Both halves of a pair have to land in one namespace. A decoy names
-        // its target by `<Spectrum=N>` key, so an unpaired row is its own key
-        // rather than its source id, which is a different string entirely.
-        if let Some(group) = row.declared_group {
-            groups
-                .get_or_insert_with(|| (1..=index as u32).map(|key| key.to_string()).collect())
-                .push(group);
-        } else if let Some(groups) = groups.as_mut() {
-            groups.push(row.key.to_string());
-        }
+        // Both halves of a pair have to land in one namespace. A decoy names its
+        // target by `<Spectrum=N>` key, so every row names its own key and a
+        // decoy overrides that with its target's -- not its source id, which is
+        // a different string entirely. A library that declares no pair therefore
+        // ends up with one key per row, all singletons, and `seal` drops the
+        // column rather than storing a group per row.
+        let group = row
+            .declared_group
+            .unwrap_or_else(|| row.key.to_string())
+            .into();
 
         frag_intens.extend_from_slice(&row.intensities);
         geom.push_row(Row {
@@ -228,14 +224,11 @@ pub fn read_mzspeclib_library_file(
             seq_mod: &row.seq_mod,
             is_decoy: row.is_decoy,
             id: Some(row.id.into()),
+            decoy_group: Some(group),
             ..Default::default()
         });
     }
 
-    // Without a group column a row is its own group, derived rather than stored.
-    if let Some(groups) = groups {
-        geom.set_decoy_groups(groups)?;
-    }
     let geom = geom.seal(decoys)?;
     degradation.report(geom.n_rows());
 

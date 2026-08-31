@@ -146,10 +146,6 @@ pub enum SourceIds {
 pub enum SourceIdError {
     #[error("{ids} source ids for {rows} rows")]
     LengthMismatch { ids: usize, rows: usize },
-    /// Its own variant so the message says "groups" when the caller supplied
-    /// groups; `LengthMismatch` rendered them as "source ids".
-    #[error("{groups} decoy groups for {rows} rows")]
-    GroupLengthMismatch { groups: usize, rows: usize },
     /// Callers key results by this id, so a repeat makes one row unreachable.
     #[error("duplicate source id {id}; ids must be unique per row")]
     Duplicate { id: String },

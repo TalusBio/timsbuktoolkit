@@ -276,9 +276,15 @@ fn read_entry<'a>(
     let had_file_decoy = dc != 0;
     if had_file_decoy {
         // A whole second Peptide is embedded between `dc` and `entry_flags`.
-        // Read it (mandatory to stay byte-synced) then discard: a lone file
-        // decoy would land in its own singleton FDR group and always "win",
-        // silently breaking FDR. Mass-shift decoys are generated downstream.
+        // Read it (mandatory to stay byte-synced) then discard.
+        //
+        // `Row::decoy_group` would now let it compete against its target rather
+        // than winning a singleton group, but the format gives it nothing else
+        // it needs: an `Entry` carries exactly one `name`, and the name is where
+        // the sequence and the row id both come from (see `map_entry`). A kept
+        // decoy row would have no sequence for the parse gate or the
+        // composition-isotope path, and no id distinct from its target's.
+        // Mass-shift decoys are derived downstream instead.
         let _decoy = read_peptide(c, version)?;
     }
 
@@ -648,6 +654,7 @@ fn append_arena(dst: &mut TargetColumns<IonAnnot>, mut src: TargetColumns<IonAnn
     dst.mobility.append(&mut src.mobility);
     dst.is_decoy.append(&mut src.is_decoy);
     dst.pending_ids.append(&mut src.pending_ids);
+    dst.pending_groups.append(&mut src.pending_groups);
     dst.frag_labels.append(&mut src.frag_labels);
     dst.frag_mzs.append(&mut src.frag_mzs);
     dst.seq_strip_blob.push_str(&src.seq_strip_blob);
@@ -682,8 +689,8 @@ fn append_arena(dst: &mut TargetColumns<IonAnnot>, mut src: TargetColumns<IonAnn
 
     // Exhaustive on purpose: a column added to `TargetColumns` fails to compile
     // here instead of being silently dropped on every merge. `source_ids` and
-    // `decoy_groups` are built by `seal`, which runs on the merged arena, so a
-    // shard never holds either.
+    // `decoy_groups` are built by `seal` from the pending columns, which runs on
+    // the merged arena, so a shard never holds either.
     let TargetColumns {
         caps: _,
         precursor_mz: _,
@@ -692,6 +699,7 @@ fn append_arena(dst: &mut TargetColumns<IonAnnot>, mut src: TargetColumns<IonAnn
         mobility: _,
         is_decoy: _,
         pending_ids: _,
+        pending_groups: _,
         source_ids: _,
         decoy_groups: _,
         frag_off: _,

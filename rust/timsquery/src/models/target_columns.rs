@@ -170,6 +170,17 @@ pub struct Row<'a, L: KeyLike> {
     /// format that names nothing; [`TargetColumns::seal`] mints ids only when
     /// *every* row arrived `None`.
     pub id: Option<OwnedSourceId>,
+    /// Which competition group the file put this row in. Rows sharing one
+    /// compete, so a shipped decoy has to name the same group as its target --
+    /// which means both halves have to be named in one namespace, and a reader
+    /// that has only the decoy's side of the pair has to name the target's group
+    /// on the target's row too.
+    ///
+    /// `None` means "the file did not say", and a row the file did not place
+    /// competes alone. [`TargetColumns::seal`] stores nothing at all when that
+    /// is true of every row, and when the groups it did get are all singletons
+    /// -- both cases are what deriving the group from the row already does.
+    pub decoy_group: Option<OwnedSourceId>,
 }
 
 impl<L: KeyLike> Default for Row<'_, L> {
@@ -185,6 +196,7 @@ impl<L: KeyLike> Default for Row<'_, L> {
             mods: &[],
             is_decoy: false,
             id: None,
+            decoy_group: None,
         }
     }
 }
@@ -210,6 +222,10 @@ pub struct TargetColumns<L: KeyLike> {
     /// Each row's id as pushed. Parallel to the row columns, so a shard merge
     /// cannot separate a row from its name. Drained by [`Self::seal`].
     pub(crate) pending_ids: Vec<Option<OwnedSourceId>>,
+    /// Each row's declared competition group as pushed, `None` where the file
+    /// declared none. Drained by [`Self::seal`], which is where the interned
+    /// [`DecoyGroups`] is built or dropped.
+    pub(crate) pending_groups: Vec<Option<OwnedSourceId>>,
     /// Built at [`Self::seal`], minted there for formats that carry no ids, so
     /// a sealed arena always has one per row.
     pub(crate) source_ids: SourceIds,
@@ -248,6 +264,7 @@ impl<L: KeyLike> TargetColumns<L> {
             mobility: Vec::new(),
             is_decoy: Vec::new(),
             pending_ids: Vec::new(),
+            pending_groups: Vec::new(),
             source_ids: SourceIds::default(),
             decoy_groups: None,
             frag_off: vec![0],
@@ -278,12 +295,14 @@ impl<L: KeyLike> TargetColumns<L> {
             mods,
             is_decoy,
             id,
+            decoy_group,
         } = row;
         self.precursor_mz.push(precursor_mz);
         self.charge.push(charge);
         self.rt_seconds.push(rt_seconds);
         self.mobility.push(mobility);
         self.pending_ids.push(id);
+        self.pending_groups.push(decoy_group);
         for (lab, mz) in frags {
             self.frag_labels.push(lab.clone());
             self.frag_mzs.push(*mz);
@@ -324,35 +343,56 @@ impl<L: KeyLike> TargetColumns<L> {
         (0..self.n_rows() as u32).map(RowIdx::new)
     }
 
-    /// Attach the competition groups a file declared, interning them. Rows
-    /// sharing a value compete, so unlike source ids these are expected to
-    /// repeat -- which is why they are stored as a code per row against a
-    /// deduplicated label set rather than a label per row.
+    /// Intern the competition groups the rows declared, or store nothing.
     ///
-    /// Without this, a group is a singleton and is derived from the row.
-    pub fn set_decoy_groups<I, S>(&mut self, groups: I) -> Result<(), SourceIdError>
-    where
-        I: IntoIterator<Item = S>,
-        S: Into<OwnedSourceId>,
-    {
-        let groups: Vec<OwnedSourceId> = groups.into_iter().map(Into::into).collect();
-        if groups.len() != self.n_rows() {
-            return Err(SourceIdError::GroupLengthMismatch {
-                groups: groups.len(),
-                rows: self.n_rows(),
-            });
+    /// Rows sharing a group compete, so unlike source ids these are expected to
+    /// repeat -- hence a code per row against a deduplicated label set rather
+    /// than a label per row.
+    ///
+    /// Nothing is stored in the two cases where the stored column would say no
+    /// more than deriving the group from the row already does: no row declared
+    /// one, or every group turned out to be a singleton. A reader can therefore
+    /// name a group on every row it pushes without making a library that
+    /// contains no pairs pay for a label column.
+    ///
+    /// A row that declared nothing while others did keeps its own id as its
+    /// group, so it competes alone -- the group column has to cover every row
+    /// once it exists, since a code indexes it directly.
+    fn build_decoy_groups(&mut self) -> Result<(), SourceIdError> {
+        let n = self.n_rows();
+        debug_assert_eq!(self.pending_groups.len(), n, "a group slot per row");
+        if self.pending_groups.iter().all(Option::is_none) {
+            self.pending_groups.clear();
+            self.pending_groups.shrink_to_fit();
+            return Ok(());
         }
 
         let mut seen: std::collections::HashMap<OwnedSourceId, GroupCode> =
             std::collections::HashMap::new();
         let mut labels: Vec<OwnedSourceId> = Vec::new();
-        let mut codes = Vec::with_capacity(groups.len());
-        for group in groups {
+        let mut codes = Vec::with_capacity(n);
+        for (row, group) in self.pending_groups.drain(..).enumerate() {
+            let group = match group {
+                Some(g) => g,
+                // No id column yet -- `seal` builds it after this -- so mirror
+                // what `output_id` will report for an unnamed row.
+                None => match self.pending_ids.get(row) {
+                    Some(Some(id)) => id.clone(),
+                    _ => OwnedSourceId::Numeric(row as u64),
+                },
+            };
             let code = *seen.entry(group.clone()).or_insert_with(|| {
                 labels.push(group);
                 GroupCode::new((labels.len() - 1) as u32)
             });
             codes.push(code);
+        }
+        self.pending_groups.shrink_to_fit();
+
+        if labels.len() == n {
+            // Every row alone in its own group, which is what `decoy_group_code`
+            // derives for a groupless arena.
+            return Ok(());
         }
 
         let n_labels = labels.len();
@@ -495,6 +535,9 @@ impl<L: KeyLike> TargetColumns<L> {
             "arena is already sealed; seal resolves the decoy policy, so a second call would \
              revise a decision downstream code has already read"
         );
+        // Groups first: an undeclared row falls back to its own id, which is
+        // still in `pending_ids` at this point.
+        self.build_decoy_groups()?;
         self.build_source_ids()?;
         let ships_decoys = self.is_decoy.iter().any(|&d| d);
         self.caps.decoys = decoys.strategy(ships_decoys);
@@ -659,9 +702,9 @@ mod tests {
     use super::*;
     use crate::IonAnnot;
 
-    fn two_rows() -> TargetColumns<IonAnnot> {
+    fn two_rows_in_groups(groups: [Option<&str>; 2]) -> TargetColumns<IonAnnot> {
         let mut c = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
-        for _ in 0..2 {
+        for group in groups {
             c.push_row(Row {
                 precursor_mz: 500.0,
                 charge: 2,
@@ -670,23 +713,71 @@ mod tests {
                 frags: &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
                 seq_strip: "PEP",
                 seq_mod: "PEP",
+                decoy_group: group.map(Into::into),
                 ..Default::default()
             });
         }
         c
     }
 
+    fn two_rows() -> TargetColumns<IonAnnot> {
+        two_rows_in_groups([None, None])
+    }
+
     /// Declared groups are interned, so two rows in one group share a code and
     /// the label is stored once rather than per row.
     #[test]
     fn rows_in_one_declared_group_share_a_code() {
-        let mut c = two_rows();
-        c.set_decoy_groups(["g1", "g1"]).unwrap();
-        let c = c.seal(DecoyPolicy::Never).expect("fixture ids are usable");
+        let c = two_rows_in_groups([Some("g1"), Some("g1")])
+            .seal(DecoyPolicy::Never)
+            .expect("fixture ids are usable");
 
         let (a, b) = (c.rows().next().unwrap(), c.rows().nth(1).unwrap());
         assert_eq!(c.decoy_group_code(a), c.decoy_group_code(b));
         assert_eq!(c.decoy_group(a), SourceId::Text("g1"));
+    }
+
+    /// Declared groups that are all singletons say no more than deriving from
+    /// the row does, so the column is dropped rather than stored. This is what
+    /// lets a reader name a group on every row without charging a library that
+    /// contains no pairs for a label per row.
+    #[test]
+    fn all_singleton_groups_are_not_stored() {
+        let c = two_rows_in_groups([Some("g1"), Some("g2")])
+            .seal(DecoyPolicy::Never)
+            .expect("fixture ids are usable");
+
+        assert!(c.decoy_groups.is_none());
+        let (a, b) = (c.rows().next().unwrap(), c.rows().nth(1).unwrap());
+        assert_ne!(c.decoy_group_code(a), c.decoy_group_code(b));
+    }
+
+    /// A row the file left out of a group has to get a code anyway once any row
+    /// declared one, since a code indexes the label column directly. It competes
+    /// alone, under its own id.
+    #[test]
+    fn a_row_outside_every_declared_group_competes_alone() {
+        let mut c = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
+        for (id, group) in [("a", Some("pair")), ("b", Some("pair")), ("c", None)] {
+            c.push_row(Row {
+                precursor_mz: 500.0,
+                charge: 2,
+                rt_seconds: 1.0,
+                mobility: 0.8,
+                frags: &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
+                seq_strip: "PEP",
+                seq_mod: "PEP",
+                id: Some(id.into()),
+                decoy_group: group.map(Into::into),
+                ..Default::default()
+            });
+        }
+        let c = c.seal(DecoyPolicy::Never).expect("fixture ids are usable");
+
+        let rows: Vec<_> = c.rows().collect();
+        assert_eq!(c.decoy_group_code(rows[0]), c.decoy_group_code(rows[1]));
+        assert_ne!(c.decoy_group_code(rows[0]), c.decoy_group_code(rows[2]));
+        assert_eq!(c.decoy_group(rows[2]), SourceId::Text("c"));
     }
 
     /// Without declared groups a row is its own group, derived rather than
