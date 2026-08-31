@@ -1,3 +1,4 @@
+use crate::config::Acquisition;
 use clap::{
     Parser,
     ValueEnum,
@@ -247,7 +248,14 @@ pub struct BuildLibraryArgs {
 
     /// Fixed modification rule, repeatable.
     #[arg(long = "fixed-mod", value_name = "TARGETS[MOD]")]
-    pub fixed_mods: Option<Vec<String>>,
+    fixed_mods: Option<Vec<String>>,
+    /// Predict with no fixed modifications at all.
+    ///
+    /// Needed because the default is carbamidomethyl and an empty
+    /// `--fixed-mod` list cannot be spelled: repeating a flag zero times is
+    /// indistinguishable from not passing it.
+    #[arg(long, conflicts_with = "fixed_mods")]
+    pub no_fixed_mods: bool,
     /// Variable modification rule, repeatable.
     #[arg(long = "variable-mod", value_name = "TARGETS[MOD]")]
     pub variable_mods: Option<Vec<String>>,
@@ -256,8 +264,11 @@ pub struct BuildLibraryArgs {
 
     /// Acquisition context: a named setup, or the factors spelled out as
     /// "INSTRUMENT::DETECTOR::FRAGMENTATION::ENERGY".
+    ///
+    /// Parsed here, so a malformed spelling is a usage error rather than a
+    /// failure minutes into a build.
     #[arg(long, value_name = "CONTEXT", conflicts_with = "nce")]
-    pub ms_context: Option<String>,
+    pub ms_context: Option<Acquisition>,
     /// Collision energy only, for an otherwise unknown setup.
     #[arg(long, value_name = "NCE", conflicts_with = "ms_context")]
     pub nce: Option<f32>,
@@ -274,9 +285,15 @@ pub struct BuildLibraryArgs {
     #[arg(long, value_name = "N")]
     pub max_fragments: Option<usize>,
 
-    /// Add pseudo-reversed decoy precursors.
-    #[arg(long)]
-    pub decoys: bool,
+    /// Add pseudo-reversed decoy precursors. `--no-decoys` turns them off.
+    ///
+    /// Two flags on one field, so "not given" stays distinct from "off": a bare
+    /// `bool` could not disable a configured `decoys = true`, which left the
+    /// configuration file with the last word on a flag.
+    #[arg(long, overrides_with = "no_decoys")]
+    decoys: bool,
+    #[arg(long, overrides_with = "decoys")]
+    no_decoys: bool,
 
     /// Replace the library if it already exists.
     ///
@@ -293,4 +310,29 @@ pub struct BuildLibraryArgs {
     /// Skip the resolved-configuration sidecar.
     #[arg(long)]
     pub no_config_out: bool,
+}
+
+impl BuildLibraryArgs {
+    /// `Some(true)`/`Some(false)` when either decoy flag was given, `None` when
+    /// neither was -- which is what lets the configuration file supply the value
+    /// only in the absence of a flag.
+    ///
+    /// `overrides_with` makes the later flag win rather than erroring, so
+    /// `--decoys --no-decoys` is `Some(false)` and both being set at once is
+    /// unreachable.
+    pub fn decoys(&self) -> Option<bool> {
+        match (self.decoys, self.no_decoys) {
+            (false, false) => None,
+            (decoys, _) => Some(decoys),
+        }
+    }
+
+    /// The fixed-modification rules asked for, where an empty list is a real
+    /// answer and `None` means "not given".
+    pub fn fixed_mods(&self) -> Option<Vec<String>> {
+        if self.no_fixed_mods {
+            return Some(Vec::new());
+        }
+        self.fixed_mods.clone()
+    }
 }

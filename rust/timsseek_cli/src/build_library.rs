@@ -14,7 +14,6 @@ use msspeculator_inference::{
     BuiltinModel,
     LibraryOptions,
     ModelSource,
-    MsContext,
     StreamOptions,
     write_library,
 };
@@ -23,6 +22,7 @@ use tracing::info;
 use crate::build_progress::BuildProgress;
 use crate::cli::BuildLibraryArgs;
 use crate::config::{
+    Acquisition,
     BuildConfig,
     LibraryConfig,
 };
@@ -58,8 +58,7 @@ pub struct ResolvedBuild {
     pub fixed_mods: Vec<String>,
     pub variable_mods: Vec<String>,
     pub max_variable_mods: usize,
-    pub ms_context: Option<String>,
-    pub nce: Option<f32>,
+    pub acquisition: Option<Acquisition>,
     pub chrom_context: Option<String>,
     pub min_intensity: f64,
     pub max_fragments: Option<usize>,
@@ -80,8 +79,7 @@ pub fn resolve_build(args: &BuildLibraryArgs, config: &BuildConfig) -> ResolvedB
         fixed_mods,
         variable_mods,
         max_variable_mods,
-        ms_context,
-        nce,
+        acquisition,
         chrom_context,
         min_intensity,
         max_fragments,
@@ -106,8 +104,7 @@ pub fn resolve_build(args: &BuildLibraryArgs, config: &BuildConfig) -> ResolvedB
         min_charge: args.min_charge.or(min_charge).unwrap_or(DEFAULT_MIN_CHARGE),
         max_charge: args.max_charge.or(max_charge).unwrap_or(DEFAULT_MAX_CHARGE),
         fixed_mods: args
-            .fixed_mods
-            .clone()
+            .fixed_mods()
             .or(fixed_mods)
             .unwrap_or_else(|| vec![DEFAULT_FIXED_MOD.to_string()]),
         variable_mods: args
@@ -119,17 +116,20 @@ pub fn resolve_build(args: &BuildLibraryArgs, config: &BuildConfig) -> ResolvedB
             .max_variable_mods
             .or(max_variable_mods)
             .unwrap_or(DEFAULT_MAX_VARIABLE_MODS),
-        ms_context: args.ms_context.clone().or(ms_context),
-        nce: args.nce.or(nce),
+        // One chain for one setting, so a `--nce` given against a configured
+        // setup replaces it instead of resolving separately and losing.
+        acquisition: args
+            .ms_context
+            .clone()
+            .or_else(|| args.nce.map(Acquisition::Nce))
+            .or(acquisition),
         chrom_context: args.chrom_context.clone().or(chrom_context),
         min_intensity: args
             .min_intensity
             .or(min_intensity)
             .unwrap_or(DEFAULT_MIN_INTENSITY),
         max_fragments: args.max_fragments.or(max_fragments),
-        // A boolean flag cannot say "not given", so the configuration is what
-        // turns decoys on when the flag is absent.
-        decoys: args.decoys || decoys.unwrap_or(false),
+        decoys: args.decoys().or(decoys).unwrap_or(false),
         // No configuration counterpart: replacing a file is a decision about
         // this invocation, not about how to predict.
         overwrite: args.overwrite,
@@ -195,18 +195,9 @@ pub fn run(resolved: &ResolvedBuild) -> Result<(), CliError> {
     reject_existing_output(resolved)?;
     let model = parse_model_source(&resolved.model)?;
     let ms_context = resolved
-        .ms_context
-        .as_deref()
-        .map(parse_ms_context)
-        .transpose()?
-        .or_else(|| {
-            resolved.nce.map(|energy| MsContext::Factors {
-                instrument: String::new(),
-                detector: String::new(),
-                fragmentation: String::new(),
-                energy: Some(energy),
-            })
-        });
+        .acquisition
+        .as_ref()
+        .map(Acquisition::to_ms_context);
 
     info!(
         "Predicting a library from {} with {}",
@@ -280,39 +271,6 @@ fn parse_model_source(spec: &str) -> Result<ModelSource, CliError> {
         })
 }
 
-/// A named setup fitted into the artifact, or the four acquisition factors
-/// spelled out. The `::` separator is what tells them apart: a setup name is a
-/// label and nothing about it parses as a factor list.
-fn parse_ms_context(spec: &str) -> Result<MsContext, CliError> {
-    let invalid = |detail: &str| CliError::Config {
-        source: format!("--ms-context {spec:?}: {detail}"),
-    };
-    if !spec.contains("::") {
-        if spec.trim().is_empty() {
-            return Err(invalid(
-                "expected a setup name or INSTRUMENT::DETECTOR::FRAGMENTATION::ENERGY",
-            ));
-        }
-        return Ok(MsContext::Named(spec.to_string()));
-    }
-    let parts: Vec<&str> = spec.split("::").collect();
-    let [instrument, detector, fragmentation, energy] = parts.as_slice() else {
-        return Err(invalid(
-            "expected INSTRUMENT::DETECTOR::FRAGMENTATION::ENERGY",
-        ));
-    };
-    Ok(MsContext::Factors {
-        instrument: (*instrument).to_string(),
-        detector: (*detector).to_string(),
-        fragmentation: (*fragmentation).to_string(),
-        energy: Some(
-            energy
-                .parse()
-                .map_err(|_| invalid(&format!("energy {energy:?} is not a number")))?,
-        ),
-    })
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,6 +320,75 @@ mod tests {
         assert_eq!(resolved.variable_mods, ["M[UNIMOD:35]"]);
         assert_eq!(resolved.max_fragments, None);
         assert!(!resolved.decoys);
+    }
+
+    /// A flag has to be able to turn a configured setting *off*, which a bare
+    /// `bool` and a defaulted list could not express: `--decoys` could only ever
+    /// add decoys, and an empty `--fixed-mod` list cannot be spelled by
+    /// repeating a flag zero times.
+    #[test]
+    fn a_flag_can_turn_a_configured_setting_off() {
+        let config = build_config("[library]\ndecoys = true\nfixed_mods = [\"C[UNIMOD:4]\"]\n");
+
+        let on = resolve_build(&args(&[]), &config);
+        assert!(on.decoys, "the configuration is in force with no flag");
+        assert_eq!(on.fixed_mods, ["C[UNIMOD:4]"]);
+
+        let off = resolve_build(&args(&["--no-decoys", "--no-fixed-mods"]), &config);
+        assert!(!off.decoys);
+        assert!(
+            off.fixed_mods.is_empty(),
+            "--no-fixed-mods means none, not the default"
+        );
+    }
+
+    /// The two acquisition spellings reach one field, so a flag replaces a
+    /// configured setup instead of resolving beside it and losing. With two
+    /// independent fields, `--nce` against a configured `ms_context` was
+    /// discarded and the build failed reporting no acquisition setups.
+    #[test]
+    fn a_flagged_acquisition_replaces_a_configured_one() {
+        let config = build_config("[library]\nacquisition = { named = \"astral_hcd\" }\n");
+        assert_eq!(
+            resolve_build(&args(&[]), &config).acquisition,
+            Some(Acquisition::Named("astral_hcd".to_string()))
+        );
+        assert_eq!(
+            resolve_build(&args(&["--nce", "27"]), &config).acquisition,
+            Some(Acquisition::Nce(27.0)),
+            "the flag lost to the configuration file"
+        );
+        assert_eq!(
+            resolve_build(&args(&["--ms-context", "orbitrap::ft::hcd::30"]), &config).acquisition,
+            Some(Acquisition::Factors {
+                instrument: "orbitrap".to_string(),
+                detector: "ft".to_string(),
+                fragmentation: "hcd".to_string(),
+                energy: Some(30.0),
+            })
+        );
+    }
+
+    /// A malformed acquisition is a usage error, not a failure minutes into a
+    /// build, which is what moving the parse into `FromStr` buys.
+    #[test]
+    fn a_malformed_acquisition_fails_at_parse_time() {
+        #[derive(Parser, Debug)]
+        struct Wrapper {
+            #[command(flatten)]
+            args: BuildLibraryArgs,
+        }
+        let err = Wrapper::try_parse_from([
+            "build-library",
+            "--fasta",
+            "p.fasta",
+            "--out",
+            "lib.mzspeclib.txt.gz",
+            "--ms-context",
+            "orbitrap::ft::hcd",
+        ])
+        .expect_err("three factors is not four");
+        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
     }
 
     #[test]

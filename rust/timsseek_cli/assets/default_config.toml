@@ -102,8 +102,11 @@ calibration_query_rt_window_minutes = 0.083333336   # 5 seconds (5 / 60)
 # min_intensity = 0.01
 # max_fragments = 20
 # decoys = true
-# ms_context = "INSTRUMENT::DETECTOR::FRAGMENTATION::ENERGY"
-# nce = 27.0
+## What acquisition to predict for. One key, one of three shapes, because a
+## named setup and a bare collision energy cannot both be in force:
+# acquisition = { named = "setup-name" }
+# acquisition = { factors = { instrument = "orbitrap", detector = "ft", fragmentation = "hcd", energy = 30.0 } }
+# acquisition = { nce = 27.0 }
 # chrom_context = "dataset-name"
 
 
