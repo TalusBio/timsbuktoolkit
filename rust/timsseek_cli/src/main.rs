@@ -271,8 +271,8 @@ fn process_single_file(
     raw_uri: &str,
     backend: &tims_stage::PerRunTempdir,
     save_sidecar: bool,
-    speclib: &timsseek::data_sources::speclib::Speclib,
-    calib_lib: Option<&timsseek::data_sources::speclib::Speclib>,
+    speclib: &timsseek::data_sources::reference_library::ReferenceLibrary,
+    calib_lib: Option<&timsseek::data_sources::reference_library::ReferenceLibrary>,
     config: &Config,
     base_output_dir: &std::path::Path,
     overwrite: bool,
@@ -488,27 +488,30 @@ impl OutputSink {
     }
 }
 
-/// Load a Speclib from a local path or remote URI.
+/// Load a library from a local path or remote URI.
 ///
 /// Remote URIs are streamed (not buffered -- speclibs can be multi-GB) to a
-/// tempfile keeping the original basename, because `Speclib::from_file`
+/// tempfile keeping the original basename, because `ReferenceLibrary::from_file`
 /// sniffs the format by extension.
 fn speclib_from_uri(
     uri: &str,
     decoy_strategy: timsseek::DecoyPolicy,
 ) -> Result<
     (
-        timsseek::data_sources::speclib::Speclib,
+        timsseek::data_sources::reference_library::ReferenceLibrary,
         Option<tempfile::TempDir>,
     ),
     errors::CliError,
 > {
     if !is_remote_uri(uri) {
         let path = std::path::Path::new(uri);
-        let lib = timsseek::data_sources::speclib::Speclib::from_file(path, decoy_strategy)
-            .map_err(|e| errors::CliError::Config {
-                source: format!("Failed to load speclib {uri}: {:?}", e),
-            })?;
+        let lib = timsseek::data_sources::reference_library::ReferenceLibrary::from_file(
+            path,
+            decoy_strategy,
+        )
+        .map_err(|e| errors::CliError::Config {
+            source: format!("Failed to load speclib {uri}: {:?}", e),
+        })?;
         return Ok((lib, None));
     }
 
@@ -530,11 +533,13 @@ fn speclib_from_uri(
         source: format!("download speclib {uri}: {e}"),
         path: Some(uri.to_string()),
     })?;
-    let lib = timsseek::data_sources::speclib::Speclib::from_file(&local, decoy_strategy).map_err(
-        |e| errors::CliError::Config {
-            source: format!("Failed to load speclib {uri}: {:?}", e),
-        },
-    )?;
+    let lib = timsseek::data_sources::reference_library::ReferenceLibrary::from_file(
+        &local,
+        decoy_strategy,
+    )
+    .map_err(|e| errors::CliError::Config {
+        source: format!("Failed to load speclib {uri}: {:?}", e),
+    })?;
     Ok((lib, Some(td)))
 }
 

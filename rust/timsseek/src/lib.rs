@@ -16,7 +16,6 @@ pub use data_sources::{
     ExpectedIntensity,
     RefQuery,
     ReferenceLibrary,
-    Speclib,
 };
 pub use models::{
     DecoyPolicy,

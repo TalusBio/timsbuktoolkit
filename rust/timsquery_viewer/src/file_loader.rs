@@ -155,7 +155,7 @@ impl FileLoader {
 /// The library the viewer displays and scores against.
 ///
 /// This is the SAME columnar `ReferenceLibrary` arena the timsseek CLI scores
-/// (loaded via `Speclib::from_file`). Iteration is via `item_at(flat)`
+/// (loaded via `ReferenceLibrary::from_file`). Iteration is via `item_at(flat)`
 /// `RefQuery` flyweights: the geometry feeds `build_extraction` + `TraceScorer`
 /// and the reference intensities + isotope envelope come from the flyweight's
 /// `ExpectedIntensity` impl, which routes the envelope through

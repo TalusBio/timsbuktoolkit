@@ -25,10 +25,10 @@
 
 use crate::data_sources::reference_library::{
     ExpectedIntensity,
+    ReferenceLibrary,
     RowHandles,
     ScoredIdentity,
 };
-use crate::data_sources::speclib::Speclib;
 use crate::errors::DataProcessingError;
 use crate::models::sequence::Peptide;
 use crate::{
@@ -245,7 +245,7 @@ impl Default for CalibrationConfig {
 /// Number of top fragments to retain for scoring (by predicted intensity).
 pub const TOP_N_FRAGMENTS: usize = 8;
 
-/// Speclib-only pre-gate: reject peptides whose library entry carries no
+/// Library-only pre-gate: reject peptides whose library entry carries no
 /// predicted fragments before doing any extraction work. Shared by the
 /// broad (prescore) and calibrated (score_calibrated) paths so the two
 /// don't drift.
@@ -695,7 +695,7 @@ impl<I: ScorerQueriable> Scorer<I> {
     )]
     pub fn score_calibrated_batch(
         &self,
-        lib: &Speclib,
+        lib: &ReferenceLibrary,
         flats: &[FlatIdx],
         calibration: &CalibrationResult,
     ) -> (Vec<ScoredCandidate>, ScoreTimings, SkipCounts) {
@@ -840,7 +840,7 @@ impl<I: ScorerQueriable> Scorer<I> {
     )]
     pub fn prescore_batch(
         &self,
-        lib: &Speclib,
+        lib: &ReferenceLibrary,
         flats: &[FlatIdx],
         config: &CalibrationConfig,
         timings: &mut PrescoreTimings,

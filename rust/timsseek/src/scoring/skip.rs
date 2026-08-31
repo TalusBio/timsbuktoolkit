@@ -19,7 +19,7 @@ pub enum SkipReason {
     PrecursorOutOfFragmentedRange,
     /// Query RT (± tolerance) does not intersect the run's cycle range.
     RetentionTimeOutOfBounds,
-    /// Speclib entry carries zero predicted fragments -- nothing to score.
+    /// Library entry carries zero predicted fragments -- nothing to score.
     NoExpectedFragments,
     /// Extraction ran but zero quad isolation windows overlapped the query's
     /// precursor range. Signals a library / instrument scan-schedule mismatch

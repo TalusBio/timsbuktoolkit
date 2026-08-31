@@ -13,7 +13,7 @@ use timsquery::{
     SpectralCollector,
     Tolerance,
 };
-use timsseek::data_sources::speclib::Speclib;
+use timsseek::data_sources::reference_library::ReferenceLibrary;
 use timsseek::errors::TimsSeekError;
 use timsseek::ml::qvalues::{
     ThresholdCounts,
@@ -259,8 +259,8 @@ mod calib_dash_hook {
 
 /// Check that two speclibs are on a compatible RT scale.
 /// Warns loudly if the RT ranges don't overlap, which would produce a useless calibration.
-fn check_rt_scale_compatibility(main_lib: &Speclib, calib_lib: &Speclib) {
-    fn rt_range(lib: &Speclib) -> (f32, f32) {
+fn check_rt_scale_compatibility(main_lib: &ReferenceLibrary, calib_lib: &ReferenceLibrary) {
+    fn rt_range(lib: &ReferenceLibrary) -> (f32, f32) {
         let mut min_rt = f32::INFINITY;
         let mut max_rt = f32::NEG_INFINITY;
         for q in lib.iter() {
@@ -378,8 +378,8 @@ fn write_feature_stats_sidecar(
     tracing::instrument(skip_all, level = "trace")
 )]
 pub fn execute_pipeline<I: ScorerQueriable>(
-    speclib: &Speclib,
-    calib_lib: Option<&Speclib>,
+    speclib: &ReferenceLibrary,
+    calib_lib: Option<&ReferenceLibrary>,
     pipeline: &Scorer<I>,
     chunk_size: usize,
     out_path: &OutputConfig,
@@ -673,7 +673,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     tracing::instrument(skip_all, level = "trace")
 )]
 fn phase1_prescore<I: ScorerQueriable>(
-    speclib: &Speclib,
+    speclib: &ReferenceLibrary,
     pipeline: &Scorer<I>,
     chunk_size: usize,
     config: &CalibrationConfig,
@@ -732,7 +732,7 @@ const MIN_SHARED_FRAGMENTS: usize = 5;
 
 fn calibrate_from_phase1<I: ScorerQueriable>(
     candidates: Vec<CalibrantCandidate>,
-    phase1_lib: &Speclib,
+    phase1_lib: &ReferenceLibrary,
     main_lookup: Option<&PrecursorFragmentLookup>,
     pipeline: &Scorer<I>,
     config: &CalibrationConfig,
@@ -949,7 +949,7 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
     tracing::instrument(skip_all, level = "trace")
 )]
 fn phase3_score<I: ScorerQueriable>(
-    speclib: &Speclib,
+    speclib: &ReferenceLibrary,
     pipeline: &Scorer<I>,
     calibration: &CalibrationResult,
     chunk_size: usize,
@@ -1129,8 +1129,8 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
 }
 
 pub fn run_pipeline(
-    speclib: &Speclib,
-    calib_lib: Option<&Speclib>,
+    speclib: &ReferenceLibrary,
+    calib_lib: Option<&ReferenceLibrary>,
     pipeline: &Scorer<IndexedTimstofPeaks>,
     chunk_size: usize,
     output: &OutputConfig,
