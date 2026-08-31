@@ -98,6 +98,7 @@ pub fn build_extraction_into<T, I>(
     index: &I,
     tolerance: &Tolerance,
     top_n_fragments: Option<usize>,
+    max_frags: usize,
 ) -> Result<(), SkipReason>
 where
     T: KeyLike,
@@ -132,8 +133,13 @@ where
             if let Some(rt) = rt_override {
                 agg.rt_seconds = rt;
             }
+            // `clone()` would size the buffer to this first item, so every
+            // later item with more fragments would reallocate. Reserve the
+            // library maximum once instead.
+            let mut expected = ExpectedIntensities::with_capacity(max_frags);
+            expected.clone_from_ref(expected_intensities);
             *scratch = Some(Extraction {
-                expected_intensities: expected_intensities.clone(),
+                expected_intensities: expected,
                 chromatograms: agg,
             });
         }

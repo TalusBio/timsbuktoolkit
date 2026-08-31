@@ -92,6 +92,10 @@ use tracing::warn;
 ///   `Target` has no `Default` (bon builder with required fields) --
 ///   init lazily on first peptide.
 pub struct ScoringWorker {
+    /// Largest fragment count in the library, pre-scanned by the caller. Every
+    /// reusable buffer that holds one item's fragments is sized to this so the
+    /// hot loop never grows one.
+    pub max_frags: usize,
     pub scorer: TraceScorer,
     pub extraction: Option<Extraction<IonAnnot>>,
     pub inner_collector: Option<SpectralCollector<IonAnnot, MzMobilityStatsCollector>>,
@@ -102,6 +106,7 @@ pub struct ScoringWorker {
 impl ScoringWorker {
     pub fn new(num_cycles: usize, max_frags: usize) -> Self {
         Self {
+            max_frags,
             scorer: TraceScorer::new(num_cycles, max_frags),
             extraction: None,
             inner_collector: None,
@@ -278,23 +283,23 @@ pub struct ScratchBufs {
 }
 
 impl ScratchBufs {
-    fn new() -> Self {
+    /// `max_frags` is the library's largest fragment count, pre-scanned by the
+    /// caller. Both buffers are sized here so `fill_from` never grows one.
+    fn new(max_frags: usize) -> Self {
         Self {
             eg: Target::empty_like(),
-            expected: ExpectedIntensities::default(),
+            expected: ExpectedIntensities::with_capacity(max_frags),
         }
     }
 
     /// Refill both buffers from the flyweight: geometry into `eg`, and the
-    /// expected fragment/precursor intensities into `expected` (deduped by
-    /// key via `try_from_pairs` -- library keys are unique by construction).
+    /// expected fragment/precursor intensities into `expected` (deduped by key
+    /// via `refill_from_pairs` -- library keys are unique by construction).
     fn fill_from<Q: QueryGeom<Label = IonAnnot> + ExpectedIntensity>(&mut self, q: &Q) {
         fill_scratch_from(&mut self.eg, q);
-        self.expected = ExpectedIntensities::try_from_pairs(
-            q.iter_expected_fragments(),
-            q.expected_precursor_envelope(),
-        )
-        .expect("library flyweight yields unique fragment/precursor keys");
+        self.expected
+            .refill_from_pairs(q.iter_expected_fragments(), q.expected_precursor_envelope())
+            .expect("library flyweight yields unique fragment/precursor keys");
     }
 }
 
@@ -585,6 +590,7 @@ impl<I: ScorerQueriable> Scorer<I> {
             &self.index,
             &tolerance,
             Some(TOP_N_FRAGMENTS),
+            worker.max_frags,
         )?;
 
         Ok(super::apex_finding::PeptideMetadata {
@@ -749,7 +755,7 @@ impl<I: ScorerQueriable> Scorer<I> {
                     );
                     (
                         ScoringWorker::new(num_cycles, max_frags),
-                        ScratchBufs::new(),
+                        ScratchBufs::new(max_frags),
                         IonSearchAccumulator::default(),
                     )
                 },
@@ -808,6 +814,7 @@ impl<I: ScorerQueriable> Scorer<I> {
                     &self.index,
                     &self.broad_tolerance,
                     Some(TOP_N_FRAGMENTS),
+                    worker.max_frags,
                 )
             })
         )?;
@@ -896,7 +903,7 @@ impl<I: ScorerQueriable> Scorer<I> {
                 );
                 (
                     ScoringWorker::new(num_cycles, max_frags),
-                    ScratchBufs::new(),
+                    ScratchBufs::new(max_frags),
                     CalibrantHeap::new(n_calibrants),
                     PrescoreTimings::default(),
                 )
@@ -980,6 +987,107 @@ mod tests {
         ReferenceLibrary {
             geom,
             frag_intens: vec![1.0, 0.5],
+        }
+    }
+
+    /// Two rows with different fragment counts and disjoint labels, so a
+    /// refill that reused the previous item's contents is visible.
+    fn two_shape_lib() -> ReferenceLibrary {
+        let mut caps = TargetCapabilities::default_diann();
+        caps.decoys = crate::models::map_decoy_strategy(crate::models::DecoyPolicy::Force, false);
+        let mut geom = TargetColumns::with_capabilities(caps);
+        geom.push_row(Row {
+            precursor_mz: 900.4,
+            charge: 2,
+            rt_seconds: 1.0,
+            mobility: 1.0,
+            frags: &[
+                (IonAnnot::try_from("y3").unwrap(), 300.0),
+                (IonAnnot::try_from("y8").unwrap(), 800.0),
+                (IonAnnot::try_from("y9").unwrap(), 900.0),
+                (IonAnnot::try_from("y10").unwrap(), 950.0),
+            ],
+            seq_strip: "PEPTIDEK",
+            seq_mod: "PEPTIDEK",
+            ..Default::default()
+        });
+        geom.push_row(Row {
+            precursor_mz: 700.2,
+            charge: 2,
+            rt_seconds: 2.0,
+            mobility: 1.0,
+            frags: &[(IonAnnot::try_from("b2").unwrap(), 200.0)],
+            seq_strip: "PEPTIDER",
+            seq_mod: "PEPTIDER",
+            ..Default::default()
+        });
+        geom.seal().expect("fixture ids are usable");
+        ReferenceLibrary {
+            geom,
+            frag_intens: vec![1.0, 0.5, 0.4, 0.3, 0.9],
+        }
+    }
+
+    /// `fill_from` reuses one buffer across items, so a shorter item following
+    /// a longer one must not inherit the tail of its predecessor.
+    #[test]
+    fn refill_leaves_nothing_of_the_previous_item() {
+        let lib = two_shape_lib();
+        let flats: Vec<_> = lib.geom.flats().collect();
+        let max_frags = flats
+            .iter()
+            .map(|&f| lib.item_at(f).fragment_count())
+            .max()
+            .unwrap();
+        let mut scratch = ScratchBufs::new(max_frags);
+
+        let long = lib.item_at(
+            *flats
+                .iter()
+                .max_by_key(|&&f| lib.item_at(f).fragment_count())
+                .unwrap(),
+        );
+        let short = lib.item_at(
+            *flats
+                .iter()
+                .min_by_key(|&&f| lib.item_at(f).fragment_count())
+                .unwrap(),
+        );
+        assert!(
+            long.fragment_count() > short.fragment_count(),
+            "fixture shapes differ"
+        );
+
+        scratch.fill_from(&long);
+        let long_keys: Vec<IonAnnot> = scratch
+            .expected
+            .fragment_intensities
+            .iter()
+            .map(|(k, _)| *k)
+            .collect();
+        assert_eq!(long_keys.len(), long.fragment_count());
+
+        scratch.fill_from(&short);
+        assert_eq!(
+            scratch.expected.fragment_len(),
+            short.fragment_count(),
+            "the refilled buffer must hold only the new item"
+        );
+        for (k, v) in short.iter_expected_fragments() {
+            assert_eq!(
+                scratch.expected.get_fragment(&k),
+                Some(v),
+                "value for {k:?}"
+            );
+        }
+        for k in long_keys {
+            if !short.iter_expected_fragments().any(|(kk, _)| kk == k) {
+                assert_eq!(
+                    scratch.expected.get_fragment(&k),
+                    None,
+                    "stale key {k:?} survived the refill"
+                );
+            }
         }
     }
 
