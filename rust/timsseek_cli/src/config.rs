@@ -23,6 +23,49 @@ pub struct Config {
     pub output: Option<OutputConfig>,
     #[serde(default)]
     pub staging: Option<StagingConfig>,
+    #[serde(default)]
+    pub library: Option<LibraryConfig>,
+}
+
+/// How to predict a library.
+///
+/// Every field is optional and falls through to msspeculator's own default, so
+/// the section can be omitted entirely and a build flag can beat any single
+/// field without the others having to be spelled. This project owns the flag
+/// surface and none of the digestion, modification or prediction logic.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct LibraryConfig {
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub missed_cleavages: Option<usize>,
+    #[serde(default)]
+    pub min_length: Option<usize>,
+    #[serde(default)]
+    pub max_length: Option<usize>,
+    #[serde(default)]
+    pub min_charge: Option<i64>,
+    #[serde(default)]
+    pub max_charge: Option<i64>,
+    #[serde(default)]
+    pub fixed_mods: Option<Vec<String>>,
+    #[serde(default)]
+    pub variable_mods: Option<Vec<String>>,
+    #[serde(default)]
+    pub max_variable_mods: Option<usize>,
+    #[serde(default)]
+    pub ms_context: Option<String>,
+    #[serde(default)]
+    pub nce: Option<f32>,
+    #[serde(default)]
+    pub chrom_context: Option<String>,
+    #[serde(default)]
+    pub min_intensity: Option<f64>,
+    #[serde(default)]
+    pub max_fragments: Option<usize>,
+    #[serde(default)]
+    pub decoys: Option<bool>,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -205,6 +248,7 @@ rt = "Unrestricted"
         assert!(c.input.is_none(), "[input] must be commented out");
         assert!(c.output.is_none(), "[output] must be commented out");
         assert!(c.staging.is_none(), "[staging] must be commented out");
+        assert!(c.library.is_none(), "[library] must be commented out");
         assert!(c.analysis.raw_inputs.is_none());
 
         assert_eq!(

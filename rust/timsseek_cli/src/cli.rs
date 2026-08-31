@@ -43,9 +43,46 @@ impl From<RescoreModel> for CliRescoreModel {
     }
 }
 
+/// `timsseek` with no subcommand is a search, so the search arguments are
+/// flattened at the top level and the subcommand is optional. Every existing
+/// invocation keeps parsing to the same values.
+///
+/// Nothing is swallowed: every argument is a flag, so no positional can absorb
+/// a stray token. An unknown flag is an error and so is an unrecognised first
+/// word. `nothing_is_swallowed` pins that, because it holds only while that
+/// stays true.
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 pub struct Cli {
+    #[command(subcommand)]
+    pub command: Option<Command>,
+
+    #[command(flatten)]
+    pub search: SearchArgs,
+}
+
+#[derive(clap::Subcommand, Debug)]
+pub enum Command {
+    /// Search raw files against a library. The same thing a bare invocation
+    /// does, named.
+    Search(Box<SearchArgs>),
+    /// Predict a spectral library from a FASTA and write it.
+    BuildLibrary(Box<BuildLibraryArgs>),
+}
+
+impl Cli {
+    /// The search arguments this invocation resolved to, whether they were
+    /// given bare or under `search`.
+    pub fn search_args(&self) -> &SearchArgs {
+        match &self.command {
+            Some(Command::Search(args)) => args,
+            _ => &self.search,
+        }
+    }
+}
+
+#[derive(clap::Args, Debug, Default)]
+pub struct SearchArgs {
     /// Path to the log file.
     /// Defaults to {output_dir}/timsseek.log.
     /// Use "-" to send logs to stderr instead of a file.
@@ -115,4 +152,86 @@ pub struct Cli {
     /// results.feature_importance.tsv).
     #[arg(long)]
     pub no_feature_stats: bool,
+}
+
+/// Prediction settings, mirroring msspeculator's own library command rather
+/// than inventing a second vocabulary for the same settings.
+///
+/// Every field is `Option`, because "the flag was given" is what makes a flag
+/// beat the configuration file. The fallbacks live in
+/// [`LibraryConfig`](crate::config::LibraryConfig), which in turn falls back to
+/// msspeculator's defaults.
+#[derive(clap::Args, Debug, Default)]
+pub struct BuildLibraryArgs {
+    /// Sequence database to digest.
+    #[arg(long, value_name = "PATH")]
+    pub fasta: PathBuf,
+
+    /// Where to write the library. The suffix picks the format:
+    /// `.mzspeclib.txt` writes mzSpecLib, anything else writes DIA-NN TSV, and
+    /// a trailing `.gz` compresses either. `.mzspeclib.txt.gz` is the
+    /// recommended spelling.
+    #[arg(long, short = 'o', value_name = "PATH")]
+    pub out: PathBuf,
+
+    /// Path to the configuration file, TOML or JSON. Its `[library]` section
+    /// supplies anything not given as a flag.
+    #[arg(long, short = 'c', value_name = "PATH")]
+    pub config: Option<PathBuf>,
+
+    /// A `.safetensors` artifact, or `builtin:NAME` for one compiled in.
+    #[arg(long, value_name = "MODEL")]
+    pub model: Option<String>,
+
+    #[arg(long, value_name = "N")]
+    pub missed_cleavages: Option<usize>,
+    #[arg(long, value_name = "N")]
+    pub min_length: Option<usize>,
+    #[arg(long, value_name = "N")]
+    pub max_length: Option<usize>,
+    #[arg(long, value_name = "Z")]
+    pub min_charge: Option<i64>,
+    #[arg(long, value_name = "Z")]
+    pub max_charge: Option<i64>,
+
+    /// Fixed modification rule, repeatable.
+    #[arg(long = "fixed-mod", value_name = "TARGETS[MOD]")]
+    pub fixed_mods: Option<Vec<String>>,
+    /// Variable modification rule, repeatable.
+    #[arg(long = "variable-mod", value_name = "TARGETS[MOD]")]
+    pub variable_mods: Option<Vec<String>>,
+    #[arg(long, value_name = "N")]
+    pub max_variable_mods: Option<usize>,
+
+    /// Acquisition context: a named setup, or the factors spelled out as
+    /// "INSTRUMENT::DETECTOR::FRAGMENTATION::ENERGY".
+    #[arg(long, value_name = "CONTEXT", conflicts_with = "nce")]
+    pub ms_context: Option<String>,
+    /// Collision energy only, for an otherwise unknown setup.
+    #[arg(long, value_name = "NCE", conflicts_with = "ms_context")]
+    pub nce: Option<f32>,
+    /// Named chromatography context for a real retention time. Absent means the
+    /// context-free index.
+    #[arg(long, value_name = "DATASET")]
+    pub chrom_context: Option<String>,
+
+    /// Drop fragments below this base-peak-relative intensity.
+    #[arg(long, value_name = "FRACTION")]
+    pub min_intensity: Option<f64>,
+    /// Keep at most this many of the strongest fragments per precursor, applied
+    /// after `--min-intensity`.
+    #[arg(long, value_name = "N")]
+    pub max_fragments: Option<usize>,
+
+    /// Add pseudo-reversed decoy precursors.
+    #[arg(long)]
+    pub decoys: bool,
+
+    /// Where to write the resolved-configuration sidecar. Defaults to
+    /// `<out>.config.json`.
+    #[arg(long, value_name = "PATH", conflicts_with = "no_config_out")]
+    pub config_out: Option<PathBuf>,
+    /// Skip the resolved-configuration sidecar.
+    #[arg(long)]
+    pub no_config_out: bool,
 }

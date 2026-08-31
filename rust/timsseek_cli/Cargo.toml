@@ -12,6 +12,9 @@ tims_stage = { path = "../tims_stage" }
 alloc_track = { path = "../alloc_track" }
 rescore_dash = { path = "../rescore_dash", optional = true }
 tempfile = { workspace = true }
+# Library prediction. A path dependency until the repository is public; the
+# prediction and digestion logic lives there, not here.
+msspeculator-inference = { path = "../../../../../git/distilltest/rust/inference" }
 calib_dash = { path = "../calib_dash", optional = true }
 
 regex = "1.11.1"

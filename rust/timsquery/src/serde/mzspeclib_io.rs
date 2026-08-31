@@ -12,6 +12,11 @@
 //! a peak that is unannotated, or annotated several ways at once, is skipped.
 //! The third case is skipped rather than stored at its observed m/z, because an
 //! arena mixing observed and theoretical masses is invisible downstream.
+//!
+//! Finding that theoretical m/z is itself a ladder, because the exports differ
+//! again: the composition when the annotation carries one, the mzPAF mass-error
+//! suffix when it does not, and the peak's own m/z when the spectrum declares
+//! its masses calculated rather than measured. See [`theoretical_mz`].
 
 use std::collections::HashMap;
 use std::io::BufRead;
@@ -90,6 +95,16 @@ const ION_MOBILITY_DRIFT_TIME: u32 = 1_002_476;
 /// pair because no PSI-MS term identifies the target a decoy was derived from.
 const MSSPECULATOR_PAIR_ID: &str = "msspeculator:decoy_pair_id";
 
+/// The two `spectrum origin type` values whose definitions state that the peak
+/// m/z values are theoretical rather than measured.
+///
+/// Named rather than subsumed, because there is no parent term meaning "these
+/// masses are calculated": `MS:1003074|predicted spectrum` says the whole
+/// spectrum was predicted, and `MS:1003424|selected fragment theoretical m/z
+/// observed intensity spectrum` says so of the m/z alone. Their subtypes
+/// inherit through the same `is_a` walk `subsumes_decoy` uses.
+const THEORETICAL_MZ_ORIGIN_TYPES: [&str; 2] = ["MS:1003074", "MS:1003424"];
+
 /// The `spectrum origin type` subtree, as `accession -> (name, parents)`.
 const ORIGIN_TYPE_CV: &str = include_str!("../../assets/spectrum_origin_type.tsv");
 
@@ -114,6 +129,11 @@ fn origin_type_parents() -> &'static HashMap<&'static str, Vec<&'static str>> {
 /// `is_a` rather than matching the leaves. `None` when the term is outside the
 /// vendored subtree, which is a term this build has never heard of.
 fn subsumes_decoy(accession: &str) -> Option<bool> {
+    subsumes(accession, DECOY_SPECTRUM)
+}
+
+/// Whether `accession` is `ancestor` or descends from it.
+fn subsumes(accession: &str, ancestor: &str) -> Option<bool> {
     let parents = origin_type_parents();
     if !parents.contains_key(accession) {
         return None;
@@ -121,7 +141,7 @@ fn subsumes_decoy(accession: &str) -> Option<bool> {
     let mut frontier = vec![accession];
     let mut seen = 0usize;
     while let Some(term) = frontier.pop() {
-        if term == DECOY_SPECTRUM {
+        if term == ancestor {
             return Some(true);
         }
         // The subtree is a DAG of ten terms; the bound is a guard against a
@@ -133,6 +153,18 @@ fn subsumes_decoy(accession: &str) -> Option<bool> {
         frontier.extend(parents.get(term).into_iter().flatten().copied());
     }
     Some(false)
+}
+
+/// Whether this spectrum's peak m/z values are calculated rather than measured.
+///
+/// It decides what an annotation with no composition and no mass-error suffix
+/// means. On a predicted spectrum the peak m/z already *is* the theoretical
+/// mass, so the peak is usable; on an observed one there is no theoretical mass
+/// to be had and the peak is skipped rather than mixed in at its observed m/z.
+fn declares_theoretical_mz(accession: &str) -> bool {
+    THEORETICAL_MZ_ORIGIN_TYPES
+        .iter()
+        .any(|ancestor| subsumes(accession, ancestor) == Some(true))
 }
 
 // ── Reading a file ───────────────────────────────────────────────────────────
@@ -329,6 +361,8 @@ impl SpectrumRow {
             }
         };
 
+        let peak_mz_is_theoretical =
+            origin_types(spectrum).any(|term| declares_theoretical_mz(&term));
         let mut counter = UnknownIonCounter::default();
         let mut frags = Vec::with_capacity(spectrum.peaks.len());
         for peak in spectrum.peaks.iter() {
@@ -339,7 +373,8 @@ impl SpectrumRow {
                     continue;
                 }
                 [annotation] => {
-                    let Some(mz) = theoretical_mz(annotation, observed) else {
+                    let Some(mz) = theoretical_mz(annotation, observed, peak_mz_is_theoretical)
+                    else {
                         degradation.peaks_without_theoretical_mz += 1;
                         continue;
                     };
@@ -535,19 +570,37 @@ fn is_decoy<M: mzcore::chemistry::MassOutputMode>(
     spectrum: &AnnotatedSpectrum<M>,
     degradation: &mut Degradation,
 ) -> bool {
-    for param in spectrum.description.params.iter() {
-        if param.accession != Some(SPECTRUM_ORIGIN_TYPE) {
-            continue;
-        }
-        // The value arrives as the stringified term, `MS:1003195|name`.
-        let value = param.value.to_string();
-        let accession = value.split('|').next().unwrap_or_default();
-        match subsumes_decoy(accession) {
+    for accession in origin_types(spectrum) {
+        match subsumes_decoy(&accession) {
             Some(decoy) => return decoy,
-            None => degradation.unrecognised_origin_types.push(value),
+            None => degradation.unrecognised_origin_types.push(accession),
         }
     }
     false
+}
+
+/// The `spectrum origin type` accessions on this entry.
+///
+/// The term is not repeatable, so more than one is a malformed file rather than
+/// a case to reconcile; the callers take the first one they can resolve. Values
+/// arrive as the stringified term, `MS:1003195|name`.
+fn origin_types<M: mzcore::chemistry::MassOutputMode>(
+    spectrum: &AnnotatedSpectrum<M>,
+) -> impl Iterator<Item = String> + '_ {
+    spectrum
+        .description
+        .params
+        .iter()
+        .filter(|param| param.accession == Some(SPECTRUM_ORIGIN_TYPE))
+        .map(|param| {
+            param
+                .value
+                .to_string()
+                .split('|')
+                .next()
+                .unwrap_or_default()
+                .to_string()
+        })
 }
 
 /// Which entries compete. msspeculator's project-defined pair id first, then
@@ -581,22 +634,26 @@ fn declared_group<M: mzcore::chemistry::MassOutputMode>(
 ///
 /// From the composition when the annotation carries one. When it does not, the
 /// mzPAF mass-error suffix says how far the observed peak sits from the
-/// theoretical mass, so subtracting it recovers the same number. Neither
-/// available means the peak has no theoretical mass and is skipped.
+/// theoretical mass, so subtracting it recovers the same number. Failing both,
+/// a spectrum that declares its m/z values calculated is already reporting the
+/// theoretical mass, which is the case for every predicted library including
+/// the ones this project writes. An observed spectrum with neither has no
+/// theoretical mass to offer and the peak is skipped.
 fn theoretical_mz<M: mzcore::chemistry::MassOutputMode>(
     annotation: &Fragment<M>,
     observed: f64,
+    peak_mz_is_theoretical: bool,
 ) -> Option<f64> {
     if let Some(mz) = annotation.mz(MassMode::Monoisotopic) {
         return Some(mz.value);
     }
-    annotation
-        .deviation
-        .as_ref()
-        .map(|deviation| match deviation {
+    if let Some(deviation) = annotation.deviation.as_ref() {
+        return Some(match deviation {
             mzcore::quantities::Tolerance::Absolute(offset) => observed - offset.value,
             mzcore::quantities::Tolerance::Relative(ppm) => observed / (1.0 + ppm.value / 1e6),
-        })
+        });
+    }
+    peak_mz_is_theoretical.then_some(observed)
 }
 
 /// Map an annotation onto the packed label, or `None` when this build cannot
@@ -813,6 +870,38 @@ mod tests {
             msg.contains("DECOY"),
             "names the set it could not resolve: {msg}"
         );
+    }
+
+    /// The format this project writes, read back by the reader that has to read
+    /// it. Built by `timsseek build-library` from a one-protein FASTA, so it
+    /// exercises every term msspeculator actually emits rather than the terms a
+    /// vendor happens to use: `MS:1002815|inverse reduced ion mobility` for the
+    /// timsTOF axis, `MS:1000896` for retention, and the project-defined
+    /// `msspeculator:decoy_pair_id` for the target/decoy pairing.
+    #[test]
+    fn the_format_this_project_writes_reads_back() {
+        let geom = arena("msspeculator_built.mzspeclib.txt.gz");
+        assert_eq!(geom.n_rows(), 4, "two targets and their two decoys");
+        assert_eq!(geom.rows().filter(|r| geom.is_decoy(*r)).count(), 2);
+
+        let groups: std::collections::HashSet<_> =
+            geom.rows().map(|r| geom.decoy_group_code(r)).collect();
+        assert_eq!(
+            groups.len(),
+            2,
+            "`decoy_pair_id` puts each decoy in its target's group"
+        );
+
+        let first = geom.rows().next().unwrap();
+        assert_eq!(geom.output_id(first).to_string(), "VLSAAKPEDR/2");
+        assert_eq!(geom.charge(first), 2);
+        assert!((geom.precursor_mz(first) - 543.301_11).abs() < 1e-4);
+        assert!(
+            (geom.mobility(first) - 1.182_379_6).abs() < 1e-6,
+            "the timsTOF mobility axis, which neither vendor export uses"
+        );
+        assert_eq!(geom.seq_strip(first), "VLSAAKPEDR");
+        assert_eq!(geom.frag_labels(first).len(), 4);
     }
 
     /// A third-party library carries no `msspeculator:` attributes and no

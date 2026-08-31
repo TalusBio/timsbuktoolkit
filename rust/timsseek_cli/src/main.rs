@@ -1,3 +1,4 @@
+mod build_library;
 mod cli;
 mod config;
 #[cfg(feature = "dashboard")]
@@ -36,7 +37,11 @@ use tracing_profile::{
     PrintTreeLayer,
 };
 
-use cli::Cli;
+use cli::{
+    Cli,
+    Command,
+    SearchArgs,
+};
 use config::{
     Config,
     OutputConfig,
@@ -551,7 +556,7 @@ struct TracingHandle {
 /// The `YYYYMMDDTHHMMSS` local-time suffix avoids clobbering previous runs
 /// sharing the directory. Logs never reach the terminal unless `--log-path -`
 /// opts in.
-fn init_tracing(args: &Cli, resolved: &ResolvedInputs) -> TracingHandle {
+fn init_tracing(args: &SearchArgs, resolved: &ResolvedInputs) -> TracingHandle {
     let log_file_path: Option<std::path::PathBuf> = match args.log_path {
         Some(ref p) if p.to_str() == Some("-") => None,
         Some(ref p) => Some(p.clone()),
@@ -676,8 +681,49 @@ fn main() {
 }
 
 fn run() -> std::result::Result<(), errors::CliError> {
-    let args = Cli::parse();
+    let cli = Cli::parse();
+    if let Some(Command::BuildLibrary(build)) = &cli.command {
+        let config = load_config(build.config.as_deref())?;
+        return build_library::run(&build_library::resolve_build(build, &config));
+    }
+    search(cli.search_args())
+}
 
+/// Read a configuration file, or the built-in defaults when none was named.
+///
+/// TOML and JSON are both accepted, sniffed by extension.
+fn load_config(path: Option<&std::path::Path>) -> Result<Config, errors::CliError> {
+    let Some(config_path) = path else {
+        info!("No config file provided, using default configuration");
+        return Ok(Config::default_config());
+    };
+    let text = std::fs::read_to_string(config_path).map_err(|e| errors::CliError::Io {
+        source: e.to_string(),
+        path: Some(config_path.to_string_lossy().to_string()),
+    })?;
+    let is_toml = config_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("toml"))
+        .unwrap_or(false);
+    let parsed: Result<Config, String> = if is_toml {
+        toml::from_str(&text).map_err(|e| e.to_string())
+    } else {
+        serde_json::from_str(&text).map_err(|e| e.to_string())
+    };
+    parsed.map_err(|e| errors::CliError::ParseError {
+        msg: format!(
+            "Failed to parse config file {}: {e}\n\n\
+             Run `timsseek --print-default-config` for a reference template, \
+             or `--write-default-config <path>` to drop one to disk.\n\n\
+             Reference default:\n```toml\n{}```\n",
+            config_path.display(),
+            config::DEFAULT_CONFIG_TOML,
+        ),
+    })
+}
+
+fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliError> {
     if args.print_default_config {
         print!("{}", config::DEFAULT_CONFIG_TOML);
         return Ok(());
@@ -691,44 +737,12 @@ fn run() -> std::result::Result<(), errors::CliError> {
         return Ok(());
     }
 
-    let config = match args.config {
-        Some(ref config_path) => {
-            let text = std::fs::read_to_string(config_path).map_err(|e| errors::CliError::Io {
-                source: e.to_string(),
-                path: Some(config_path.to_string_lossy().to_string()),
-            })?;
-            let is_toml = config_path
-                .extension()
-                .and_then(|e| e.to_str())
-                .map(|e| e.eq_ignore_ascii_case("toml"))
-                .unwrap_or(false);
-            let parsed: Result<Config, String> = if is_toml {
-                toml::from_str(&text).map_err(|e| e.to_string())
-            } else {
-                serde_json::from_str(&text).map_err(|e| e.to_string())
-            };
-            parsed.map_err(|e| errors::CliError::ParseError {
-                msg: format!(
-                    "Failed to parse config file {}: {e}\n\n\
-                     Run `timsseek --print-default-config` for a reference template, \
-                     or `--write-default-config <path>` to drop one to disk.\n\n\
-                     Reference default:\n```toml\n{}```\n",
-                    config_path.display(),
-                    config::DEFAULT_CONFIG_TOML,
-                ),
-            })?
-        }
-        None => {
-            info!("No config file provided, using default configuration");
-            Config::default_config()
-        }
-    };
-
-    let (config, validated) = resolve_run_inputs(&args, config)?;
+    let config = load_config(args.config.as_deref())?;
+    let (config, validated) = resolve_run_inputs(args, config)?;
 
     // Held in `run()`'s scope so the instrumentation flush guard drops after
     // all work completes.
-    let _tracing = init_tracing(&args, &validated);
+    let _tracing = init_tracing(args, &validated);
 
     info!("Parsed configuration: {:#?}", config.clone());
     alloc_track::snap!("start");

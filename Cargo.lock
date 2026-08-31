@@ -1232,6 +1232,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "blake2"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46502ad458c9a52b69d4d4d32775c788b7a1b85e8bc9d482d92250fc0e3f8efe"
+dependencies = [
+ "digest 0.10.7",
+]
+
+[[package]]
 name = "block"
 version = "0.1.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4156,6 +4165,33 @@ dependencies = [
 ]
 
 [[package]]
+name = "msspeculator-core"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake2",
+ "libm",
+ "ndarray",
+ "pest",
+ "pest_derive",
+ "safetensors",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "msspeculator-inference"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "blake2",
+ "flate2",
+ "msspeculator-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "mzannotate"
 version = "0.2.0"
 source = "git+https://github.com/jspaezp/rustyms?branch=fix%2Fmzspeclib-attribute-sets#6a4f74ff365cffbe0612dd5f983db930c9f1b751"
@@ -6132,6 +6168,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "safetensors"
+version = "0.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "44560c11236a6130a46ce36c836a62936dc81ebf8c36a37947423571be0e55b6"
+dependencies = [
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "same-file"
 version = "1.0.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -7063,6 +7109,7 @@ dependencies = [
  "clap",
  "indicatif",
  "mimalloc",
+ "msspeculator-inference",
  "rayon",
  "regex",
  "rescore_dash",

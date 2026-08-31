@@ -52,31 +52,32 @@ Each component has a different usage pattern.
 To run timsseek we need a spectral library and a configuration file and a raw
 data file.
 
-The current implementation of the speclib is an ndjson file
-(we also have a builder for the library ... I am happy to
-integrate other sources of predictions for it.)
+Libraries are written as mzSpecLib. DIA-NN (`.speclib`, TSV, parquet),
+Spectronaut, Skyline and JSON libraries are all read as well.
 
 ```bash
 DOTD_FILE="$HOME/data/my_data.d"
 FASTA_FILE="$HOME/fasta/VIMENTIN.fasta"
-SPECLIB_NAME="vimentin.ndjson"
+SPECLIB_NAME="vimentin.mzspeclib.txt.gz"
 RESULTS_DIR="vimentin_search_results"
 
-# Build the spectral lib using Koina (Prosit) for fragment/RT prediction.
-# Requires network access to https://koina.wilhelmlab.org or a local Koina server.
-cargo run --release -p speclib_build_cli -- \
+# Predict the library locally. No network and no server: the model is compiled
+# into the binary. The `--out` suffix picks the format, and `.gz` compresses in
+# the writer thread, so the uncompressed library never lands on disk.
+cargo run --release --bin timsseek -- build-library \
     --fasta $FASTA_FILE \
-    --fixed-mod "C[U:4]" \
-    --max-ions 10 \
+    --fixed-mod "C[UNIMOD:4]" \
+    --max-fragments 10 \
+    --decoys \
     -o $SPECLIB_NAME
 
 # Run timsseek. Config is optional; defaults work for most runs.
 # To tweak tolerances: `timsseek --write-default-config config.toml`, edit, pass with `-c`.
 # TOML and JSON both accepted (sniffed by extension).
 cargo run --release --bin timsseek -- \
-    --speclib-file $SPECLIB_NAME \
-    --output-dir $RESULTS_DIR \
-    --dotd-files $DOTD_FILE
+    --speclib-uri $SPECLIB_NAME \
+    --output-uri $RESULTS_DIR \
+    --raw-inputs $DOTD_FILE
 ```
 
 ## S3 inputs
@@ -85,7 +86,7 @@ Both CLIs accept `s3://` URIs anywhere a path is accepted (AWS / MinIO / R2). `.
 
 ```bash
 timsseek --raw-inputs s3://bkt/sample.d.tar \
-         --speclib-uri s3://bkt/lib.msgpack.zst \
+         --speclib-uri s3://bkt/lib.mzspeclib.txt.gz \
          --output-uri s3://bkt/runs/out
 
 speclib_build_cli --fasta s3://bkt/proteome.fasta \

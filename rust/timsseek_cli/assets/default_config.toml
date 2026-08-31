@@ -13,7 +13,7 @@
 ## Input spectral library (optional -- `--speclib-uri` overrides this).
 # [input]
 # type = "speclib"
-# uri = "path/to/library.msgpack.zst"
+# uri = "path/to/library.mzspeclib.txt.gz"
 
 
 [analysis]
@@ -84,6 +84,27 @@ calibration_query_rt_window_minutes = 0.083333336   # 5 seconds (5 / 60)
 ## Output directory (optional -- `--output-uri` overrides this).
 # [output]
 # uri = "./results"
+
+
+## How to predict a library, consulted by `timsseek build-library`. Every field
+## is optional and falls through to msspeculator's own default, so the section
+## can be omitted entirely; a build flag beats whatever is set here.
+# [library]
+# model = "builtin:small-v0"
+# missed_cleavages = 2
+# min_length = 7
+# max_length = 30
+# min_charge = 2
+# max_charge = 4
+# fixed_mods = ["C[UNIMOD:4]"]
+# variable_mods = ["M[UNIMOD:35]"]
+# max_variable_mods = 1
+# min_intensity = 0.01
+# max_fragments = 20
+# decoys = true
+# ms_context = "INSTRUMENT::DETECTOR::FRAGMENTATION::ENERGY"
+# nce = 27.0
+# chrom_context = "dataset-name"
 
 
 ## Staging controls for S3/remote raw inputs (all optional).

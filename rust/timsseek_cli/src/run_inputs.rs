@@ -5,7 +5,7 @@
 //! merge happens once, before anything reads a value, so there is one resolved
 //! value per input rather than two sources consulted at different points.
 
-use crate::cli::Cli;
+use crate::cli::SearchArgs;
 use crate::config::{
     Config,
     InputConfig,
@@ -34,7 +34,7 @@ pub struct ResolvedInputs {
 /// read straight from the command line. See the spec's Out of Scope for why
 /// calibration input is not a configuration field yet.
 pub fn resolve_run_inputs(
-    args: &Cli,
+    args: &SearchArgs,
     mut config: Config,
 ) -> Result<(Config, ResolvedInputs), CliError> {
     merge_cli_into_config(&mut config, args);
@@ -44,7 +44,7 @@ pub fn resolve_run_inputs(
 
 /// A flag beats the configuration file whenever the flag was given, whatever
 /// its value.
-fn merge_cli_into_config(config: &mut Config, args: &Cli) {
+fn merge_cli_into_config(config: &mut Config, args: &SearchArgs) {
     if let Some(raw_inputs) = &args.raw_inputs {
         config.analysis.raw_inputs = Some(raw_inputs.clone());
     }
@@ -62,7 +62,7 @@ fn merge_cli_into_config(config: &mut Config, args: &Cli) {
     }
 }
 
-fn read_inputs(args: &Cli, config: &Config) -> Result<ResolvedInputs, CliError> {
+fn read_inputs(args: &SearchArgs, config: &Config) -> Result<ResolvedInputs, CliError> {
     let raw_inputs = match &config.analysis.raw_inputs {
         Some(files) => files.iter().map(|f| expand_local_uri(f)).collect(),
         None => {
@@ -102,15 +102,19 @@ fn read_inputs(args: &Cli, config: &Config) -> Result<ResolvedInputs, CliError> 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::cli::Cli;
     use clap::Parser;
     use timsseek::DecoyPolicy;
 
-    fn cli(argv: &[&str]) -> Cli {
+    /// The search arguments a command line resolves to, whether they were
+    /// given bare or under `search`.
+    fn search(argv: &[&str]) -> Cli {
         Cli::parse_from(std::iter::once("timsseek").chain(argv.iter().copied()))
     }
 
     fn resolve(argv: &[&str], config: Config) -> Result<ResolvedInputs, CliError> {
-        resolve_run_inputs(&cli(argv), config).map(|(_, resolved)| resolved)
+        let cli = search(argv);
+        resolve_run_inputs(cli.search_args(), config).map(|(_, resolved)| resolved)
     }
 
     fn config_with(extra: &str) -> Config {
@@ -127,8 +131,9 @@ rt = "Unrestricted"
         toml::from_str(&format!("{extra}{base}")).expect("test configuration must parse")
     }
 
-    /// The invocation in the project's README, which spells all three inputs
-    /// with their pre-rename aliases.
+    /// The invocation the README documented before the rename, which spells all
+    /// three inputs with their deprecated aliases. Existing scripts and
+    /// container entrypoints still contain it.
     #[test]
     fn readme_invocation_resolves_through_the_deprecated_aliases() {
         let resolved = resolve(
@@ -235,7 +240,7 @@ uri = "config_results"
     #[test]
     fn a_flag_beats_the_configuration_file_for_non_input_settings() {
         let (merged, _) = resolve_run_inputs(
-            &cli(&[
+            search(&[
                 "--speclib-uri",
                 "lib.ndjson",
                 "--output-uri",
@@ -244,7 +249,8 @@ uri = "config_results"
                 "a.d",
                 "--decoy-strategy",
                 "never",
-            ]),
+            ])
+            .search_args(),
             config_with(""),
         )
         .unwrap();
@@ -281,17 +287,68 @@ uri = "config_results"
         assert_eq!(resolved.calib_lib_uri.as_deref(), Some("calib.ndjson"));
     }
 
-    /// Every argument is a flag, so nothing can absorb a stray token. Adding a
-    /// positional later would silently remove that guarantee.
+    /// Nothing is swallowed. Every argument is a flag, so no positional can
+    /// absorb a stray token, and a near-miss spelling is an error rather than a
+    /// prefix match. Adding a positional later would remove that guarantee
+    /// without any other test noticing, which is why this one is here.
     #[test]
-    fn an_unrecognized_flag_is_an_error() {
-        let err = Cli::try_parse_from(["timsseek", "--speclib-urk", "lib.ndjson"]).unwrap_err();
-        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+    fn nothing_is_swallowed() {
+        use clap::error::ErrorKind;
+
+        let unknown_flag = |argv: [&str; 3]| Cli::try_parse_from(argv).unwrap_err().kind();
+        assert_eq!(
+            unknown_flag(["timsseek", "--speclib-urk", "lib.ndjson"]),
+            ErrorKind::UnknownArgument,
+            "a misspelled flag"
+        );
+        assert_eq!(
+            unknown_flag(["timsseek", "--speclib", "lib.ndjson"]),
+            ErrorKind::UnknownArgument,
+            "a prefix of a real flag is not that flag"
+        );
+
+        let stray_word = |argv: [&str; 2]| Cli::try_parse_from(argv).unwrap_err().kind();
+        assert_eq!(
+            stray_word(["timsseek", "serach"]),
+            ErrorKind::InvalidSubcommand,
+            "a typo of a real subcommand"
+        );
+        assert_eq!(
+            stray_word(["timsseek", "lib.ndjson"]),
+            ErrorKind::InvalidSubcommand,
+            "a stray word that is not a subcommand at all"
+        );
     }
 
+    /// `search` names what a bare invocation already does, so the two have to
+    /// resolve identically.
     #[test]
-    fn an_unrecognized_first_word_is_an_error() {
-        let err = Cli::try_parse_from(["timsseek", "serach"]).unwrap_err();
-        assert_eq!(err.kind(), clap::error::ErrorKind::UnknownArgument);
+    fn the_search_subcommand_is_the_bare_invocation_named() {
+        let bare = resolve(
+            &[
+                "--speclib-uri",
+                "lib.ndjson",
+                "--output-uri",
+                "out",
+                "--raw-inputs",
+                "a.d",
+            ],
+            Config::default_config(),
+        )
+        .unwrap();
+        let named = resolve(
+            &[
+                "search",
+                "--speclib-uri",
+                "lib.ndjson",
+                "--output-uri",
+                "out",
+                "--raw-inputs",
+                "a.d",
+            ],
+            Config::default_config(),
+        )
+        .unwrap();
+        assert_eq!(bare, named);
     }
 }
