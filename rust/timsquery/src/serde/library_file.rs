@@ -87,8 +87,6 @@ pub enum FileReadingExtras {
 pub enum ElutionGroupCollection {
     StringLabels(Vec<Target<String>>, Option<FileReadingExtras>),
     MzpafLabels(Vec<Target<IonAnnot>>, Option<FileReadingExtras>),
-    TinyIntLabels(Vec<Target<u8>>, Option<FileReadingExtras>),
-    IntLabels(Vec<Target<u32>>, Option<FileReadingExtras>),
 }
 
 impl ElutionGroupCollection {
@@ -96,8 +94,6 @@ impl ElutionGroupCollection {
         match self {
             ElutionGroupCollection::StringLabels(egs, _) => egs.len(),
             ElutionGroupCollection::MzpafLabels(egs, _) => egs.len(),
-            ElutionGroupCollection::TinyIntLabels(egs, _) => egs.len(),
-            ElutionGroupCollection::IntLabels(egs, _) => egs.len(),
         }
     }
 
@@ -120,36 +116,26 @@ impl ElutionGroupCollection {
     }
 
     fn try_deser_inputed(content: &str) -> Result<Self, TargetReadingError> {
-        // We can try from smallest to largest overhead
-        // Here we try to do the deser into ElutionGroupInput variants first
         debug!("Attempting deserialization of elution group inputs");
-        debug!("Attempting to deserialize elution group inputs with tiny int labels");
-        if let Ok(eg_inputs) = serde_json::from_str::<Vec<ElutionGroupInput<u8>>>(content) {
-            // Here we can handle filling the inputs if they are needed...
-            let eg_inputs = if eg_inputs.first().is_some_and(|x| x.needs_fragment_labels()) {
-                debug!("Filling missing fragment labels with tiny int labels");
-                eg_inputs
-                    .into_iter()
-                    .map(|x| x.try_fill_labels_u8())
-                    .collect::<Result<_, _>>()
-            } else {
-                Ok(eg_inputs)
-            };
-
-            let out: Result<Vec<Target<u8>>, ElutionGroupInputError> = eg_inputs?
-                .into_iter()
-                .map(<ElutionGroupInput<u8> as TryInto<Target<u8>>>::try_into)
-                .collect();
-            return Ok(ElutionGroupCollection::TinyIntLabels(out?, None));
-        }
-        debug!("Attempting to deserialize elution group inputs with int labels");
-        if let Ok(eg_inputs) = serde_json::from_str::<Vec<ElutionGroupInput<u32>>>(content) {
-            let out: Result<Vec<Target<u32>>, ElutionGroupInputError> =
-                eg_inputs.into_iter().map(|x| x.try_into()).collect();
-            return Ok(ElutionGroupCollection::IntLabels(out?, None));
-        }
-        debug!("Attempting to deserialize elution group inputs with mzpaf labels");
+        // Fragments with no labels at all. Minted as unknown-ion annotations
+        // (`?1`, `?2`, ...) rather than as integers: the arena has no
+        // integer-labelled variant, so integer labels were built and then
+        // thrown away, which made this input unloadable.
+        //
+        // Tried first because `fragment_labels: null` deserializes against
+        // every label type, so a later arm would claim it and mint the wrong
+        // kind.
         if let Ok(eg_inputs) = serde_json::from_str::<Vec<ElutionGroupInput<IonAnnot>>>(content) {
+            if eg_inputs.first().is_some_and(|x| x.needs_fragment_labels()) {
+                debug!("Filling missing fragment labels with unknown-ion annotations");
+                let filled: Result<Vec<_>, _> = eg_inputs
+                    .into_iter()
+                    .map(|x| x.try_fill_labels_annot())
+                    .collect();
+                let out: Result<Vec<Target<IonAnnot>>, ElutionGroupInputError> =
+                    filled?.into_iter().map(|x| x.try_into()).collect();
+                return Ok(ElutionGroupCollection::MzpafLabels(out?, None));
+            }
             let out: Result<Vec<Target<IonAnnot>>, ElutionGroupInputError> =
                 eg_inputs.into_iter().map(|x| x.try_into()).collect();
             return Ok(ElutionGroupCollection::MzpafLabels(out?, None));
@@ -164,18 +150,10 @@ impl ElutionGroupCollection {
     }
 
     fn try_deser_direct(content: &str) -> Result<Self, TargetReadingError> {
-        // We can try from smallest to largest overhead
-        // Here we try to do the direct deser into ElutionGroupCollection variants
-        // u8 -> u32 -> IonAnnot -> String
+        // Ion annotations first, then opaque strings. Integer label types are
+        // not tried: the arena has no variant for them, so claiming the input
+        // here only turned a loadable file into a rejection.
         debug!("Attempting direct deserialization of elution groups");
-        debug!("Attempting to deserialize elution groups with tiny int labels");
-        if let Ok(egs) = serde_json::from_str::<Vec<Target<u8>>>(content) {
-            return Ok(ElutionGroupCollection::TinyIntLabels(egs, None));
-        }
-        debug!("Attempting to deserialize elution groups with int labels");
-        if let Ok(egs) = serde_json::from_str::<Vec<Target<u32>>>(content) {
-            return Ok(ElutionGroupCollection::IntLabels(egs, None));
-        }
         debug!("Attempting to deserialize elution groups with mzpaf labels");
         if let Ok(egs) = serde_json::from_str::<Vec<Target<IonAnnot>>>(content) {
             return Ok(ElutionGroupCollection::MzpafLabels(egs, None));
@@ -406,10 +384,6 @@ impl TargetTable {
                 }
                 geom.seal()?;
                 Ok(TargetTable::Str { geom })
-            }
-            ElutionGroupCollection::TinyIntLabels(..) | ElutionGroupCollection::IntLabels(..) => {
-                warn!("integer-labelled libraries have no TargetTable variant; rejecting");
-                Err(TargetReadingError::UnableToParseElutionGroups)
             }
         }
     }
@@ -654,6 +628,30 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/diann_io_files")
             .join(name)
+    }
+
+    /// JSON naming no fragment labels loads, with labels minted.
+    ///
+    /// The arena has no integer-labelled variant, so minting `u8` labels for
+    /// this input built something that was then rejected -- and
+    /// `try_fill_labels_annot`, which mints the loadable kind, had no callers at
+    /// all. Unknown-ion annotations are what a fragment with no stated identity
+    /// gets everywhere else in the tree.
+    #[test]
+    fn json_without_fragment_labels_loads_with_minted_ones() {
+        let arena = super::read_targets(fixture("labelless_targets.json"))
+            .expect("label-less JSON is a supported input");
+        let super::TargetTable::Mzpaf { geom, .. } = arena else {
+            panic!("minted labels carry ion chemistry, so this is the Mzpaf arena");
+        };
+        assert_eq!(geom.n_rows(), 1);
+        let row = geom.rows().next().unwrap();
+        let labels: Vec<String> = geom
+            .frag_labels(row)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(labels, ["?1", "?2"], "one unknown ion per fragment");
     }
 
     /// Every format goes through `registry()`. Two of them used to be
