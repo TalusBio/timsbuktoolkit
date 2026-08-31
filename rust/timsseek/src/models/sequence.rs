@@ -678,6 +678,58 @@ mod tests {
         }
     }
 
+    /// What a modification may be spelled, and what it may not.
+    ///
+    /// Pinned as a table because the failures are the valuable half, and because
+    /// each is a plausible "fix" someone could add on seeing a library rejected.
+    /// Accepting any of them would be worse than rejecting it: a spelling that
+    /// works here and nowhere else teaches a user that their file is fine, and
+    /// the next tool disagrees. `[UNIMOD:Carbamidomethyl]` is the trap that
+    /// matters -- it looks like the accession form and would imply
+    /// `[UNIMOD:CAM]` works too, which no reading of the spec allows.
+    #[test]
+    fn only_the_spelled_out_proforma_forms_are_accepted() {
+        let accepted = [
+            // §6.2.1: a name takes the one-letter prefix, or none at all.
+            "PEPTC[U:Carbamidomethyl]IDEK",
+            "PEPTC[Carbamidomethyl]IDEK",
+            // §6.2.2: an accession takes the long prefix.
+            "PEPTC[UNIMOD:4]IDEK",
+            // Not §6.2.2-conformant -- it calls `[U:35]` incorrect outright --
+            // but accepted, because this reads libraries other tools wrote and
+            // repairing an input is not the same as blessing it. Nothing here
+            // ever emits this spelling.
+            "PEPTC[U:4]IDEK",
+        ];
+        for raw in accepted {
+            let normalized = normalize_to_proforma(raw);
+            assert!(
+                parse_sequence(&normalized).is_some(),
+                "{raw:?} should parse (normalized to {normalized:?})"
+            );
+        }
+
+        let rejected = [
+            // A name under the long prefix: §6.2.1 gives names a letter and
+            // §6.2.2 governs accessions, so this is in neither.
+            "PEPTC[UNIMOD:Carbamidomethyl]IDEK",
+            // Synonyms and abbreviations, which §6.2.1.2 excludes: the Unimod
+            // OBO `name` tag is the only accepted spelling.
+            "PEPTC[U:CAM]IDEK",
+            "PEPTC[CAM]IDEK",
+            "PEPTC[UNIMOD:CAM]IDEK",
+            // An accession that does not exist.
+            "PEPTC[UNIMOD:999999]IDEK",
+        ];
+        for raw in rejected {
+            let normalized = normalize_to_proforma(raw);
+            assert!(
+                parse_sequence(&normalized).is_none(),
+                "{raw:?} should NOT parse (normalized to {normalized:?})"
+            );
+        }
+    }
+
     /// Two spellings of one modification agree on the residue and the count.
     /// Names go through mzcore and accessions through the byte walk, so this is
     /// the one place the two parsers are compared on the same input.

@@ -160,12 +160,18 @@ rt = "Unrestricted"
         toml::from_str(&format!("{extra}{base}")).expect("test configuration must parse")
     }
 
-    /// The invocation the README documented before the rename, which spells all
-    /// three inputs with their deprecated aliases. Existing scripts and
-    /// container entrypoints still contain it.
+    /// The deprecated aliases still resolve, and to exactly what the canonical
+    /// spellings do.
+    ///
+    /// The values are the invocation the README documented before the rename,
+    /// because that is the one still sitting in scripts and container
+    /// entrypoints. Asserting the two spellings against each other proves the
+    /// aliases are wired up; asserting one of them against literals proves both
+    /// are wired to the right place, which agreement alone would not -- two
+    /// spellings that resolved to the same wrong value would pass.
     #[test]
-    fn readme_invocation_resolves_through_the_deprecated_aliases() {
-        let resolved = resolve(
+    fn the_deprecated_aliases_resolve_exactly_as_the_canonical_spellings_do() {
+        let aliased = resolve(
             &[
                 "--speclib-file",
                 "vimentin.ndjson",
@@ -176,40 +182,24 @@ rt = "Unrestricted"
             ],
             Config::default_config(),
         )
-        .unwrap();
-
-        assert_eq!(resolved.speclib_uri, "vimentin.ndjson");
-        assert_eq!(resolved.output_uri, "vimentin_search_results");
-        assert_eq!(resolved.raw_inputs, vec!["my_data.d".to_string()]);
-    }
-
-    #[test]
-    fn canonical_spellings_resolve_to_the_same_inputs_as_the_aliases() {
-        let aliased = resolve(
-            &[
-                "--speclib-file",
-                "lib.ndjson",
-                "--output-dir",
-                "out",
-                "--dotd-files",
-                "a.d",
-            ],
-            Config::default_config(),
-        )
-        .unwrap();
+        .expect("the README invocation resolves");
         let canonical = resolve(
             &[
                 "--speclib-uri",
-                "lib.ndjson",
+                "vimentin.ndjson",
                 "--output-uri",
-                "out",
+                "vimentin_search_results",
                 "--raw-inputs",
-                "a.d",
+                "my_data.d",
             ],
             Config::default_config(),
         )
-        .unwrap();
+        .expect("the canonical invocation resolves");
+
         assert_eq!(aliased, canonical);
+        assert_eq!(aliased.speclib_uri, "vimentin.ndjson");
+        assert_eq!(aliased.output_uri, "vimentin_search_results");
+        assert_eq!(aliased.raw_inputs, vec!["my_data.d".to_string()]);
     }
 
     #[test]
