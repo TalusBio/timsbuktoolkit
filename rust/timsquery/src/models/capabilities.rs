@@ -38,7 +38,12 @@ pub enum DecoyStrategy {
 /// The unified ±CH2 mass-shift offset (Da) and variant count for lazily-generated
 /// decoys. Single source of truth for timsseek's `map_decoy_strategy`, which
 /// is the only production caller that turns decoys on.
-pub const DECOY_CH2_OFFSET_DA: f64 = 14.0;
+///
+/// Monoisotopic CH2: `12.0` (12-C, exact by definition) `+ 2 * 1.00782503207` (1-H).
+/// This was `14.0`, which is 15.65 mDa light of the group it is named after, or
+/// 22 ppm at m/z 700 charge 1 against a default 15 ppm tolerance. Every decoy m/z
+/// moves by that much.
+pub const DECOY_CH2_OFFSET_DA: f64 = 14.01565006414;
 pub const DECOY_N_DECOYS: u8 = 2;
 
 impl TargetCapabilities {
