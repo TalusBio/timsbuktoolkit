@@ -1,4 +1,3 @@
-use msspeculator_inference::MsContext;
 use serde::{
     Deserialize,
     Serialize,
@@ -43,103 +42,6 @@ pub struct BuildConfig {
     pub library: Option<LibraryConfig>,
 }
 
-/// What acquisition the model should predict for.
-///
-/// One type for the two spellings a user has, so "a named setup" and "a
-/// collision energy" cannot both be in force at once. They were two independent
-/// `Option` fields, resolved independently against the configuration file, and a
-/// `--nce` given alongside a configured setup was discarded without a word.
-///
-/// [`FromStr`](std::str::FromStr) so a malformed spelling fails while the
-/// command line is being parsed rather than minutes into a build.
-#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
-#[serde(rename_all = "snake_case")]
-pub enum Acquisition {
-    /// A setup name fitted into the model artifact.
-    Named(String),
-    /// The four acquisition factors, spelled out.
-    Factors {
-        instrument: String,
-        detector: String,
-        fragmentation: String,
-        energy: Option<f32>,
-    },
-    /// Collision energy alone, for an otherwise unknown setup.
-    Nce(f32),
-}
-
-impl Acquisition {
-    /// The shape msspeculator takes. `Nce` becomes `Factors` with the three
-    /// unknown factors empty, which is how the artifact's fallback is selected.
-    pub fn to_ms_context(&self) -> MsContext {
-        match self {
-            Self::Named(name) => MsContext::Named(name.clone()),
-            Self::Factors {
-                instrument,
-                detector,
-                fragmentation,
-                energy,
-            } => MsContext::Factors {
-                instrument: instrument.clone(),
-                detector: detector.clone(),
-                fragmentation: fragmentation.clone(),
-                energy: *energy,
-            },
-            Self::Nce(energy) => MsContext::Factors {
-                instrument: String::new(),
-                detector: String::new(),
-                fragmentation: String::new(),
-                energy: Some(*energy),
-            },
-        }
-    }
-}
-
-impl std::str::FromStr for Acquisition {
-    type Err = String;
-
-    /// A bare name, or four `::`-separated factors. The separator is what tells
-    /// them apart: a setup name is a label, and nothing about it parses as a
-    /// factor list.
-    fn from_str(spec: &str) -> Result<Self, Self::Err> {
-        if !spec.contains("::") {
-            if spec.trim().is_empty() {
-                return Err(
-                    "expected a setup name or INSTRUMENT::DETECTOR::FRAGMENTATION::ENERGY"
-                        .to_string(),
-                );
-            }
-            return Ok(Self::Named(spec.to_string()));
-        }
-        let parts: Vec<&str> = spec.split("::").collect();
-        let [instrument, detector, fragmentation, energy] = parts.as_slice() else {
-            return Err(format!(
-                "expected four ::-separated factors \
-                 (INSTRUMENT::DETECTOR::FRAGMENTATION::ENERGY), got {}",
-                parts.len()
-            ));
-        };
-        // An empty energy is legal and means "the artifact's own"; a non-numeric
-        // one is a typo worth reporting.
-        let energy = if energy.trim().is_empty() {
-            None
-        } else {
-            Some(
-                energy
-                    .trim()
-                    .parse::<f32>()
-                    .map_err(|_| format!("energy {energy:?} is not a number"))?,
-            )
-        };
-        Ok(Self::Factors {
-            instrument: instrument.to_string(),
-            detector: detector.to_string(),
-            fragmentation: fragmentation.to_string(),
-            energy,
-        })
-    }
-}
-
 /// How to predict a library.
 ///
 /// Every field is optional and falls through to msspeculator's own default, so
@@ -167,13 +69,6 @@ pub struct LibraryConfig {
     pub variable_mods: Option<Vec<String>>,
     #[serde(default)]
     pub max_variable_mods: Option<usize>,
-    /// One field, so the two ways of naming an acquisition cannot both be set.
-    /// Two independent fields let a configured one and a flagged other resolve
-    /// separately, and then one of them silently lost.
-    #[serde(default)]
-    pub acquisition: Option<Acquisition>,
-    #[serde(default)]
-    pub chrom_context: Option<String>,
     #[serde(default)]
     pub min_intensity: Option<f64>,
     #[serde(default)]

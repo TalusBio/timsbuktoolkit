@@ -22,7 +22,6 @@ use tracing::info;
 use crate::build_progress::BuildProgress;
 use crate::cli::BuildLibraryArgs;
 use crate::config::{
-    Acquisition,
     BuildConfig,
     LibraryConfig,
 };
@@ -58,8 +57,6 @@ pub struct ResolvedBuild {
     pub fixed_mods: Vec<String>,
     pub variable_mods: Vec<String>,
     pub max_variable_mods: usize,
-    pub acquisition: Option<Acquisition>,
-    pub chrom_context: Option<String>,
     pub min_intensity: f64,
     pub max_fragments: Option<usize>,
     pub decoys: bool,
@@ -79,8 +76,6 @@ pub fn resolve_build(args: &BuildLibraryArgs, config: &BuildConfig) -> ResolvedB
         fixed_mods,
         variable_mods,
         max_variable_mods,
-        acquisition,
-        chrom_context,
         min_intensity,
         max_fragments,
         decoys,
@@ -116,14 +111,6 @@ pub fn resolve_build(args: &BuildLibraryArgs, config: &BuildConfig) -> ResolvedB
             .max_variable_mods
             .or(max_variable_mods)
             .unwrap_or(DEFAULT_MAX_VARIABLE_MODS),
-        // One chain for one setting, so a `--nce` given against a configured
-        // setup replaces it instead of resolving separately and losing.
-        acquisition: args
-            .ms_context
-            .clone()
-            .or_else(|| args.nce.map(Acquisition::Nce))
-            .or(acquisition),
-        chrom_context: args.chrom_context.clone().or(chrom_context),
         min_intensity: args
             .min_intensity
             .or(min_intensity)
@@ -194,10 +181,6 @@ pub fn run(resolved: &ResolvedBuild) -> Result<(), CliError> {
     reject_remote_paths(resolved)?;
     reject_existing_output(resolved)?;
     let model = parse_model_source(&resolved.model)?;
-    let ms_context = resolved
-        .acquisition
-        .as_ref()
-        .map(Acquisition::to_ms_context);
 
     info!(
         "Predicting a library from {} with {}",
@@ -215,9 +198,13 @@ pub fn run(resolved: &ResolvedBuild) -> Result<(), CliError> {
             model,
             progress: Some(&report),
             fasta: &resolved.fasta,
+            // No acquisition, activation or chromatography context: the model
+            // artifact's own defaults. Selecting a different one is a decision
+            // about the model, and this command chooses a model rather than
+            // reconfiguring one.
             activation: None,
-            ms_context: ms_context.as_ref(),
-            chrom_context: resolved.chrom_context.as_deref(),
+            ms_context: None,
+            chrom_context: None,
             min_intensity: resolved.min_intensity,
             missed_cleavages: resolved.missed_cleavages,
             min_length: resolved.min_length,
@@ -340,55 +327,6 @@ mod tests {
             off.fixed_mods.is_empty(),
             "--no-fixed-mods means none, not the default"
         );
-    }
-
-    /// The two acquisition spellings reach one field, so a flag replaces a
-    /// configured setup instead of resolving beside it and losing. With two
-    /// independent fields, `--nce` against a configured `ms_context` was
-    /// discarded and the build failed reporting no acquisition setups.
-    #[test]
-    fn a_flagged_acquisition_replaces_a_configured_one() {
-        let config = build_config("[library]\nacquisition = { named = \"astral_hcd\" }\n");
-        assert_eq!(
-            resolve_build(&args(&[]), &config).acquisition,
-            Some(Acquisition::Named("astral_hcd".to_string()))
-        );
-        assert_eq!(
-            resolve_build(&args(&["--nce", "27"]), &config).acquisition,
-            Some(Acquisition::Nce(27.0)),
-            "the flag lost to the configuration file"
-        );
-        assert_eq!(
-            resolve_build(&args(&["--ms-context", "orbitrap::ft::hcd::30"]), &config).acquisition,
-            Some(Acquisition::Factors {
-                instrument: "orbitrap".to_string(),
-                detector: "ft".to_string(),
-                fragmentation: "hcd".to_string(),
-                energy: Some(30.0),
-            })
-        );
-    }
-
-    /// A malformed acquisition is a usage error, not a failure minutes into a
-    /// build, which is what moving the parse into `FromStr` buys.
-    #[test]
-    fn a_malformed_acquisition_fails_at_parse_time() {
-        #[derive(Parser, Debug)]
-        struct Wrapper {
-            #[command(flatten)]
-            args: BuildLibraryArgs,
-        }
-        let err = Wrapper::try_parse_from([
-            "build-library",
-            "--fasta",
-            "p.fasta",
-            "--out",
-            "lib.mzspeclib.txt.gz",
-            "--ms-context",
-            "orbitrap::ft::hcd",
-        ])
-        .expect_err("three factors is not four");
-        assert_eq!(err.kind(), clap::error::ErrorKind::ValueValidation);
     }
 
     #[test]

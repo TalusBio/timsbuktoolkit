@@ -1,4 +1,3 @@
-use crate::config::Acquisition;
 use clap::{
     Parser,
     ValueEnum,
@@ -262,21 +261,10 @@ pub struct BuildLibraryArgs {
     #[arg(long, value_name = "N")]
     pub max_variable_mods: Option<usize>,
 
-    /// Acquisition context: a named setup, or the factors spelled out as
-    /// "INSTRUMENT::DETECTOR::FRAGMENTATION::ENERGY".
-    ///
-    /// Parsed here, so a malformed spelling is a usage error rather than a
-    /// failure minutes into a build.
-    #[arg(long, value_name = "CONTEXT", conflicts_with = "nce")]
-    pub ms_context: Option<Acquisition>,
-    /// Collision energy only, for an otherwise unknown setup.
-    #[arg(long, value_name = "NCE", conflicts_with = "ms_context")]
-    pub nce: Option<f32>,
-    /// Named chromatography context for a real retention time. Absent means the
-    /// context-free index.
-    #[arg(long, value_name = "DATASET")]
-    pub chrom_context: Option<String>,
-
+    // No acquisition or chromatography context. The model artifact has its own
+    // default for both, and selecting a different one is a decision about the
+    // model rather than about the library this command writes -- so it belongs
+    // wherever the model is chosen, not on a second set of flags here.
     /// Drop fragments below this base-peak-relative intensity.
     #[arg(long, value_name = "FRACTION")]
     pub min_intensity: Option<f64>,

@@ -102,12 +102,9 @@ calibration_query_rt_window_minutes = 0.083333336   # 5 seconds (5 / 60)
 # min_intensity = 0.01
 # max_fragments = 20
 # decoys = true
-## What acquisition to predict for. One key, one of three shapes, because a
-## named setup and a bare collision energy cannot both be in force:
-# acquisition = { named = "setup-name" }
-# acquisition = { factors = { instrument = "orbitrap", detector = "ft", fragmentation = "hcd", energy = 30.0 } }
-# acquisition = { nce = 27.0 }
-# chrom_context = "dataset-name"
+## Acquisition and chromatography context are not settable: a build uses the
+## model artifact's own defaults. Choosing a different one is a decision about
+## the model, made by `model` above.
 
 
 ## Staging controls for S3/remote raw inputs (all optional).

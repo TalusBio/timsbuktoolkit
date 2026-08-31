@@ -89,9 +89,15 @@ timsseek --raw-inputs s3://bkt/sample.d.tar \
          --output-uri s3://bkt/runs/out
 ```
 
-`timsseek build-library` is local-only: `--fasta` and `--out` are filesystem paths and a remote URI is rejected rather than staged.
-
 A proteome build takes minutes and reports as it goes: a progress bar per phase on a terminal, a log line every 30s when stderr is redirected. Per-phase wall times land in the `.config.json` sidecar.
+
+Not supported by `build-library` right now, having been dropped along with the separate `speclib_build_cli`:
+
+- **Remote paths.** `--fasta` and `--out` are filesystem paths; a remote URI is rejected by name rather than staged. Build locally and copy.
+- **Acquisition and chromatography context.** A build uses the model artifact's own defaults; picking a different one is a decision about the model.
+- **A peptide list instead of a FASTA.** Digestion is the only input path.
+- **Fragment and precursor filters** beyond `--min-intensity` and `--max-fragments`: no minimum transition count, and no precursor or fragment *m/z* bounds.
+- **A choice of decoy method.** `--decoys` is pseudo-reversal; the old `reverse` / `edge_mutate` selection is gone.
 
 Auth via AWS default chain. MinIO/R2: set `AWS_ENDPOINT_URL`. See `docs/development.md` for `[staging]` config + env var list.
 
