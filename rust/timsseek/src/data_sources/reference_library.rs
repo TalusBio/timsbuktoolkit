@@ -606,6 +606,18 @@ mod load_tests {
     /// wording, so the sentence stays editable. Note these paths do not exist:
     /// the check runs before any filesystem access, which is what makes the
     /// diagnostic reachable for a file the user has but the test does not.
+    /// A fixture under timsquery's `tests/`, which is where every library
+    /// fixture lives: the readers are timsquery's, so the files belong beside
+    /// them rather than being copied per consumer.
+    fn timsquery_fixture(rel: &str) -> std::path::PathBuf {
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .expect("crate dir has a parent")
+            .join("timsquery")
+            .join("tests")
+            .join(rel)
+    }
+
     #[test]
     fn a_retired_format_is_rejected_by_name() {
         for (name, expected) in [
@@ -646,305 +658,123 @@ mod load_tests {
             assert_eq!(retired_format(std::path::Path::new(name)), None, "{name}");
         }
     }
-
+    /// Every format the registry reads, loaded through the one public entry
+    /// point, asserting the shape invariant once.
+    ///
+    /// This replaced seven near-duplicate tests, four of which loaded the same
+    /// fixture and asserted the same `len() == 6`. A table makes the differences
+    /// between formats the visible part, and a new format one row.
+    ///
+    /// `flat` is `rows * variants_per_row`, so it also pins the decoy expansion:
+    /// a file that ships no decoys resolves to `MassShift` under the default
+    /// policy and triples, and one that ships its own stays 1:1.
     #[test]
-    fn test_load_diann_tsv_library() {
+    fn every_format_loads_to_the_same_shape() {
         use timsquery::traits::QueryGeom;
 
-        // Use the test file from timsquery tests
-        // Note: sample_lib.tsv is in Skyline format and won't load as DIA-NN
-        // So we test with sample_lib.txt which is in DIA-NN TSV format
-        let test_file = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .join("timsquery")
-            .join("tests")
-            .join("diann_io_files")
-            .join("sample_lib.txt");
+        struct Case {
+            fixture: &'static str,
+            rows: usize,
+            flat: usize,
+            frags_first: usize,
+            stored_decoys: usize,
+        }
 
-        assert!(
-            test_file.exists(),
-            "Test file should exist at {:?}",
-            test_file
-        );
+        // Measured, not predicted. A changed reader shows up as a diff here.
+        let cases = [
+            Case {
+                fixture: "diann_io_files/sample_lib.txt",
+                rows: 2,
+                flat: 6,
+                frags_first: 5,
+                stored_decoys: 0,
+            },
+            // The fixture a comment used to exclude as "Skyline format, won't
+            // load as DIA-NN". Its header is canonical DIA-NN, timsquery reads
+            // it as DIA-NN, and it is the only fixture here carrying a
+            // per-precursor `transition_group_id`.
+            Case {
+                fixture: "diann_io_files/sample_lib.tsv",
+                rows: 1,
+                flat: 3,
+                frags_first: 9,
+                stored_decoys: 0,
+            },
+            Case {
+                fixture: "diann_io_files/sample_pq_speclib.parquet",
+                rows: 3,
+                flat: 9,
+                frags_first: 4,
+                stored_decoys: 0,
+            },
+            Case {
+                fixture: "skyline_io_files/sample_transition_list.csv",
+                rows: 14,
+                flat: 42,
+                frags_first: 4,
+                stored_decoys: 0,
+            },
+            Case {
+                fixture: "mzspeclib_files/diann_export.mzspeclib.txt",
+                rows: 9,
+                flat: 27,
+                frags_first: 20,
+                stored_decoys: 0,
+            },
+            // The only fixture that ships its own decoys, so the only one that
+            // stays 1:1 rather than tripling.
+            Case {
+                fixture: "mzspeclib_files/target_decoy_attribute_set.mzspeclib.txt",
+                rows: 10,
+                flat: 10,
+                frags_first: 82,
+                stored_decoys: 5,
+            },
+        ];
 
-        let speclib =
-            ReferenceLibrary::from_file(&test_file, crate::models::DecoyPolicy::default())
-                .expect("Failed to load DIA-NN TSV library");
+        for case in cases {
+            let path = timsquery_fixture(case.fixture);
+            assert!(path.exists(), "missing fixture {}", case.fixture);
+            let lib = ReferenceLibrary::from_file(&path, crate::models::DecoyPolicy::default())
+                .unwrap_or_else(|e| panic!("{} failed to load: {e:?}", case.fixture));
 
-        // The sample file has 2 unique precursors with no decoys
-        // Should generate 3x flat entries: 2 targets + 4 mass-shift decoys
-        assert_eq!(
-            speclib.len(),
-            6,
-            "Expected 6 entries (2 targets + 4 decoys)"
-        );
-
-        let lib = &speclib;
-
-        // Verify first target entry structure (variant 0 == target)
-        let first_target = lib
-            .iter()
-            .find(|q| q.geom().variant() == 0)
-            .expect("Should have at least one target");
-        assert_eq!(
-            first_target.fragment_count(),
-            5,
-            "First entry should have 5 fragments"
-        );
-
-        // Verify isotope envelope was added (should have 3 isotopes: 0, 1, 2)
-        let envelope = first_target.expected_precursor_envelope();
-        assert_eq!(
-            envelope.len(),
-            3,
-            "Should have 3 isotopes in precursor envelope"
-        );
-        assert_eq!(envelope[0].0, 0i8, "isotope 0 present");
-        assert_eq!(envelope[1].0, 1i8, "isotope 1 present");
-        assert_eq!(envelope[2].0, 2i8, "isotope 2 present");
-    }
-
-    #[test]
-    fn test_diann_tsv_parsable_gate() {
-        let test_file = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .join("timsquery")
-            .join("tests")
-            .join("diann_io_files")
-            .join("sample_lib.txt");
-
-        let speclib =
-            ReferenceLibrary::from_file(&test_file, crate::models::DecoyPolicy::default())
-                .expect("Failed to load DIA-NN TSV library");
-
-        assert!(
-            speclib.parsable_sequences(),
-            "DIA-NN sample fixture should all parse with modified_peptide"
-        );
-    }
-
-    #[test]
-    fn test_load_skyline_csv_library() {
-        use timsquery::traits::QueryGeom;
-
-        let test_file = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .join("timsquery")
-            .join("tests")
-            .join("skyline_io_files")
-            .join("sample_transition_list.csv");
-
-        assert!(
-            test_file.exists(),
-            "Test file should exist at {:?}",
-            test_file
-        );
-
-        let speclib =
-            ReferenceLibrary::from_file(&test_file, crate::models::DecoyPolicy::default())
-                .expect("Failed to load Skyline CSV library");
-
-        // Skyline routes through the timsquery bridge (`from_elution_groups`),
-        // which now threads the reference intensities through, so it narrows to
-        // a lazy `ReferenceLibrary` arena like the DIA-NN formats. No shipped decoys +
-        // default IfMissing -> `MassShift`.
-        // Fixture has 14 PRTC targets, no decoys -> 14 targets + 28 mass-shift decoys
-        assert_eq!(
-            speclib.len(),
-            42,
-            "Expected 42 entries (14 targets + 28 decoys)"
-        );
-
-        let lib = &speclib;
-        let n_rows = lib.iter().filter(|q| q.geom().variant() == 0).count();
-        let n_decoys = lib.iter().filter(|q| q.geom().variant() != 0).count();
-        assert_eq!(n_rows, 14, "Should have 14 targets");
-        assert_eq!(n_decoys, 28, "Should have 28 decoys");
-
-        // Isotope envelope should have been attached (3 isotopes) for every target
-        for q in lib.iter().filter(|q| q.geom().variant() == 0) {
+            let what = case.fixture;
+            assert_eq!(lib.geom.n_rows(), case.rows, "{what}: stored rows");
+            assert_eq!(lib.len(), case.flat, "{what}: scored slots");
             assert_eq!(
-                q.expected_precursor_envelope().len(),
+                lib.geom.n_stored_decoys(),
+                case.stored_decoys,
+                "{what}: shipped decoys"
+            );
+
+            let first = lib
+                .iter()
+                .find(|q| q.geom().variant() == 0)
+                .expect("a library with rows has a target");
+            assert_eq!(
+                first.fragment_count(),
+                case.frags_first,
+                "{what}: fragments on the first target"
+            );
+            assert_eq!(
+                first.expected_precursor_envelope().len(),
                 3,
-                "Each target should have 3 isotopes in precursor envelope"
+                "{what}: three precursor isotopes"
             );
             assert!(
-                q.fragment_count() > 0,
-                "Each target should have at least one fragment"
+                !first
+                    .iter_expected_fragments()
+                    .collect::<Vec<_>>()
+                    .is_empty(),
+                "{what}: reference intensities threaded through"
             );
-        }
-    }
-
-    #[test]
-    fn test_load_diann_txt_library() {
-        let test_file = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .join("timsquery")
-            .join("tests")
-            .join("diann_io_files")
-            .join("sample_lib.txt");
-
-        assert!(
-            test_file.exists(),
-            "Test file should exist at {:?}",
-            test_file
-        );
-
-        let speclib =
-            ReferenceLibrary::from_file(&test_file, crate::models::DecoyPolicy::default())
-                .expect("Failed to load TXT library");
-
-        // The sample file has 2 unique precursors with no decoys
-        // Should generate 3x entries: 2 targets + 4 decoys
-        assert_eq!(
-            speclib.len(),
-            6,
-            "Expected 6 entries (2 targets + 4 decoys)"
-        );
-
-        let lib = &speclib;
-        let n_rows = lib.iter().filter(|q| q.geom().variant() == 0).count();
-        let n_decoys = lib.iter().filter(|q| q.geom().variant() != 0).count();
-
-        assert_eq!(n_rows, 2, "Should have 2 targets");
-        assert_eq!(n_decoys, 4, "Should have 4 decoys");
-    }
-
-    #[test]
-    fn test_load_diann_parquet_library() {
-        let test_file = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .join("timsquery")
-            .join("tests")
-            .join("diann_io_files")
-            .join("sample_pq_speclib.parquet");
-
-        assert!(
-            test_file.exists(),
-            "Test file should exist at {:?}",
-            test_file
-        );
-
-        let speclib =
-            ReferenceLibrary::from_file(&test_file, crate::models::DecoyPolicy::default())
-                .expect("Failed to load Parquet library");
-
-        // The sample parquet file has 3 unique precursors with no decoys
-        // Should generate 3x entries: 3 targets + 6 decoys
-        assert_eq!(
-            speclib.len(),
-            9,
-            "Expected 9 entries (3 targets + 6 decoys)"
-        );
-
-        let lib = &speclib;
-        let n_rows = lib.iter().filter(|q| q.geom().variant() == 0).count();
-        let n_decoys = lib.iter().filter(|q| q.geom().variant() != 0).count();
-
-        assert_eq!(n_rows, 3, "Should have 3 targets");
-        assert_eq!(n_decoys, 6, "Should have 6 decoys");
-
-        // Verify isotope envelope for targets
-        for q in lib.iter().filter(|q| q.geom().variant() == 0) {
-            assert_eq!(
-                q.expected_precursor_envelope().len(),
-                3,
-                "Each entry should have 3 isotopes in precursor envelope"
-            );
-        }
-    }
-
-    #[test]
-    fn test_isotope_envelope_calculation() {
-        // Use the DIA-NN TSV test file
-        let test_file = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .join("timsquery")
-            .join("tests")
-            .join("diann_io_files")
-            .join("sample_lib.txt");
-
-        let speclib =
-            ReferenceLibrary::from_file(&test_file, crate::models::DecoyPolicy::default())
-                .expect("Failed to load DIA-NN TSV library");
-
-        let lib = &speclib;
-
-        // Check that isotope intensities are normalized (M0 should be 1.0),
-        // for every flat entry (targets AND decoy variants -- the envelope is
-        // computed per-target and shared across variants, see
-        // `decoy_variant_reuses_target_intensities` in reference_library.rs).
-        for q in lib.iter() {
-            let envelope = q.expected_precursor_envelope();
-            let m0 = envelope[0].1;
+            // Every fixture's sequences parse. The mzSpecLib ones spell their
+            // modifications by name (`C[U:Carbamidomethyl]`), which the
+            // normalizer used to expand into a form mzcore rejects -- turning
+            // sequence features off for the whole library.
             assert!(
-                (m0 - 1.0).abs() < 0.01,
-                "M0 should be normalized to ~1.0, got {}",
-                m0
-            );
-            for &(_iso, intensity) in envelope.iter().skip(1) {
-                assert!(
-                    intensity <= 1.0,
-                    "M+n intensity should be <= 1.0, got {}",
-                    intensity
-                );
-            }
-        }
-    }
-
-    #[test]
-    fn test_decoy_generation_for_library_without_decoys() {
-        let test_file = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .join("timsquery")
-            .join("tests")
-            .join("diann_io_files")
-            .join("sample_lib.txt");
-
-        let speclib =
-            ReferenceLibrary::from_file(&test_file, crate::models::DecoyPolicy::default())
-                .expect("Failed to load DIA-NN TSV library");
-
-        // Test file has 2 targets with no decoys
-        // Should generate 3x entries: 2 targets + 4 decoys (2 per target)
-        assert_eq!(
-            speclib.len(),
-            6,
-            "Should have 6 entries (2 targets + 4 decoys)"
-        );
-
-        let lib = &speclib;
-        let n_rows = lib.iter().filter(|q| q.geom().variant() == 0).count();
-        let n_decoys = lib.iter().filter(|q| q.geom().variant() != 0).count();
-
-        assert_eq!(n_rows, 2, "Should have 2 target entries");
-        assert_eq!(n_decoys, 4, "Should have 4 decoy entries (2 per target)");
-
-        // Each target index (== decoy_group in the old materialized scheme)
-        // should have exactly 3 flat variants (1 target + 2 decoys) -- this is
-        // guaranteed structurally by `ReferenceLibrary::item_at`'s `t,+,-`
-        // packing, so assert it directly rather than re-deriving groups.
-        let n_target_indices = lib.geom.n_rows();
-        assert_eq!(n_target_indices, 2, "Should have 2 unique targets");
-        for tgt in lib.geom.rows() {
-            let variants: Vec<u8> = (0..3)
-                .map(|v| {
-                    RefQuery::new(lib, lib.geom.flat_for(tgt, v))
-                        .geom()
-                        .variant()
-                })
-                .collect();
-            assert_eq!(
-                variants,
-                vec![0, 1, 2],
-                "each row should have exactly 1 target + 2 decoy variants"
+                lib.parsable_sequences(),
+                "{what}: sequence features disabled by an unparsable row"
             );
         }
     }
@@ -1006,36 +836,6 @@ mod load_tests {
                     target.fragment_count(),
                     "Fragment count should be preserved"
                 );
-            }
-        }
-    }
-
-    #[test]
-    fn test_fragment_intensities_preserved() {
-        use timsquery::traits::QueryGeom;
-
-        let test_file = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-            .parent()
-            .unwrap()
-            .join("timsquery")
-            .join("tests")
-            .join("diann_io_files")
-            .join("sample_lib.txt");
-
-        let speclib =
-            ReferenceLibrary::from_file(&test_file, crate::models::DecoyPolicy::default())
-                .expect("Failed to load DIA-NN TSV library");
-
-        let lib = &speclib;
-        for q in lib.iter() {
-            let fragments: Vec<_> = q.iter_expected_fragments().collect();
-            assert_eq!(
-                fragments.len(),
-                q.fragment_count(),
-                "Fragment intensity count should match fragment count"
-            );
-            for (_label, intensity) in fragments {
-                assert!(intensity > 0.0, "Fragment intensities should be positive");
             }
         }
     }

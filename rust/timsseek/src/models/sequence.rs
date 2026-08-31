@@ -349,6 +349,29 @@ fn modification_to_mod(m: &mzcore::sequence::Modification) -> Option<Mod> {
     }
 }
 
+/// Rewrite `[U:<digits>]` to `[UNIMOD:<digits>]`, leaving `[U:<name>]` alone.
+///
+/// Both are valid ProForma. The expansion exists only so the byte-walk parser's
+/// `classify_mod` recognizes an accession without a second spelling to match;
+/// a name has to survive verbatim, because mzcore resolves `U:<name>` and not
+/// `UNIMOD:<name>`.
+fn expand_unimod_accessions(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(at) = rest.to_ascii_lowercase().find("[u:") {
+        let body = &rest[at + 3..];
+        let numeric = body
+            .split(']')
+            .next()
+            .is_some_and(|tag| !tag.is_empty() && tag.bytes().all(|b| b.is_ascii_digit()));
+        out.push_str(&rest[..at]);
+        out.push_str(if numeric { "[UNIMOD:" } else { "[U:" });
+        rest = body;
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Replace every occurrence of `needle` in `haystack`, matching ignoring ASCII
 /// case, with `replacement`. `needle` must be ASCII (UNIMOD tags are). ASCII-only
 /// lowercasing preserves byte length, so match indices stay aligned with the
@@ -440,7 +463,14 @@ pub fn normalize_to_proforma(raw: &str) -> String {
 
     // Normalize any pre-existing bracket casing likewise.
     let mut s = replace_ascii_ci(&s, "[unimod:", "[UNIMOD:");
-    s = replace_ascii_ci(&s, "[u:", "[UNIMOD:");
+    // `U:` is ProForma's own short spelling for UNIMOD and is expanded only for
+    // an accession, which is the form `classify_mod`'s fast path reads. A NAME
+    // is left alone: mzcore accepts `[U:Carbamidomethyl]` and rejects
+    // `[UNIMOD:Carbamidomethyl]`, so expanding it turned a sequence that parsed
+    // into one that did not -- and since the gate is library-wide, one such
+    // modification disabled sequence features for the whole file. Every
+    // mzSpecLib library naming its modifications hit this.
+    s = expand_unimod_accessions(&s);
 
     // A mod at the very start is N-terminal: ProForma wants `[UNIMOD:n]-SEQ`.
     if s.starts_with('[')
@@ -603,6 +633,57 @@ mod tests {
     #[test]
     fn normalize_plain_unchanged() {
         assert_eq!(normalize_to_proforma("PEPTIDEK"), "PEPTIDEK");
+    }
+
+    /// A UNIMOD accession is expanded, because that is the spelling the byte-walk
+    /// parser reads; a UNIMOD *name* is not, because mzcore resolves `U:<name>`
+    /// and rejects `UNIMOD:<name>`.
+    #[test]
+    fn normalize_expands_a_unimod_accession_and_leaves_a_name_alone() {
+        assert_eq!(
+            normalize_to_proforma("PEPTC[U:4]IDEK"),
+            "PEPTC[UNIMOD:4]IDEK"
+        );
+        assert_eq!(
+            normalize_to_proforma("PEPTC[u:4]IDEK"),
+            "PEPTC[UNIMOD:4]IDEK"
+        );
+        assert_eq!(
+            normalize_to_proforma("PEPTC[U:Carbamidomethyl]IDEK"),
+            "PEPTC[U:Carbamidomethyl]IDEK"
+        );
+    }
+
+    /// The regression. mzSpecLib names its modifications, so this is the spelling
+    /// every mzSpecLib library arrives in. Expanding `U:` unconditionally made
+    /// these unparsable -- and because the parse gate is library-wide, one such
+    /// modification turned sequence features off for the entire file.
+    #[test]
+    fn a_named_modification_from_mzspeclib_parses() {
+        for raw in [
+            "FAC[U:Carbamidomethyl]HSASLTVR/3",
+            "FAC[U:Carbamidomethyl]HSASLTVR",
+            "AVC[U:Carbamidomethyl]ASFSLTHR/3",
+        ] {
+            let normalized = normalize_to_proforma(raw);
+            assert!(
+                parse_sequence(&normalized).is_some(),
+                "{raw:?} normalized to {normalized:?}, which does not parse"
+            );
+        }
+    }
+
+    /// Two spellings of one modification agree on the residue and the count.
+    /// Names go through mzcore and accessions through the byte walk, so this is
+    /// the one place the two parsers are compared on the same input.
+    #[test]
+    fn a_named_and_an_accession_modification_agree() {
+        let by_name =
+            parse_sequence(&normalize_to_proforma("PEPTC[U:Carbamidomethyl]IDEK")).expect("name");
+        let by_accession =
+            parse_sequence(&normalize_to_proforma("PEPTC[U:4]IDEK")).expect("accession");
+        assert_eq!(by_name.residues, by_accession.residues);
+        assert_eq!(by_name.mods.len(), by_accession.mods.len());
     }
 
     #[test]

@@ -1,0 +1,160 @@
+<mzSpecLib>
+MS:1003186|library format version=1.0
+MS:1003188|library name=tiny
+MS:1003200|software version=0.1.0
+[1]MS:1003275|other attribute name=msspeculator:decoys.collision_policy
+[1]MS:1003276|other attribute value=skip_if_stripped_sequence_is_a_target_or_duplicate
+[2]MS:1003275|other attribute name=msspeculator:decoys.enabled
+[2]MS:1003276|other attribute value=true
+[3]MS:1003275|other attribute name=msspeculator:decoys.method
+[3]MS:1003276|other attribute value=pseudo-reverse
+[4]MS:1003275|other attribute name=msspeculator:decoys.protein_prefix
+[4]MS:1003276|other attribute value=DECOY_
+[5]MS:1003275|other attribute name=msspeculator:digestion.enzyme
+[5]MS:1003276|other attribute value=trypsin
+[6]MS:1003275|other attribute name=msspeculator:digestion.max_charge
+[6]MS:1003276|other attribute value=2
+[7]MS:1003275|other attribute name=msspeculator:digestion.max_length
+[7]MS:1003276|other attribute value=30
+[8]MS:1003275|other attribute name=msspeculator:digestion.min_charge
+[8]MS:1003276|other attribute value=2
+[9]MS:1003275|other attribute name=msspeculator:digestion.min_length
+[9]MS:1003276|other attribute value=7
+[10]MS:1003275|other attribute name=msspeculator:digestion.missed_cleavages
+[10]MS:1003276|other attribute value=0
+[11]MS:1003275|other attribute name=msspeculator:fragments.max_fragments
+[11]MS:1003276|other attribute value=4
+[12]MS:1003275|other attribute name=msspeculator:fragments.min_intensity
+[12]MS:1003276|other attribute value=0.01
+[13]MS:1003275|other attribute name=msspeculator:generator.commit
+[13]MS:1003276|other attribute value=bb8ef1220ec44b6f32d79d94f6ed9ed7016e9beb
+[14]MS:1003275|other attribute name=msspeculator:generator.tool
+[14]MS:1003276|other attribute value=msspeculator-cli library
+[15]MS:1003275|other attribute name=msspeculator:inputs.fasta
+[15]MS:1003276|other attribute value=/Users/sebastianpaez/git/temp/tbtk_build_smoke/tiny.fasta
+[16]MS:1003275|other attribute name=msspeculator:inputs.fasta_blake2b_256
+[16]MS:1003276|other attribute value=a9e70ff07e3b99d3af72c1590fec1f124a72b87b9c2486213c68c41441446088
+[17]MS:1003275|other attribute name=msspeculator:inputs.model
+[17]MS:1003276|other attribute value=builtin:small-v0
+[18]MS:1003275|other attribute name=msspeculator:inputs.model_blake2b_256
+[18]MS:1003276|other attribute value=8dc9edf567606df1ce2b98530d679ebce139f364021062b72a20d4eaca7162a3
+[19]MS:1003275|other attribute name=msspeculator:modifications.fixed
+[19]MS:1003276|other attribute value=["C[UNIMOD:4]"]
+[20]MS:1003275|other attribute name=msspeculator:modifications.max_variable_mods
+[20]MS:1003276|other attribute value=1
+[21]MS:1003275|other attribute name=msspeculator:modifications.variable
+[21]MS:1003276|other attribute value=["M[UNIMOD:35]"]
+[22]MS:1003275|other attribute name=msspeculator:output.compressed
+[22]MS:1003276|other attribute value=true
+[23]MS:1003275|other attribute name=msspeculator:output.format
+[23]MS:1003276|other attribute value=mzspeclib-text
+[24]MS:1003275|other attribute name=msspeculator:output.path
+[24]MS:1003276|other attribute value=/Users/sebastianpaez/git/temp/tbtk_build_smoke/tiny.mzspeclib.txt.gz
+[25]MS:1003275|other attribute name=msspeculator:retention.normalized.anchor_check.anchors
+[25]MS:1003276|other attribute value=[{"expected":0.0,"peptide":"TFAHTESHISK","predicted":0.11241531372070312},{"expected":100.0,"peptide":"SILDYVSLVEK","predicted":100.1274185180664}]
+[26]MS:1003275|other attribute name=msspeculator:retention.normalized.anchor_check.max_abs_error
+[26]MS:1003276|other attribute value=0.12741851806640625
+[27]MS:1003275|other attribute name=msspeculator:retention.normalized.anchor_check.on_scale
+[27]MS:1003276|other attribute value=true
+[28]MS:1003275|other attribute name=msspeculator:retention.normalized.kind
+[28]MS:1003276|other attribute value=dimensionless index, minutes-like
+[29]MS:1003275|other attribute name=msspeculator:retention.normalized.scale
+[29]MS:1003276|other attribute value=linear interpolation anchored at TFAHTESHISK = 0 and SILDYVSLVEK = 100 (PROCAL standards, PROSPECT convention)
+[30]MS:1003275|other attribute name=msspeculator:retention.normalized.term
+[30]MS:1003276|other attribute value=MS:1000896|normalized retention time
+<AttributeSet Spectrum=all>
+MS:1000511|ms level=2
+MS:1003072|spectrum origin type=MS:1003074|predicted spectrum
+MS:1003065|spectrum aggregation type=MS:1003074|predicted spectrum
+<AttributeSet Spectrum=Decoy>
+MS:1003072|spectrum origin type=MS:1003195|unnatural peptidoform decoy spectrum
+<Spectrum=1>
+MS:1003061|library spectrum name=VLSAAKPEDR/2
+[3]MS:1003275|other attribute name=msspeculator:decoy_pair_id
+[3]MS:1003276|other attribute value=2
+MS:1000041|charge state=2
+MS:1000744|selected ion m/z=543.30111279
+[1]MS:1000896|normalized retention time=1.559414
+[1]UO:0000000|unit=UO:0000031|minute
+MS:1002815|inverse reduced ion mobility=1.18237959
+MS:1003059|number of peaks=4
+<Analyte=1>
+MS:1003270|proforma peptidoform ion notation=VLSAAKPEDR/2
+MS:1000888|stripped peptide sequence=VLSAAKPEDR
+MS:1003043|number of residues=10
+MS:1003637|theoretical neutral monoisotopic mass=1084.58767264
+MS:1000885|protein accession=sp|P00001|TEST1_HUMAN
+<Peaks>
+213.159754	0.566691	b2
+437.224874	0.335188	y8^2
+516.241252	0.292336	y4
+873.442471	1.000000	y8
+
+<Spectrum=2>
+MS:1003061|library spectrum name=VDEPKAASLR/2
+MS:1003212|library attribute set name=Decoy
+[3]MS:1003275|other attribute name=msspeculator:decoy_pair_id
+[3]MS:1003276|other attribute value=2
+MS:1000041|charge state=2
+MS:1000744|selected ion m/z=543.30111279
+[1]MS:1000896|normalized retention time=11.409771
+[1]UO:0000000|unit=UO:0000031|minute
+MS:1002815|inverse reduced ion mobility=1.18975997
+MS:1003059|number of peaks=4
+<Analyte=1>
+MS:1003270|proforma peptidoform ion notation=VDEPKAASLR/2
+MS:1000888|stripped peptide sequence=VDEPKAASLR
+MS:1003043|number of residues=10
+MS:1003637|theoretical neutral monoisotopic mass=1084.58767264
+MS:1000885|protein accession=DECOY_sp|P00001|TEST1_HUMAN
+<Peaks>
+215.102633	0.957684	b2
+344.145227	0.538247	b3
+371.732138	0.491419	y7^2
+742.456999	1.000000	y7
+
+<Spectrum=3>
+MS:1003061|library spectrum name=TAWQFYEEKPAGLLSDR/2
+[3]MS:1003275|other attribute name=msspeculator:decoy_pair_id
+[3]MS:1003276|other attribute value=1
+MS:1000041|charge state=2
+MS:1000744|selected ion m/z=1005.99962197
+[1]MS:1000896|normalized retention time=74.775368
+[1]UO:0000000|unit=UO:0000031|minute
+MS:1002815|inverse reduced ion mobility=1.25617566
+MS:1003059|number of peaks=4
+<Analyte=1>
+MS:1003270|proforma peptidoform ion notation=TAWQFYEEKPAGLLSDR/2
+MS:1000888|stripped peptide sequence=TAWQFYEEKPAGLLSDR
+MS:1003043|number of residues=17
+MS:1003637|theoretical neutral monoisotopic mass=2009.98469101
+MS:1000885|protein accession=sp|P00001|TEST1_HUMAN
+<Peaks>
+359.171382	0.628669	b3
+487.229959	0.787005	b4
+634.298373	0.956362	b5
+828.457393	1.000000	y8
+
+<Spectrum=4>
+MS:1003061|library spectrum name=TDSLLGAPKEEYFQWAR/2
+MS:1003212|library attribute set name=Decoy
+[3]MS:1003275|other attribute name=msspeculator:decoy_pair_id
+[3]MS:1003276|other attribute value=1
+MS:1000041|charge state=2
+MS:1000744|selected ion m/z=1005.99962197
+[1]MS:1000896|normalized retention time=76.402382
+[1]UO:0000000|unit=UO:0000031|minute
+MS:1002815|inverse reduced ion mobility=1.25481579
+MS:1003059|number of peaks=4
+<Analyte=1>
+MS:1003270|proforma peptidoform ion notation=TDSLLGAPKEEYFQWAR/2
+MS:1000888|stripped peptide sequence=TDSLLGAPKEEYFQWAR
+MS:1003043|number of residues=17
+MS:1003637|theoretical neutral monoisotopic mass=2009.98469101
+MS:1000885|protein accession=DECOY_sp|P00001|TEST1_HUMAN
+<Peaks>
+417.197990	0.597210	b4
+530.282054	0.693613	b5
+658.340632	0.989328	b7
+1353.658612	1.000000	y10
+

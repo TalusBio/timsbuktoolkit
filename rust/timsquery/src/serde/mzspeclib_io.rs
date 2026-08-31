@@ -867,14 +867,22 @@ mod tests {
     }
 
     /// The format this project writes, read back by the reader that has to read
-    /// it. Built by `timsseek build-library` from a one-protein FASTA, so it
-    /// exercises every term msspeculator actually emits rather than the terms a
-    /// vendor happens to use: `MS:1002815|inverse reduced ion mobility` for the
-    /// timsTOF axis, `MS:1000896` for retention, and the project-defined
-    /// `msspeculator:decoy_pair_id` for the target/decoy pairing.
+    /// it. It exercises every term msspeculator actually emits rather than the
+    /// terms a vendor happens to use: `MS:1002815|inverse reduced ion mobility`
+    /// for the timsTOF axis, `MS:1000896` for retention, and the
+    /// project-defined `msspeculator:decoy_pair_id` for the target/decoy
+    /// pairing.
+    ///
+    /// Stored as plain text, not gzipped, so it can be read in a review; the
+    /// gzip path is covered by `diann_export.mzspeclib.txt.gz`. It was written
+    /// by `timsseek build-library` and records how, in its own header: every
+    /// `msspeculator:` attribute in the `<mzSpecLib>` block names one setting,
+    /// including the FASTA's path and BLAKE2b digest, the model, and the
+    /// digestion bounds. Regenerating it means reading those back off the
+    /// fixture rather than guessing at flags.
     #[test]
     fn the_format_this_project_writes_reads_back() {
-        let geom = arena("msspeculator_built.mzspeclib.txt.gz");
+        let geom = arena("msspeculator_built.mzspeclib.txt");
         assert_eq!(geom.n_rows(), 4, "two targets and their two decoys");
         assert_eq!(geom.rows().filter(|r| geom.is_decoy(*r)).count(), 2);
 
