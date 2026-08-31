@@ -61,7 +61,7 @@ use super::library_file::{
 };
 use super::psims_origin_type;
 use crate::chemistry::ontologies;
-use crate::models::capabilities::DecoyHandling;
+use crate::models::capabilities::DecoyPolicy;
 use crate::models::{
     Row,
     TargetCapabilities,
@@ -181,7 +181,7 @@ fn open_reader(path: &Path) -> Result<Box<dyn BufRead>, TargetReadingError> {
 /// because the decoy groups a library declares have no representation there.
 pub fn read_mzspeclib_library_file(
     path: &Path,
-    decoys: DecoyHandling,
+    decoys: DecoyPolicy,
 ) -> Result<TargetTable, TargetReadingError> {
     let reader = open_reader(path)?;
     let parser = MzSpecLibTextParser::open(reader, Some(path.to_path_buf()), ontologies())
@@ -236,7 +236,7 @@ pub fn read_mzspeclib_library_file(
     if let Some(groups) = groups {
         geom.set_decoy_groups(groups)?;
     }
-    geom.seal()?;
+    let geom = geom.seal(decoys)?;
     degradation.report(geom.n_rows());
 
     Ok(TargetTable::Mzpaf {
@@ -742,7 +742,7 @@ mod tests {
         assert_eq!(decoys, 5, "five shipped decoys, declared only by set name");
     }
 
-    /// `DecoyHandling::Skip` drops shipped decoys at the row level, which is
+    /// `DecoyPolicy::Force` drops shipped decoys at the row level, which is
     /// what makes `--decoy-strategy force` mean anything: with none in the
     /// arena, `seal()` has no reason to rewrite `MassShift` to `Stored`, so the
     /// mass-shift decoys the user asked for are the ones
@@ -751,7 +751,7 @@ mod tests {
     fn skipping_shipped_decoys_leaves_only_targets() {
         let path = fixture("target_decoy_attribute_set.mzspeclib.txt");
         let TargetTable::Mzpaf { geom, .. } =
-            read_mzspeclib_library_file(&path, DecoyHandling::Skip).expect("fixture loads")
+            read_mzspeclib_library_file(&path, DecoyPolicy::Force).expect("fixture loads")
         else {
             panic!("mzSpecLib carries ion chemistry");
         };
@@ -761,7 +761,7 @@ mod tests {
         // The intensity sidecar has to shrink with the rows, or it stops being
         // parallel to the fragment arena.
         let TargetTable::Mzpaf { frag_intens, .. } =
-            read_mzspeclib_library_file(&path, DecoyHandling::Skip).expect("fixture loads")
+            read_mzspeclib_library_file(&path, DecoyPolicy::Force).expect("fixture loads")
         else {
             unreachable!()
         };

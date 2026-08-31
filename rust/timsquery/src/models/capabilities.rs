@@ -1,3 +1,8 @@
+use serde::{
+    Deserialize,
+    Serialize,
+};
+
 #[derive(Debug, Clone, PartialEq)]
 pub struct TargetCapabilities {
     pub sequence_features: SeqFeatureState,
@@ -46,26 +51,81 @@ pub enum DecoyStrategy {
     MassShift { offset: f64 },
 }
 
-/// What a reader does with decoy rows the file ships.
+/// What the caller wants done about decoys: the whole decoy decision, stated
+/// once, before the file is read.
 ///
-/// Decided before reading rather than after, so a caller that is going to
-/// generate its own decoys never pays to parse the file's. It also makes the
-/// arena's own `MassShift -> Stored` downgrade an observation instead
-/// of an override: with no shipped decoys in the arena there is nothing to
-/// downgrade, so the strategy the caller asked for is the one that runs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
-pub enum DecoyHandling {
-    /// Read them. What a search wants unless it is replacing them.
+/// Distinct from [`DecoyStrategy`], which is the mechanism the arena ends up
+/// using. A policy plus the rows the file turned out to ship determines the
+/// strategy ([`Self::strategy`]), and [`TargetColumns::seal`](crate::models::TargetColumns::seal) is the only place
+/// that resolves one into the other -- so `caps.decoys` is written exactly once
+/// per arena, by the seal, and nothing downstream can revise it.
+///
+/// Stated up front rather than after the load because [`Force`](Self::Force)
+/// also means "do not read the file's decoys at all" ([`Self::accepts`]): a
+/// caller replacing them never pays to parse them, and there is nothing left in
+/// the arena for a later pass to have to undo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecoyPolicy {
+    /// Derive ±CH2 decoys only if the file ships none. The default.
     #[default]
-    Keep,
-    /// Drop them at the row level, before they reach the arena.
-    Skip,
+    IfMissing,
+    /// Drop the file's decoys and derive ±CH2 decoys instead.
+    Force,
+    /// Derive nothing; score the file's own rows, decoys included.
+    Never,
 }
 
-impl DecoyHandling {
-    /// Whether a row with this decoy flag should be read.
+impl DecoyPolicy {
+    /// Whether a row with this decoy flag should be read at all.
+    ///
+    /// Only [`Force`](Self::Force) rejects one, and rejecting it at the row
+    /// level is what makes `Force` mean anything: with no shipped decoy in the
+    /// arena, [`Self::strategy`] resolves to `MassShift` and the decoys the
+    /// caller asked for are the ones scored.
     pub fn accepts(self, is_decoy: bool) -> bool {
-        !(is_decoy && self == Self::Skip)
+        !(is_decoy && self == Self::Force)
+    }
+
+    /// The mechanism this policy comes to, given what the file shipped.
+    ///
+    /// `IfMissing` with shipped decoys and `Never` land on the same strategy,
+    /// which is the point: once decoys are in the arena, "use them" and "derive
+    /// nothing" are the same instruction.
+    pub fn strategy(self, has_shipped_decoys: bool) -> DecoyStrategy {
+        let shift = DecoyStrategy::MassShift {
+            offset: DECOY_CH2_OFFSET_DA,
+        };
+        match self {
+            Self::Force => shift,
+            Self::IfMissing if !has_shipped_decoys => shift,
+            Self::IfMissing | Self::Never => DecoyStrategy::Stored,
+        }
+    }
+}
+
+impl std::fmt::Display for DecoyPolicy {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::IfMissing => write!(f, "if-missing"),
+            Self::Force => write!(f, "force"),
+            Self::Never => write!(f, "never"),
+        }
+    }
+}
+
+impl std::str::FromStr for DecoyPolicy {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "if-missing" | "ifmissing" | "if_missing" => Ok(Self::IfMissing),
+            "force" => Ok(Self::Force),
+            "never" | "none" => Ok(Self::Never),
+            _ => Err(format!(
+                "Invalid decoy policy: '{s}'. Valid options: if-missing, force, never"
+            )),
+        }
     }
 }
 
@@ -93,12 +153,12 @@ impl TargetCapabilities {
     /// available (re-gated at load), 3-isotope composition envelopes, and no
     /// decoys.
     ///
-    /// Decoy generation is a scoring decision, so no constructor in this crate
-    /// produces it: `DecoyStrategy::MassShift` has to be named outright, and
-    /// timsseek is the only thing that names it, in `map_decoy_strategy`.
-    ///
-    /// A reader defaulting to decoys here makes `timsquery_cli` emit two
-    /// mass-shifted variants per row into Carafe's results, which key by `id`.
+    /// `decoys` is a placeholder: [`TargetColumns::seal`](crate::models::TargetColumns::seal) overwrites it from the
+    /// caller's [`DecoyPolicy`], so nothing reads it before the seal and no
+    /// constructor here can decide it. `Stored` rather than `MassShift` so that
+    /// a hypothetical unsealed read sees target geometry only -- a decoying
+    /// default would make `timsquery_cli` emit two mass-shifted variants per row
+    /// into Carafe's results, which key by `id`.
     /// `test_extraction_does_not_expand_decoys` in `timsquery_cli`'s
     /// `commands.rs` is what holds that.
     pub fn default_diann() -> Self {
@@ -120,24 +180,70 @@ impl TargetCapabilities {
             ..Self::default_diann()
         }
     }
-
-    /// The derived ±CH2 decoy profile, for exercising the index transform in
-    /// this crate's own tests. Not available to production code: turning decoys
-    /// on belongs to the searcher.
-    #[cfg(test)]
-    pub(crate) fn test_lazy_decoys() -> Self {
-        Self {
-            decoys: DecoyStrategy::MassShift {
-                offset: DECOY_CH2_OFFSET_DA,
-            },
-            ..Self::default_diann()
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `Force` is the only policy that drops what a file ships, and dropping is
+    /// what makes it mean "replace": with no shipped decoy left, `strategy`
+    /// resolves to `MassShift` and the derived decoys are the ones scored.
+    #[test]
+    fn only_force_drops_the_decoys_a_file_ships() {
+        assert!(!DecoyPolicy::Force.accepts(true));
+        assert!(DecoyPolicy::IfMissing.accepts(true));
+        assert!(DecoyPolicy::Never.accepts(true));
+
+        // A target survives every policy.
+        for p in [
+            DecoyPolicy::Force,
+            DecoyPolicy::IfMissing,
+            DecoyPolicy::Never,
+        ] {
+            assert!(p.accepts(false), "{p} rejected a target");
+        }
+    }
+
+    #[test]
+    fn force_is_mass_shift_whatever_the_file_shipped() {
+        let shift = DecoyStrategy::MassShift {
+            offset: DECOY_CH2_OFFSET_DA,
+        };
+        for shipped in [false, true] {
+            assert_eq!(DecoyPolicy::Force.strategy(shipped), shift);
+        }
+    }
+
+    /// The two policies that differ only when the file ships nothing.
+    #[test]
+    fn if_missing_derives_only_what_the_file_lacks() {
+        assert_eq!(
+            DecoyPolicy::IfMissing.strategy(false),
+            DecoyStrategy::MassShift {
+                offset: DECOY_CH2_OFFSET_DA,
+            }
+        );
+        assert_eq!(DecoyPolicy::IfMissing.strategy(true), DecoyStrategy::Stored);
+        for shipped in [false, true] {
+            assert_eq!(DecoyPolicy::Never.strategy(shipped), DecoyStrategy::Stored);
+        }
+    }
+
+    /// The cli round-trips this through both a flag string and a config file.
+    #[test]
+    fn the_cli_spellings_round_trip() {
+        for p in [
+            DecoyPolicy::IfMissing,
+            DecoyPolicy::Force,
+            DecoyPolicy::Never,
+        ] {
+            assert_eq!(p.to_string().parse::<DecoyPolicy>(), Ok(p));
+        }
+        assert_eq!("if_missing".parse(), Ok(DecoyPolicy::IfMissing));
+        assert_eq!("none".parse(), Ok(DecoyPolicy::Never));
+        assert!("sometimes".parse::<DecoyPolicy>().is_err());
+    }
 
     #[test]
     fn default_diann_declares_fragment_features_available() {

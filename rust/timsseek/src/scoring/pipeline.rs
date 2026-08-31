@@ -960,9 +960,7 @@ mod tests {
     };
 
     fn tiny_lazy_lib() -> ReferenceLibrary {
-        let mut caps = TargetCapabilities::default_diann();
-        caps.decoys = crate::models::map_decoy_strategy(crate::models::DecoyPolicy::Force, false);
-        let mut geom = TargetColumns::with_capabilities(caps);
+        let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
         geom.push_row(Row {
             precursor_mz: 900.4,
             charge: 2,
@@ -976,7 +974,10 @@ mod tests {
             seq_mod: "PEPTIDEK",
             ..Default::default()
         });
-        geom.seal().expect("fixture ids are usable");
+        // `Force` so the arena derives the decoy variants these tests score.
+        let geom = geom
+            .seal(crate::models::DecoyPolicy::Force)
+            .expect("fixture ids are usable");
         ReferenceLibrary {
             geom,
             frag_intens: vec![1.0, 0.5],

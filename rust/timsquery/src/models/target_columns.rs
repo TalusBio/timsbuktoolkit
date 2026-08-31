@@ -1,5 +1,6 @@
 use crate::KeyLike;
 use crate::models::capabilities::{
+    DecoyPolicy,
     DecoyStrategy,
     MASS_SHIFT_VARIANTS,
     TargetCapabilities,
@@ -469,27 +470,51 @@ impl<L: KeyLike> TargetColumns<L> {
         self.mod_off[tgt] as usize..self.mod_off[tgt + 1] as usize
     }
 
-    /// Seal after build: enforce the decoy-strategy invariant, then release
-    /// excess capacity on every arena.
+    /// Seal after build: resolve the decoy policy against the rows that
+    /// actually arrived, build the id column, then release excess capacity on
+    /// every arena.
     ///
-    /// `MassShift` requires an all-targets arena (decoys are expressed as an
-    /// on-the-fly ±CH2 index transform, never stored). If the library shipped
-    /// materialized decoys, downgrade to `Stored` so the shipped rows are
-    /// honored 1:1 instead of being silently re-decoyed.
+    /// Consuming, and it takes the policy, so an arena is sealed exactly once
+    /// and `caps.decoys` is written exactly there. That is what makes the
+    /// invariant checkable rather than conventional: `MassShift` needs an
+    /// all-targets arena (decoys are an on-the-fly ±CH2 index transform, never
+    /// stored), and since the resolution happens after the rows are counted, a
+    /// file that shipped decoys resolves to `Stored` instead of being silently
+    /// re-decoyed. There is no later pass that could set it back.
+    ///
     /// Fails when the pushed ids cannot make a column: two rows sharing an id
     /// (a caller keys results by it, so a repeat hides a row), or a library
     /// mixing numeric and text ids (storing both would coerce the numbers to
     /// strings, and `7` and `"7"` would become two ids in one column).
-    pub fn seal(&mut self) -> Result<(), SourceIdError> {
-        // Sealing twice is normal: a reader seals the arena it built, and
-        // timsseek seals again after stamping the decoy strategy onto `caps`.
-        // The id column is built by the first call, which drains `pending_ids`.
-        if matches!(self.source_ids, SourceIds::Absent) {
-            self.build_source_ids()?;
+    ///
+    /// Panics if called on an already-sealed arena, which can only happen by
+    /// cloning one.
+    pub fn seal(mut self, decoys: DecoyPolicy) -> Result<Self, SourceIdError> {
+        assert!(
+            matches!(self.source_ids, SourceIds::Absent),
+            "arena is already sealed; seal resolves the decoy policy, so a second call would \
+             revise a decision downstream code has already read"
+        );
+        self.build_source_ids()?;
+        let ships_decoys = self.is_decoy.iter().any(|&d| d);
+        self.caps.decoys = decoys.strategy(ships_decoys);
+        // Nothing to build when no groups were declared: a row is then its own
+        // group, which `decoy_group_code` derives. Only the case that actually
+        // loses information is worth a word.
+        if ships_decoys && self.decoy_groups.is_none() {
+            tracing::warn!(
+                "library ships its own decoys but declares no competition groups, so each \
+                 stored decoy competes alone rather than against its target"
+            );
         }
-        self.apply_decoy_downgrades();
+        if ships_decoys && decoys == DecoyPolicy::IfMissing {
+            tracing::info!(
+                "library ships {} of its own decoys, so none are derived",
+                self.n_stored_decoys(),
+            );
+        }
         self.shrink();
-        Ok(())
+        Ok(self)
     }
 
     fn build_source_ids(&mut self) -> Result<(), SourceIdError> {
@@ -525,26 +550,6 @@ impl<L: KeyLike> TargetColumns<L> {
         };
         self.pending_ids.shrink_to_fit();
         Ok(())
-    }
-
-    fn apply_decoy_downgrades(&mut self) {
-        let ships_decoys = self.is_decoy.iter().any(|&d| d);
-        // Nothing to build when no groups were declared: a row is then its own
-        // group, which `decoy_group_code` derives. Only the case that actually
-        // loses information is worth a word. Keyed on the rows rather than on
-        // the strategy, which only ever implied them.
-        if ships_decoys && self.decoy_groups.is_none() {
-            tracing::warn!(
-                "library ships its own decoys but declares no competition groups, so each \
-                 stored decoy competes alone rather than against its target"
-            );
-        }
-        // `MassShift` assumes every stored row is a target. A shipped decoy
-        // would get a ± pair of its own, so honor the stored rows instead.
-        if matches!(self.caps.decoys, DecoyStrategy::MassShift { .. }) && ships_decoys {
-            tracing::warn!("library ships decoys; downgrading MassShift -> Stored");
-            self.caps.decoys = DecoyStrategy::Stored;
-        }
     }
 
     fn shrink(&mut self) {
@@ -653,7 +658,6 @@ impl<L: KeyLike + DecoyShift> TargetColumns<L> {
 mod tests {
     use super::*;
     use crate::IonAnnot;
-    use crate::models::capabilities::DecoyStrategy;
 
     fn two_rows() -> TargetColumns<IonAnnot> {
         let mut c = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
@@ -678,7 +682,7 @@ mod tests {
     fn rows_in_one_declared_group_share_a_code() {
         let mut c = two_rows();
         c.set_decoy_groups(["g1", "g1"]).unwrap();
-        c.seal().expect("fixture ids are usable");
+        let c = c.seal(DecoyPolicy::Never).expect("fixture ids are usable");
 
         let (a, b) = (c.rows().next().unwrap(), c.rows().nth(1).unwrap());
         assert_eq!(c.decoy_group_code(a), c.decoy_group_code(b));
@@ -689,8 +693,8 @@ mod tests {
     /// stored -- so nothing is allocated and the label is the row's own id.
     #[test]
     fn undeclared_groups_are_derived_not_stored() {
-        let mut c = two_rows();
-        c.seal().expect("fixture ids are usable");
+        let c = two_rows();
+        let c = c.seal(DecoyPolicy::Never).expect("fixture ids are usable");
 
         let (a, b) = (c.rows().next().unwrap(), c.rows().nth(1).unwrap());
         assert!(c.decoy_groups.is_none(), "nothing stored for minted groups");
@@ -703,20 +707,32 @@ mod tests {
         assert_eq!(c.decoy_group(b), SourceId::Numeric(1));
     }
 
+    /// Sealing resolves the decoy policy, so a second seal would revise a
+    /// decision downstream code has already read. Consuming `self` makes that
+    /// unreachable for a moved arena; this covers the one route left, a clone.
+    #[test]
+    #[should_panic(expected = "already sealed")]
+    fn sealing_twice_panics() {
+        let c = two_rows()
+            .seal(DecoyPolicy::Never)
+            .expect("fixture ids are usable");
+        let _ = c.clone().seal(DecoyPolicy::Force);
+    }
+
     /// `output_id` expects a source id on every row; this is what makes that
     /// safe for the formats that carry none.
     #[test]
     fn seal_mints_ids_when_the_input_carried_none() {
-        let mut c = two_rows();
+        let c = two_rows();
         assert_eq!(c.source_id(RowIdx::new(0)), None);
-        c.seal().expect("fixture ids are usable");
+        let c = c.seal(DecoyPolicy::Never).expect("fixture ids are usable");
         assert_eq!(c.output_id(RowIdx::new(0)), SourceId::Numeric(0));
         assert_eq!(c.output_id(RowIdx::new(1)), SourceId::Numeric(1));
     }
 
     #[test]
     fn lazy_massshift_expands_len_and_flags_targets() {
-        let mut c = TargetColumns::with_capabilities(TargetCapabilities::test_lazy_decoys());
+        let mut c = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
         c.push_row(Row {
             precursor_mz: 500.0,
             charge: 2,
@@ -727,7 +743,9 @@ mod tests {
             seq_mod: "PEP",
             ..Default::default()
         });
-        c.seal().expect("fixture ids are usable");
+        let c = c
+            .seal(DecoyPolicy::IfMissing)
+            .expect("fixture ids are usable");
         assert_eq!(c.variants_per_row(), 3);
         assert_eq!(c.expanded_len(), 3);
         assert!(c.is_target(FlatIdx::new(0))); // variant 0
@@ -738,9 +756,7 @@ mod tests {
 
     #[test]
     fn stored_is_one_variant_per_row_honoring_is_decoy() {
-        let mut caps = TargetCapabilities::default_diann();
-        caps.decoys = DecoyStrategy::Stored;
-        let mut c = TargetColumns::with_capabilities(caps);
+        let mut c = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
         c.push_row(Row {
             precursor_mz: 500.0,
             charge: 2,
@@ -762,7 +778,10 @@ mod tests {
             is_decoy: true,
             ..Default::default()
         });
-        c.seal().expect("fixture ids are usable");
+        // A shipped decoy is what makes `IfMissing` resolve to `Stored`.
+        let c = c
+            .seal(DecoyPolicy::IfMissing)
+            .expect("fixture ids are usable");
         assert_eq!(c.variants_per_row(), 1);
         assert_eq!(c.expanded_len(), 2);
         assert!(c.is_target(FlatIdx::new(0)));
@@ -800,7 +819,7 @@ mod tests {
             seq_mod: "SAMPLERK",
             ..Default::default()
         });
-        c.seal().expect("fixture ids are usable");
+        let c = c.seal(DecoyPolicy::Never).expect("fixture ids are usable");
         assert_eq!(c.n_rows(), 2);
         assert_eq!(c.frag_range(RowIdx::new(0)), 0..2);
         assert_eq!(c.frag_range(RowIdx::new(1)), 2..5);
@@ -841,7 +860,7 @@ mod tests {
             is_decoy: true,
             ..Default::default()
         });
-        c.seal().expect("fixture ids are usable");
+        let c = c.seal(DecoyPolicy::Never).expect("fixture ids are usable");
         assert_eq!(c.n_rows(), 2);
         assert_eq!(c.is_decoy, vec![false, true]);
         assert_eq!(

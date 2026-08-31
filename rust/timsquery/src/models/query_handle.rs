@@ -189,15 +189,10 @@ mod tests {
         );
     }
 
+    /// One target row, sealed `IfMissing`, which with no shipped decoy resolves
+    /// to `MassShift` -- so the ± variants below exist.
     fn one_target_lib() -> TargetColumns<IonAnnot> {
-        let mut c = TargetColumns::with_capabilities(TargetCapabilities {
-            sequence_features: SeqFeatureState::Available,
-            fragment_features: FragmentFeatureState::Available,
-            isotopes: IsotopeStrategy::FromComposition { n_isotopes: 3 },
-            decoys: DecoyStrategy::MassShift {
-                offset: crate::models::capabilities::DECOY_CH2_OFFSET_DA,
-            },
-        });
+        let mut c = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
         c.push_row(Row {
             precursor_mz: 654.855,
             charge: 2,
@@ -211,8 +206,8 @@ mod tests {
             seq_mod: "PEPTIDEK",
             ..Default::default()
         });
-        c.seal().expect("fixture ids are usable");
-        c
+        c.seal(DecoyPolicy::IfMissing)
+            .expect("fixture ids are usable")
     }
 
     #[test]
@@ -289,12 +284,8 @@ mod tests {
     #[test]
     fn string_flyweight_never_shifts() {
         use std::sync::Arc;
-        let mut c: TargetColumns<Arc<str>> = TargetColumns::with_capabilities(TargetCapabilities {
-            sequence_features: SeqFeatureState::Available,
-            fragment_features: FragmentFeatureState::Available,
-            isotopes: IsotopeStrategy::FromComposition { n_isotopes: 3 },
-            decoys: DecoyStrategy::Stored,
-        });
+        let mut c: TargetColumns<Arc<str>> =
+            TargetColumns::with_capabilities(TargetCapabilities::default_unlabeled());
         c.push_row(Row {
             precursor_mz: 500.0,
             charge: 2,
@@ -305,8 +296,12 @@ mod tests {
             seq_mod: "PEP",
             ..Default::default()
         });
-        c.seal().expect("fixture ids are usable");
-        let q = Query::new(&c, c.flat_for(first_row(&c), 0));
+        // Sealed `IfMissing` with no shipped decoy, so the arena derives ±
+        // variants -- and variant 1 is where an ion-annotated label would shift.
+        let c = c
+            .seal(DecoyPolicy::IfMissing)
+            .expect("fixture ids are usable");
+        let q = Query::new(&c, c.flat_for(first_row(&c), 1));
         let frags: Vec<_> = q.iter_fragments_refs().collect();
         assert!((frags[0].1 - 300.0).abs() < 1e-9);
     }

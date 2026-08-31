@@ -258,8 +258,8 @@ mod tests {
                 ..Default::default()
             });
         }
-        geom.seal().expect("fixture ids are usable");
-        geom
+        geom.seal(crate::models::DecoyPolicy::Never)
+            .expect("fixture ids are usable")
     }
 
     fn one_row_arena() -> TargetColumns<IonAnnot> {

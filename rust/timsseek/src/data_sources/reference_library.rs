@@ -267,11 +267,7 @@ mod tests {
     use timsquery::models::capabilities::*;
 
     fn tiny_ref_lib() -> ReferenceLibrary {
-        // Decoys are opted into here, as timsseek does in production via
-        // `finalize_reference_library`; timsquery never turns them on itself.
-        let mut caps = TargetCapabilities::default_diann();
-        caps.decoys = crate::models::map_decoy_strategy(crate::models::DecoyPolicy::Force, false);
-        let mut geom = TargetColumns::with_capabilities(caps);
+        let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
         geom.push_row(Row {
             precursor_mz: 900.4,
             charge: 2,
@@ -285,7 +281,11 @@ mod tests {
             seq_mod: "PEPTIDEK",
             ..Default::default()
         });
-        geom.seal().expect("fixture ids are usable");
+        // `Force` because these tests exercise the decoy variants; timsquery's
+        // own readers never derive them.
+        let geom = geom
+            .seal(crate::models::DecoyPolicy::Force)
+            .expect("fixture ids are usable");
         ReferenceLibrary {
             geom,
             frag_intens: vec![1.0, 0.5],
@@ -308,7 +308,9 @@ mod tests {
             seq_mod: "PEP",
             ..Default::default()
         });
-        geom.seal().expect("fixture ids are usable");
+        let geom = geom
+            .seal(crate::models::DecoyPolicy::Never)
+            .expect("fixture ids are usable");
         let arena = TargetTable::Mzpaf {
             geom,
             frag_intens: Some(vec![1.0]),
@@ -316,9 +318,11 @@ mod tests {
         let lib: ReferenceLibrary = arena.try_into().unwrap();
         assert_eq!(lib.frag_intens.len(), 1);
 
-        let mut sgeom: TargetColumns<std::sync::Arc<str>> =
+        let sgeom: TargetColumns<std::sync::Arc<str>> =
             TargetColumns::with_capabilities(TargetCapabilities::default_diann());
-        sgeom.seal().expect("an empty arena seals");
+        let sgeom = sgeom
+            .seal(crate::models::DecoyPolicy::Never)
+            .expect("an empty arena seals");
         let s = TargetTable::Str { geom: sgeom };
         assert!(ReferenceLibrary::try_from(s).is_err());
     }

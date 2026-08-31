@@ -431,7 +431,9 @@ mod tests {
             seq_mod: "PEPBK",
             ..Default::default()
         });
-        geom.seal().expect("fixture ids are usable");
+        let geom = geom
+            .seal(timsquery::models::capabilities::DecoyPolicy::Never)
+            .expect("fixture ids are usable");
         ReferenceLibrary {
             geom,
             frag_intens: vec![1.0, 0.5],

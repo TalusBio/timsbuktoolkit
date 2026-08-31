@@ -34,6 +34,7 @@ use crate::ion::{
     IonSeriesOrdinal,
     NeutralLoss,
 };
+use crate::models::capabilities::DecoyPolicy;
 use crate::models::{
     Row,
     TargetCapabilities,
@@ -948,13 +949,14 @@ pub fn sniff_diann_speclib_library_file<T: AsRef<Path>>(path: T) -> bool {
 /// returning [`TargetTable::Mzpaf`] with the reference-intensity sidecar.
 pub fn read_diann_speclib_library_file<T: AsRef<Path>>(
     path: T,
+    decoys: DecoyPolicy,
 ) -> Result<TargetTable, TargetReadingError> {
     let path = path.as_ref();
     info!("Reading DIA-NN .speclib binary from {}", path.display());
 
     // mmap the file (not an owned read) -- pages fault in on demand, no
     // file-sized resident buffer.
-    let (mut geom, frag_intens, stats, at_eof) = SpecLib::open_mmap(path)?.parse_parallel()?;
+    let (geom, frag_intens, stats, at_eof) = SpecLib::open_mmap(path)?.parse_parallel()?;
 
     if !at_eof {
         // A parse that doesn't land on EOF means the entries were misaligned
@@ -993,7 +995,7 @@ pub fn read_diann_speclib_library_file<T: AsRef<Path>>(
         geom.frag_labels.len(),
         "reference-intensity sidecar must stay parallel to the fragment-label arena"
     );
-    geom.seal()?;
+    let geom = geom.seal(decoys)?;
     Ok(TargetTable::Mzpaf {
         geom,
         frag_intens: Some(frag_intens),
@@ -1055,9 +1057,11 @@ mod tests {
     #[test]
     fn every_source_id_stays_paired_with_its_own_row() {
         let file = std::fs::File::open(fixture_path()).unwrap();
-        let (mut geom, _frag_intens, _stats, _eof) =
+        let (geom, _frag_intens, _stats, _eof) =
             parse_speclib_reader(std::io::BufReader::new(file)).unwrap();
-        geom.seal().expect("the fixture's entry names are usable");
+        let geom = geom
+            .seal(DecoyPolicy::Never)
+            .expect("the fixture's entry names are usable");
 
         assert!(geom.n_rows() > 1, "one row would not catch a permutation");
         for row in geom.rows() {

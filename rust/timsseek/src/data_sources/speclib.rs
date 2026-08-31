@@ -29,14 +29,14 @@ pub struct LoadReport {
     pub sequence_features: SeqFeatureState,
 }
 
-/// Finalize a narrowed `ReferenceLibrary` arena: apply the decoy strategy,
-/// seal, run the whole-library parse gate and averagine tally, and set
-/// `caps.sequence_features`. Every load path ends here.
+/// Finalize a narrowed `ReferenceLibrary` arena: run the whole-library parse
+/// gate and averagine tally, and set `caps.sequence_features`. Every load path
+/// ends here.
 ///
-/// `policy` is the raw CLI decoy policy, and this is the one place it is
-/// resolved: `map_decoy_strategy` keys on whether the arena already ships
-/// decoys, and the result is stamped onto `caps.decoys` before `seal()`, which
-/// is what lets the seal downgrade `MassShift` to `Stored`.
+/// The arena arrives sealed, so `caps.decoys` is already resolved and this
+/// function only reports what it came to. The decoy policy was handed to the
+/// reader, which is what makes `Force` mean "replace" rather than "generate on
+/// top of".
 ///
 /// The parse gate walks the modified sequence blob, the form
 /// `RefQuery::materialize_peptide_in_group` parses, and disables
@@ -47,19 +47,14 @@ pub struct LoadReport {
 fn finalize_reference_library(
     mut geom: TargetColumns<IonAnnot>,
     frag_intens: Vec<f32>,
-    policy: crate::models::DecoyPolicy,
 ) -> Result<(ReferenceLibrary, LoadReport), TargetReadingError> {
     let n_stored_decoys = geom.n_stored_decoys();
-    geom.caps.decoys = crate::models::map_decoy_strategy(policy, n_stored_decoys > 0);
-    geom.seal()?;
-
     let n_rows = geom.n_rows();
 
-    // What will actually be scored, post-seal (`seal()` downgrades MassShift ->
-    // Stored if the library ships its own decoys). Read off the counts rather
-    // than off `caps.decoys`: what matters at load time is whether anything on
-    // the decoy side of the FDR estimate exists, and the one case worth a
-    // warning -- nothing derived and nothing shipped -- is not a strategy.
+    // What will actually be scored. Read off the counts rather than off
+    // `caps.decoys`: what matters at load time is whether anything on the decoy
+    // side of the FDR estimate exists, and the one case worth a warning --
+    // nothing derived and nothing shipped -- is not a strategy.
     let expanded = geom.expanded_len();
     if expanded > n_rows {
         // The arena holds no decoy rows here by construction: `MassShift`
@@ -209,20 +204,20 @@ impl Speclib {
         // Terminal source: bridge to the timsquery reader registry (DIA-NN
         // `.speclib`/TSV/parquet, Spectronaut, Skyline, JSON), which returns a
         // label-generic `TargetTable`. One path from here: narrow the arena
-        // to the ion-annotated `ReferenceLibrary`, apply the decoy strategy,
-        // seal, gate sequence features, and hand back the lazy arena.
+        // to the ion-annotated `ReferenceLibrary` (already sealed, with the
+        // decoy policy resolved), gate sequence features, hand back the arena.
         tracing::info!(
             "Loading library via timsquery format detection: {}",
             path.display()
         );
-        let arena = read_timsquery_library(path, decoy_policy.decoy_handling())?;
+        let arena = read_timsquery_library(path, decoy_policy)?;
         let ReferenceLibrary { geom, frag_intens } = ReferenceLibrary::try_from(arena)?;
 
-        // Decoy resolution + seal + parse gate + averagine tally + `LoadReport`
+        // Parse gate + averagine tally + `LoadReport`
         // all live in the one shared finalize path (see
         // `finalize_reference_library`); the report is logged there, so we drop
         // it here.
-        let (lib, _report) = finalize_reference_library(geom, frag_intens, decoy_policy)?;
+        let (lib, _report) = finalize_reference_library(geom, frag_intens)?;
         lib.log_entry_stats();
         Ok(lib)
     }
@@ -607,7 +602,7 @@ mod tests {
         let lib = &speclib;
 
         // The offset the arena shifts by, rather than a literal, so this cannot
-        // drift from `map_decoy_strategy`.
+        // drift from `DecoyPolicy::strategy`.
         use timsquery::models::capabilities::DECOY_CH2_OFFSET_DA;
 
         for tgt in lib.geom.rows() {
@@ -744,12 +739,11 @@ mod tests {
             });
         }
 
-        let (library, report) = finalize_reference_library(
-            geom,
-            vec![0.8, 0.3, 0.7, 0.4],
-            crate::models::DecoyPolicy::default(),
-        )
-        .expect("an unparseable sequence degrades the library rather than failing the load");
+        let geom = geom
+            .seal(crate::models::DecoyPolicy::default())
+            .expect("fixture ids are usable");
+        let (library, report) = finalize_reference_library(geom, vec![0.8, 0.3, 0.7, 0.4])
+            .expect("an unparseable sequence degrades the library rather than failing the load");
 
         assert_eq!(report.n_unparsable_sequences, 1);
         assert!(
@@ -782,7 +776,9 @@ mod tests {
             seq_mod: "PEP",
             ..Default::default()
         });
-        geom.seal().expect("fixture ids are usable");
+        let geom = geom
+            .seal(crate::models::DecoyPolicy::Never)
+            .expect("fixture ids are usable");
         let arena = TargetTable::Mzpaf {
             geom,
             frag_intens: None,
