@@ -36,7 +36,7 @@ pub struct LoadReport {
 /// `policy` is the raw CLI decoy policy, and this is the one place it is
 /// resolved: `map_decoy_strategy` keys on whether the arena already ships
 /// decoys, and the result is stamped onto `caps.decoys` before `seal()`, which
-/// is what lets the seal downgrade `LazyMassShift` to `Passthrough`.
+/// is what lets the seal downgrade `MassShift` to `Stored`.
 ///
 /// The parse gate walks the modified sequence blob, the form
 /// `RefQuery::materialize_peptide_in_group` parses, and disables
@@ -55,46 +55,31 @@ fn finalize_reference_library(
 
     let n_rows = geom.n_rows();
 
-    // Report the effective decoy strategy (post-seal: `seal()` downgrades
-    // LazyMassShift -> Passthrough if the library ships its own decoys). This
-    // restores the load-time notice that the search space is expanded by
-    // synthetic mass-shift decoys.
-    {
-        use timsquery::models::capabilities::DecoyStrategy;
-        match geom.caps.decoys {
-            DecoyStrategy::LazyMassShift { n_decoys, .. } => {
-                tracing::warn!(
-                    "Library contains no decoys. Generating synthetic ±CH2 mass-shift \
-                     decoys: {}x search space ({} targets -> {} scored entries)",
-                    n_decoys as usize + 1,
-                    n_rows,
-                    geom.expanded_len(),
-                );
-            }
-            DecoyStrategy::Passthrough => {
-                tracing::info!(
-                    "Library ships {} decoys; using them as-is (Passthrough, no synthetic \
-                     decoys generated)",
-                    n_stored_decoys,
-                );
-            }
-            DecoyStrategy::None if n_stored_decoys == 0 => {
-                tracing::warn!(
-                    "Decoy strategy None and the library ships no decoys; scoring {} \
-                     stored rows as-is. FDR will be estimated with nothing to \
-                     estimate it from. Use --decoy-strategy if-missing to generate \
-                     mass-shift decoys.",
-                    n_rows
-                );
-            }
-            DecoyStrategy::None => {
-                tracing::info!(
-                    "Decoy strategy None; scoring {} stored rows as-is (targets + any \
-                     shipped decoys)",
-                    n_rows
-                );
-            }
-        }
+    // What will actually be scored, post-seal (`seal()` downgrades MassShift ->
+    // Stored if the library ships its own decoys). Read off the counts rather
+    // than off `caps.decoys`: what matters at load time is whether anything on
+    // the decoy side of the FDR estimate exists, and the one case worth a
+    // warning -- nothing derived and nothing shipped -- is not a strategy.
+    let expanded = geom.expanded_len();
+    if expanded > n_rows {
+        // The arena holds no decoy rows here by construction: `MassShift`
+        // survives seal only when nothing was shipped, and `Force` got the
+        // reader to drop what was.
+        tracing::warn!(
+            "Deriving synthetic ±CH2 mass-shift decoys: {n_rows} stored rows -> {expanded} \
+             scored entries",
+        );
+    } else if n_stored_decoys == 0 {
+        tracing::warn!(
+            "Library ships no decoys and none will be derived; scoring {n_rows} stored \
+             rows as-is. FDR would be estimated with nothing to estimate it from. Use \
+             --decoy-strategy if-missing to derive mass-shift decoys.",
+        );
+    } else {
+        tracing::info!(
+            "Library ships {n_stored_decoys} decoys; scoring {n_rows} stored rows as-is, \
+             deriving none",
+        );
     }
     let mut n_unparsable = 0usize;
     let mut first_unparsable: Option<String> = None;
@@ -409,7 +394,7 @@ mod tests {
         // Skyline routes through the timsquery bridge (`from_elution_groups`),
         // which now threads the reference intensities through, so it narrows to
         // a lazy `ReferenceLibrary` arena like the DIA-NN formats. No shipped decoys +
-        // default IfMissing -> `LazyMassShift`.
+        // default IfMissing -> `MassShift`.
         // Fixture has 14 PRTC targets, no decoys -> 14 targets + 28 mass-shift decoys
         assert_eq!(
             speclib.len(),

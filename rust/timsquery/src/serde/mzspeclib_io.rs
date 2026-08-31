@@ -744,8 +744,8 @@ mod tests {
 
     /// `DecoyHandling::Skip` drops shipped decoys at the row level, which is
     /// what makes `--decoy-strategy force` mean anything: with none in the
-    /// arena, `seal()` has no reason to rewrite `LazyMassShift` to
-    /// `Passthrough`, so the mass-shift decoys the user asked for are the ones
+    /// arena, `seal()` has no reason to rewrite `MassShift` to `Stored`, so the
+    /// mass-shift decoys the user asked for are the ones
     /// scored.
     #[test]
     fn skipping_shipped_decoys_leaves_only_targets() {

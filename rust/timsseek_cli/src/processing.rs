@@ -1261,7 +1261,7 @@ mod tests {
         assert!((winner.delta_group_ln1p_ratio - runner_up_ln1p / best_ln1p).abs() < 1e-6);
     }
 
-    /// `LazyMassShift` with two decoys makes every group three members, so a
+    /// `MassShift` makes every group three members, so a
     /// two-member test never exercised the case that mattered: the margin has
     /// to come from the runner-up, not from the worst member.
     #[test]

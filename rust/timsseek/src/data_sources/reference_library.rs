@@ -223,7 +223,7 @@ impl<'a> ScoredIdentity for RefQuery<'a> {
     }
 
     fn is_target(&self) -> bool {
-        // Honor stored decoys uniformly (correct under Passthrough): a row is a
+        // Honor stored decoys uniformly (correct under `Stored`): a row is a
         // target only when it is not a stored decoy AND is the variant-0 slot.
         let tgt = self.geom().row();
         !self.lib.geom.is_decoy(tgt) && self.geom().variant() == 0

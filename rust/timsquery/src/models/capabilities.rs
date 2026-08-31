@@ -28,18 +28,29 @@ pub enum IsotopeStrategy {
     FromComposition { n_isotopes: u8 },
 }
 
+/// How an arena expresses decoys: the two behaviours the index transform
+/// implements, and no more.
+///
+/// There is no third "no decoys at all" variant. An arena that ships no decoys
+/// and generates none is [`Stored`](Self::Stored) with
+/// `n_stored_decoys() == 0`; that is a property of the rows, not of the
+/// strategy, and reporting it belongs to whoever counts rows.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum DecoyStrategy {
-    LazyMassShift { offset: f64, n_decoys: u8 },
-    Passthrough,
-    None,
+    /// Score the stored rows as they are. Any decoys the file shipped are the
+    /// decoys; nothing is derived.
+    Stored,
+    /// Every stored row is a target, and the ± pair
+    /// `QueryItem::variant_shift` derives from it are its decoys. Never
+    /// materialized, so the arena holds targets only.
+    MassShift { offset: f64 },
 }
 
 /// What a reader does with decoy rows the file ships.
 ///
 /// Decided before reading rather than after, so a caller that is going to
 /// generate its own decoys never pays to parse the file's. It also makes the
-/// arena's own `LazyMassShift -> Passthrough` downgrade an observation instead
+/// arena's own `MassShift -> Stored` downgrade an observation instead
 /// of an override: with no shipped decoys in the arena there is nothing to
 /// downgrade, so the strategy the caller asked for is the one that runs.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -58,16 +69,24 @@ impl DecoyHandling {
     }
 }
 
-/// The ±CH2 mass-shift offset (Da) and variant count for lazily-generated
-/// decoys. Every construction of [`DecoyStrategy::LazyMassShift`] uses these,
-/// including the test profiles, so a change here reaches all of them.
+/// The ±CH2 mass-shift offset (Da) for derived decoys. Every construction of
+/// [`DecoyStrategy::MassShift`] uses it, including the test profiles, so a
+/// change here reaches all of them.
 ///
 /// Monoisotopic CH2: `12.0` (12-C, exact by definition) `+ 2 * 1.00782503207`
 /// (1-H). Rounding it to `14.0` is 15.65 mDa light of the group it is named
 /// after, or 22 ppm at m/z 700 charge 1 against a default 15 ppm tolerance,
 /// which moves every decoy m/z by more than the tolerance allows.
 pub const DECOY_CH2_OFFSET_DA: f64 = 14.01565006414;
-pub const DECOY_N_DECOYS: u8 = 2;
+
+/// Slots a [`DecoyStrategy::MassShift`] row expands into: the target plus the
+/// `+offset`/`-offset` pair.
+///
+/// Not a knob. `QueryItem::variant_shift` maps variant 1 to `+offset`, variant
+/// 2 to `-offset` and everything else to `0.0`, so a larger count would mint
+/// slots at the target's own m/z that `is_target()` then reports as decoys --
+/// target-identical scores on the decoy side of the FDR estimate.
+pub const MASS_SHIFT_VARIANTS: usize = 3;
 
 impl TargetCapabilities {
     /// The default DIA-NN `.speclib` profile: sequence features assumed
@@ -75,7 +94,7 @@ impl TargetCapabilities {
     /// decoys.
     ///
     /// Decoy generation is a scoring decision, so no constructor in this crate
-    /// produces it: `DecoyStrategy::LazyMassShift` has to be named outright, and
+    /// produces it: `DecoyStrategy::MassShift` has to be named outright, and
     /// timsseek is the only thing that names it, in `map_decoy_strategy`.
     ///
     /// A reader defaulting to decoys here makes `timsquery_cli` emit two
@@ -87,7 +106,7 @@ impl TargetCapabilities {
             sequence_features: SeqFeatureState::Available,
             fragment_features: FragmentFeatureState::Available,
             isotopes: IsotopeStrategy::FromComposition { n_isotopes: 3 },
-            decoys: DecoyStrategy::None,
+            decoys: DecoyStrategy::Stored,
         }
     }
 
@@ -102,15 +121,14 @@ impl TargetCapabilities {
         }
     }
 
-    /// The lazy ±CH2 decoy profile, for exercising the index transform in this
-    /// crate's own tests. Not available to production code: turning decoys on
-    /// belongs to the searcher.
+    /// The derived ±CH2 decoy profile, for exercising the index transform in
+    /// this crate's own tests. Not available to production code: turning decoys
+    /// on belongs to the searcher.
     #[cfg(test)]
     pub(crate) fn test_lazy_decoys() -> Self {
         Self {
-            decoys: DecoyStrategy::LazyMassShift {
+            decoys: DecoyStrategy::MassShift {
                 offset: DECOY_CH2_OFFSET_DA,
-                n_decoys: DECOY_N_DECOYS,
             },
             ..Self::default_diann()
         }

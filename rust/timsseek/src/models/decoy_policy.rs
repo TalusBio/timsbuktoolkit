@@ -4,14 +4,13 @@ use serde::{
 };
 use timsquery::models::capabilities::{
     DECOY_CH2_OFFSET_DA,
-    DECOY_N_DECOYS,
     DecoyHandling,
     DecoyStrategy,
 };
 
 /// CLI-facing decoy *policy*: what the user asks for, independent of how the
 /// arena realizes it. Resolved by [`map_decoy_strategy`] into timsquery's
-/// arena-side [`DecoyStrategy`] mechanism (LazyMassShift / Passthrough / None).
+/// arena-side [`DecoyStrategy`] mechanism (`MassShift` / `Stored`).
 #[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
 #[derive(Default)]
@@ -31,10 +30,10 @@ impl DecoyPolicy {
     /// What the reader should do with decoy rows the file ships.
     ///
     /// `Force` is the only policy that drops them, and dropping them is what
-    /// makes it mean anything: `map_decoy_strategy` returns `LazyMassShift` for
-    /// it, but `seal()` rewrites that to `Passthrough` whenever the arena holds
-    /// a shipped decoy. Filtering at the reader leaves nothing to rewrite, so
-    /// the mass-shift decoys the user asked for are the ones that get scored.
+    /// makes it mean anything: `map_decoy_strategy` returns `MassShift` for it,
+    /// but `seal()` rewrites that to `Stored` whenever the arena holds a shipped
+    /// decoy. Filtering at the reader leaves nothing to rewrite, so the
+    /// mass-shift decoys the user asked for are the ones that get scored.
     pub fn decoy_handling(self) -> DecoyHandling {
         match self {
             Self::Force => DecoyHandling::Skip,
@@ -69,29 +68,27 @@ impl std::str::FromStr for DecoyPolicy {
     }
 }
 
-/// Map the CLI-facing decoy policy to the timsquery arena's lazy decoy
-/// strategy, given whether the source library already ships its own decoys.
-/// The ±CH2 offset and variant count come from timsquery's
-/// [`DECOY_CH2_OFFSET_DA`]/[`DECOY_N_DECOYS`] (shared with
-/// `TargetCapabilities::default_diann`), so `Force` and the reader default can
+/// Map the CLI-facing decoy policy to the arena's decoy strategy, given whether
+/// the source library already ships its own decoys. The ±CH2 offset comes from
+/// timsquery's [`DECOY_CH2_OFFSET_DA`], so `Force` and the reader default can
 /// never drift apart.
 ///
-/// - `Force`: always (re)generate lazy mass-shift decoys, ignoring any
-///   decoys the file already carries.
-/// - `IfMissing` + no file decoys: generate lazy mass-shift decoys.
-/// - `IfMissing` + file already has decoys: `Passthrough` -- use the file's
-///   own decoy rows as-is (no arena-side generation).
-/// - `Never`: no decoy generation; library rows are used as-is.
+/// - `Force`: always derive mass-shift decoys, ignoring any the file carries
+///   (the reader drops those; see [`DecoyPolicy::decoy_handling`]).
+/// - `IfMissing` + no file decoys: derive mass-shift decoys.
+/// - `IfMissing` + file already has decoys: `Stored`.
+/// - `Never`: `Stored`.
+///
+/// The last two landing on the same strategy is the point: with decoys already
+/// in the arena, "use them" and "generate nothing" are the same instruction.
 pub fn map_decoy_strategy(policy: DecoyPolicy, has_file_decoys: bool) -> DecoyStrategy {
-    let lazy = DecoyStrategy::LazyMassShift {
+    let shift = DecoyStrategy::MassShift {
         offset: DECOY_CH2_OFFSET_DA,
-        n_decoys: DECOY_N_DECOYS,
     };
     match policy {
-        DecoyPolicy::Force => lazy,
-        DecoyPolicy::IfMissing if !has_file_decoys => lazy,
-        DecoyPolicy::IfMissing => DecoyStrategy::Passthrough,
-        DecoyPolicy::Never => DecoyStrategy::None,
+        DecoyPolicy::Force => shift,
+        DecoyPolicy::IfMissing if !has_file_decoys => shift,
+        DecoyPolicy::IfMissing | DecoyPolicy::Never => DecoyStrategy::Stored,
     }
 }
 
@@ -100,13 +97,12 @@ mod map_decoy_strategy_tests {
     use super::*;
 
     #[test]
-    fn force_always_lazy_mass_shift_regardless_of_file_decoys() {
+    fn force_always_mass_shift_regardless_of_file_decoys() {
         for has_file_decoys in [false, true] {
             assert_eq!(
                 map_decoy_strategy(DecoyPolicy::Force, has_file_decoys),
-                DecoyStrategy::LazyMassShift {
+                DecoyStrategy::MassShift {
                     offset: DECOY_CH2_OFFSET_DA,
-                    n_decoys: DECOY_N_DECOYS,
                 }
             );
         }
@@ -114,11 +110,10 @@ mod map_decoy_strategy_tests {
 
     /// The half that `map_decoy_strategy` alone cannot deliver.
     ///
-    /// `Force` resolves to `LazyMassShift`, and `seal()` rewrites that to
-    /// `Passthrough` whenever the arena holds a shipped decoy -- so asserting
-    /// the mapping proves nothing about what runs. What makes `Force` mean
-    /// "replace them" is the reader dropping them, leaving `seal()` nothing to
-    /// rewrite.
+    /// `Force` resolves to `MassShift`, and `seal()` rewrites that to `Stored`
+    /// whenever the arena holds a shipped decoy -- so asserting the mapping
+    /// proves nothing about what runs. What makes `Force` mean "replace them" is
+    /// the reader dropping them, leaving `seal()` nothing to rewrite.
     #[test]
     fn only_force_drops_the_decoys_a_file_ships() {
         assert_eq!(DecoyPolicy::Force.decoy_handling(), DecoyHandling::Skip);
@@ -132,33 +127,32 @@ mod map_decoy_strategy_tests {
     }
 
     #[test]
-    fn if_missing_without_file_decoys_is_lazy_mass_shift() {
+    fn if_missing_without_file_decoys_is_mass_shift() {
         assert_eq!(
             map_decoy_strategy(DecoyPolicy::IfMissing, false),
-            DecoyStrategy::LazyMassShift {
+            DecoyStrategy::MassShift {
                 offset: DECOY_CH2_OFFSET_DA,
-                n_decoys: DECOY_N_DECOYS,
             }
         );
     }
 
     #[test]
-    fn if_missing_with_file_decoys_is_passthrough() {
+    fn if_missing_with_file_decoys_is_stored() {
         assert_eq!(
             map_decoy_strategy(DecoyPolicy::IfMissing, true),
-            DecoyStrategy::Passthrough
+            DecoyStrategy::Stored
         );
     }
 
     #[test]
-    fn never_is_none() {
+    fn never_is_stored_either_way() {
         assert_eq!(
             map_decoy_strategy(DecoyPolicy::Never, false),
-            DecoyStrategy::None
+            DecoyStrategy::Stored
         );
         assert_eq!(
             map_decoy_strategy(DecoyPolicy::Never, true),
-            DecoyStrategy::None
+            DecoyStrategy::Stored
         );
     }
 }

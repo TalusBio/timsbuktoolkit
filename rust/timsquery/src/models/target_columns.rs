@@ -1,6 +1,7 @@
 use crate::KeyLike;
 use crate::models::capabilities::{
     DecoyStrategy,
+    MASS_SHIFT_VARIANTS,
     TargetCapabilities,
 };
 use crate::models::query_handle::QueryRef;
@@ -310,8 +311,8 @@ impl<L: KeyLike> TargetColumns<L> {
 
     /// Append one target (defaults `is_decoy = false`).
     /// Number of *physical stored rows*, i.e. how many analytes are held in
-    /// memory before decoy expansion. Under `LazyMassShift` every row is a
-    /// target; under `Passthrough` the count includes any stored decoy rows.
+    /// memory before decoy expansion. Under `MassShift` every row is a target;
+    /// under `Stored` the count includes any decoy rows the file shipped.
     /// This is the base for `expanded_len` (the logical, iterator-length count).
     pub fn n_rows(&self) -> usize {
         self.charge.len()
@@ -471,9 +472,9 @@ impl<L: KeyLike> TargetColumns<L> {
     /// Seal after build: enforce the decoy-strategy invariant, then release
     /// excess capacity on every arena.
     ///
-    /// `LazyMassShift` requires an all-targets arena (decoys are expressed as an
+    /// `MassShift` requires an all-targets arena (decoys are expressed as an
     /// on-the-fly ±CH2 index transform, never stored). If the library shipped
-    /// materialized decoys, downgrade to `Passthrough` so the stored rows are
+    /// materialized decoys, downgrade to `Stored` so the shipped rows are
     /// honored 1:1 instead of being silently re-decoyed.
     /// Fails when the pushed ids cannot make a column: two rows sharing an id
     /// (a caller keys results by it, so a repeat hides a row), or a library
@@ -527,20 +528,22 @@ impl<L: KeyLike> TargetColumns<L> {
     }
 
     fn apply_decoy_downgrades(&mut self) {
+        let ships_decoys = self.is_decoy.iter().any(|&d| d);
         // Nothing to build when no groups were declared: a row is then its own
         // group, which `decoy_group_code` derives. Only the case that actually
-        // loses information is worth a word.
-        if self.decoy_groups.is_none() && matches!(self.caps.decoys, DecoyStrategy::Passthrough) {
+        // loses information is worth a word. Keyed on the rows rather than on
+        // the strategy, which only ever implied them.
+        if ships_decoys && self.decoy_groups.is_none() {
             tracing::warn!(
                 "library ships its own decoys but declares no competition groups, so each \
                  stored decoy competes alone rather than against its target"
             );
         }
-        if matches!(self.caps.decoys, DecoyStrategy::LazyMassShift { .. })
-            && self.is_decoy.iter().any(|&d| d)
-        {
-            tracing::warn!("library ships decoys; downgrading LazyMassShift -> Passthrough");
-            self.caps.decoys = DecoyStrategy::Passthrough;
+        // `MassShift` assumes every stored row is a target. A shipped decoy
+        // would get a ± pair of its own, so honor the stored rows instead.
+        if matches!(self.caps.decoys, DecoyStrategy::MassShift { .. }) && ships_decoys {
+            tracing::warn!("library ships decoys; downgrading MassShift -> Stored");
+            self.caps.decoys = DecoyStrategy::Stored;
         }
     }
 
@@ -564,20 +567,20 @@ impl<L: KeyLike> TargetColumns<L> {
 }
 
 /// Decoys as an index transform: the arena stores only targets (under
-/// `LazyMassShift`), and expanded/flat indices fan each row out into its
+/// `MassShift`), and expanded/flat indices fan each row out into its
 /// target + decoy variants. Bounded on `DecoyShift` so `item_at` can hand out a
 /// `QueryRef` (the flyweight that computes decoy geometry on the fly).
 impl<L: KeyLike + DecoyShift> TargetColumns<L> {
     /// Variants each stored row expands into, from the decoy strategy alone:
-    /// `LazyMassShift` adds `n_decoys` mass-shifted variants (+1 for the
-    /// target); `Passthrough`/`None` are 1:1.
+    /// `MassShift` adds the ± pair (see [`MASS_SHIFT_VARIANTS`]); `Stored` is
+    /// 1:1.
     ///
-    /// `n_decoys` is a `u8`, which is what keeps a variant index inside the
-    /// `u8` that [`Self::split_flat`] casts it to.
+    /// Both values fit the `u8` that [`Self::split_flat`] casts a variant index
+    /// to.
     pub fn variants_per_row(&self) -> usize {
         match self.caps.decoys {
-            DecoyStrategy::LazyMassShift { n_decoys, .. } => n_decoys as usize + 1,
-            DecoyStrategy::Passthrough | DecoyStrategy::None => 1,
+            DecoyStrategy::MassShift { .. } => MASS_SHIFT_VARIANTS,
+            DecoyStrategy::Stored => 1,
         }
     }
 
@@ -734,9 +737,9 @@ mod tests {
     }
 
     #[test]
-    fn passthrough_is_one_variant_per_row_honoring_is_decoy() {
+    fn stored_is_one_variant_per_row_honoring_is_decoy() {
         let mut caps = TargetCapabilities::default_diann();
-        caps.decoys = DecoyStrategy::Passthrough;
+        caps.decoys = DecoyStrategy::Stored;
         let mut c = TargetColumns::with_capabilities(caps);
         c.push_row(Row {
             precursor_mz: 500.0,

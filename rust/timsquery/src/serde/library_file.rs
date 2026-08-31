@@ -213,7 +213,7 @@ impl TargetTable {
             // The one filter point for every format that reaches the arena
             // through this adapter. Dropping a shipped decoy here rather than
             // after sealing means its fragments are never parsed and the
-            // arena's own `LazyMassShift` downgrade never sees it.
+            // arena's own `MassShift` downgrade never sees it.
             if !decoys.accepts(row.is_decoy) {
                 continue;
             }
@@ -509,7 +509,7 @@ pub fn read_targets<T: AsRef<Path>>(path: T) -> Result<TargetTable, TargetReadin
 ///
 /// `Skip` drops them before they reach the arena, so a caller regenerating its
 /// own never pays to parse the file's and the arena never sees a shipped decoy
-/// to downgrade `LazyMassShift` over.
+/// to downgrade `MassShift` over.
 pub fn read_targets_with<T: AsRef<Path>>(
     path: T,
     decoys: DecoyHandling,

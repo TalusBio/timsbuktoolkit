@@ -81,7 +81,7 @@ pub fn main_query_index(args: QueryIndexArgs) -> Result<(), CliError> {
     // Every format funnels into one of the two label-typed arenas; extraction
     // is generic over the label, so both arms call the same driver over the
     // columnar flyweights (`QueryGeom`). The readers hand back target geometry
-    // only (`caps.decoys == DecoyStrategy::None`, so `expanded_len() ==
+    // only (`caps.decoys == DecoyStrategy::Stored`, so `expanded_len() ==
     // n_rows()`): decoy generation is a scoring decision the cli never makes, so
     // a `QueryRef` (geometry only) is all the collectors need.
     match arena {
@@ -397,8 +397,8 @@ mod tests {
     /// mzpaf-labelled library is loaded through the same `read_targets`
     /// path the cli uses, and its flat extraction length must equal the number
     /// of stored rows (targets only). Before the reader default was changed to
-    /// `DecoyStrategy::None`, the arena carried `LazyMassShift { n_decoys: 2 }`,
-    /// so `expanded_len()` was `3 * n_rows()` and the cli serialized two
+    /// `DecoyStrategy::Stored`, the arena carried `MassShift`, so
+    /// `expanded_len()` was `3 * n_rows()` and the cli serialized two
     /// mass-shifted decoy variants per elution group, corrupting the
     /// Carafe-compatible data-contract output.
     #[test]
