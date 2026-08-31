@@ -180,6 +180,13 @@ pub struct Row<'a, L: KeyLike> {
     /// competes alone. [`TargetColumns::seal`] stores nothing at all when that
     /// is true of every row, and when the groups it did get are all singletons
     /// -- both cases are what deriving the group from the row already does.
+    ///
+    /// One reader supplies this, and that is a fact about the formats rather
+    /// than about this field: mzSpecLib's `related spectrum keys` is the only
+    /// place a library states that one entry is the counterpart of another. A
+    /// DIA-NN/Spectronaut/Skyline `transition_group_id` names the row it is on,
+    /// not a partner, so those readers have nothing to pair by -- a decoy there
+    /// is a row flagged as a decoy and nothing more.
     pub decoy_group: Option<OwnedSourceId>,
 }
 

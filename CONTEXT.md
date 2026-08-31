@@ -82,6 +82,12 @@ charge. Two ways a group arises, and they differ in size:
 
 The declared case is the reason a group is not simply "a target and its decoys".
 
+Only mzSpecLib declares them. It is the one format with a way to say that one
+entry is the counterpart of another (`related spectrum keys`); a DIA-NN,
+Spectronaut or Skyline `transition_group_id` names the row it sits on, not a
+partner. So a decoy from any other format is a row flagged as a decoy and
+nothing more, and its group is derived.
+
 **Variant**:
 One member of a single target's decoy expansion -- the target itself, or one of
 its mass-shifted decoys. Scoped to one row, not to a group: a declared group
