@@ -30,9 +30,10 @@ pub struct ResolvedInputs {
 /// of the run reads tolerances, chunk size and the decoy strategy from it and
 /// writes it to `config_used.json`.
 ///
-/// `--calib-lib` and `--overwrite` have no configuration counterpart and are
-/// read straight from the command line. See the spec's Out of Scope for why
-/// calibration input is not a configuration field yet.
+/// Every input has a configuration home, so `config_used.json` records the whole
+/// run. `--overwrite` is the exception and is read straight from argv: it is a
+/// decision about one invocation rather than about how to search, and it is
+/// recorded in `run_report.json` instead.
 pub fn resolve_run_inputs(
     args: &SearchArgs,
     mut config: Config,
@@ -48,8 +49,28 @@ fn merge_cli_into_config(config: &mut Config, args: &SearchArgs) {
     if let Some(raw_inputs) = &args.raw_inputs {
         config.analysis.raw_inputs = Some(raw_inputs.clone());
     }
+    // The two libraries merge independently: naming one on the command line
+    // must not silently drop the other's configured value.
     if let Some(uri) = &args.speclib_uri {
-        config.input = Some(InputConfig::Speclib { uri: uri.clone() });
+        match &mut config.input {
+            Some(InputConfig::Speclib {
+                uri: configured, ..
+            }) => *configured = uri.clone(),
+            None => {
+                config.input = Some(InputConfig::Speclib {
+                    uri: uri.clone(),
+                    calib_uri: None,
+                })
+            }
+        }
+    }
+    if let Some(calib) = &args.calib_lib {
+        match &mut config.input {
+            Some(InputConfig::Speclib { calib_uri, .. }) => *calib_uri = Some(calib.clone()),
+            // A calibration library with no library to calibrate is rejected by
+            // `read_inputs`, which reports the missing one by flag name.
+            None => {}
+        }
     }
     if let Some(uri) = &args.output_uri {
         config.output = Some(OutputConfig { uri: uri.clone() });
@@ -72,8 +93,11 @@ fn read_inputs(args: &SearchArgs, config: &Config) -> Result<ResolvedInputs, Cli
         }
     };
 
-    let speclib_uri = match &config.input {
-        Some(InputConfig::Speclib { uri }) => expand_local_uri(uri),
+    let (speclib_uri, calib_lib_uri) = match &config.input {
+        Some(InputConfig::Speclib { uri, calib_uri }) => (
+            expand_local_uri(uri),
+            calib_uri.as_deref().map(expand_local_uri),
+        ),
         None => {
             return Err(CliError::Config {
                 source: "No input provided, please provide one in either the config file or with the --speclib-uri flag".to_string(),
@@ -93,7 +117,7 @@ fn read_inputs(args: &SearchArgs, config: &Config) -> Result<ResolvedInputs, Cli
     Ok(ResolvedInputs {
         raw_inputs,
         speclib_uri,
-        calib_lib_uri: args.calib_lib.as_deref().map(expand_local_uri),
+        calib_lib_uri,
         output_uri,
         overwrite: args.overwrite,
     })
@@ -113,8 +137,13 @@ mod tests {
     }
 
     fn resolve(argv: &[&str], config: Config) -> Result<ResolvedInputs, CliError> {
-        let cli = search(argv);
-        resolve_run_inputs(cli.search_args(), config).map(|(_, resolved)| resolved)
+        resolve_run_inputs(search(argv).search_args(), config).map(|(_, resolved)| resolved)
+    }
+
+    /// Both halves of the merge: the configuration as it would be written to
+    /// `config_used.json`, and the inputs read back out of it.
+    fn resolve_pair(argv: &[&str], config: Config) -> (Config, ResolvedInputs) {
+        resolve_run_inputs(search(argv).search_args(), config).expect("fixture resolves")
     }
 
     fn config_with(extra: &str) -> Config {
@@ -269,22 +298,91 @@ uri = "config_results"
     }
 
     #[test]
-    fn calib_lib_is_read_from_the_command_line_and_never_from_the_configuration() {
-        let resolved = resolve(
+    fn the_calibration_library_comes_from_either_source() {
+        let from_flag = resolve(
             &[
                 "--speclib-uri",
-                "lib.ndjson",
+                "lib.mzspeclib.txt",
                 "--output-uri",
                 "out",
                 "--raw-inputs",
                 "a.d",
                 "--calib-lib",
-                "calib.ndjson",
+                "calib.mzspeclib.txt",
             ],
             config_with(""),
         )
         .unwrap();
-        assert_eq!(resolved.calib_lib_uri.as_deref(), Some("calib.ndjson"));
+        assert_eq!(
+            from_flag.calib_lib_uri.as_deref(),
+            Some("calib.mzspeclib.txt")
+        );
+
+        let from_config = resolve(
+            &["--output-uri", "out", "--raw-inputs", "a.d"],
+            config_with(
+                "[input]\ntype = \"speclib\"\nuri = \"lib.mzspeclib.txt\"\n\
+                 calib_uri = \"calib.mzspeclib.txt\"\n",
+            ),
+        )
+        .unwrap();
+        assert_eq!(
+            from_config.calib_lib_uri.as_deref(),
+            Some("calib.mzspeclib.txt")
+        );
+    }
+
+    /// `--speclib-uri` and `--calib-lib` reach the same config field, so naming
+    /// one on the command line must not drop the other's configured value.
+    #[test]
+    fn naming_one_library_keeps_the_other() {
+        let resolved = resolve(
+            &[
+                "--output-uri",
+                "out",
+                "--raw-inputs",
+                "a.d",
+                "--speclib-uri",
+                "flag.mzspeclib.txt",
+            ],
+            config_with(
+                "[input]\ntype = \"speclib\"\nuri = \"config.mzspeclib.txt\"\n\
+                 calib_uri = \"calib.mzspeclib.txt\"\n",
+            ),
+        )
+        .unwrap();
+        assert_eq!(resolved.speclib_uri, "flag.mzspeclib.txt");
+        assert_eq!(
+            resolved.calib_lib_uri.as_deref(),
+            Some("calib.mzspeclib.txt"),
+            "the flag replaced the library, not the calibration library"
+        );
+    }
+
+    /// `config_used.json` is the artifact a run is reproduced from, and it is
+    /// serialized `Config`. So every input has to survive a round trip through
+    /// it -- which is what a command-line-only `--calib-lib` could not do.
+    #[test]
+    fn every_input_survives_the_config_used_round_trip() {
+        let argv = [
+            "--speclib-uri",
+            "lib.mzspeclib.txt",
+            "--output-uri",
+            "out",
+            "--raw-inputs",
+            "a.d",
+            "--calib-lib",
+            "calib.mzspeclib.txt",
+        ];
+        let (config, first) = resolve_pair(&argv, config_with(""));
+
+        let written = serde_json::to_string(&config).expect("config serializes");
+        let reread: Config = serde_json::from_str(&written).expect("config_used.json is a Config");
+
+        // Re-resolved with no flags at all: whatever the artifact holds is all
+        // there is to go on the second time.
+        let (_, second) = resolve_pair(&["--raw-inputs", "a.d"], reread);
+        assert_eq!(first, second);
     }
 
     /// Nothing is swallowed. Every argument is a flag, so no positional can

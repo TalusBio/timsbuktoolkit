@@ -16,10 +16,12 @@
 //!
 //! Run: cargo run -r -p timsseek --example query_bench
 //!
+//! Required:
+//!   BENCH_DOTD    -- .d directory or .idx cache
+//!   BENCH_SPECLIB -- spectral library path
+//!
 //! Env overrides:
-//!   BENCH_DOTD    -- .d path (default Hela)
-//!   BENCH_SPECLIB -- speclib path (default asdad)
-//!   QB_N         -- number of speclib entries to process (default 2000)
+//!   QB_N         -- number of library entries to process (default 2000)
 //!   QB_ITERS     -- outer repeat count (default 1)
 //!   QB_BUCKET    -- rebucket to this size before benching (default 256,
 //!                  set 0 to skip rebucket and use on-disk size)
@@ -68,15 +70,17 @@ fn env(key: &str, default: &str) -> String {
     std::env::var(key).unwrap_or_else(|_| default.to_string())
 }
 
+/// An input with no sensible default: a benchmark needs real data, and the only
+/// paths that ever worked here were one developer's home directory.
+fn required_env(key: &str, what: &str) -> String {
+    std::env::var(key).unwrap_or_else(|_| {
+        panic!("set {key} to {what}; this bench has no bundled data to fall back on")
+    })
+}
+
 fn main() {
-    let dotd = env(
-        "BENCH_DOTD",
-        "/Users/sebastianpaez/data/decompressed_timstof/250225_Desnaux_200ng_Hela_ICC_off_DIA.d",
-    );
-    let speclib_path = env(
-        "BENCH_SPECLIB",
-        "/Users/sebastianpaez/fasta/asdad.mzspeclib.txt.gz",
-    );
+    let dotd = required_env("BENCH_DOTD", "a .d directory or .idx cache");
+    let speclib_path = required_env("BENCH_SPECLIB", "a spectral library path");
     let n: usize = env("QB_N", "2000").parse().unwrap();
     let iters: usize = env("QB_ITERS", "1").parse().unwrap();
     let bucket_size: usize = env("QB_BUCKET", "256").parse().unwrap();

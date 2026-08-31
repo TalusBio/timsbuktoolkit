@@ -831,7 +831,10 @@ fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliError> {
     })?;
     info!("Wrote final configuration to {:?}", config_output_path);
 
-    let mut run_report = timsseek::scoring::RunReport::default();
+    let mut run_report = timsseek::scoring::RunReport {
+        overwrite: validated.overwrite,
+        ..Default::default()
+    };
     let mut failed_files: Vec<(String, errors::CliError)> = Vec::new();
     let mut successful_files: Vec<String> = Vec::new();
 

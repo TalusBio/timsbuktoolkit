@@ -121,6 +121,14 @@ pub enum InputConfig {
     Speclib {
         #[serde(alias = "path")]
         uri: String,
+        /// A second library, used only to fit the retention-time calibration.
+        ///
+        /// Lives here rather than staying a command-line-only flag because it
+        /// changes what a run produces, and `config_used.json` is the artifact a
+        /// run is reproduced from. A flag that never reached the config was a
+        /// flag the artifact could not record.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        calib_uri: Option<String>,
     },
 }
 
