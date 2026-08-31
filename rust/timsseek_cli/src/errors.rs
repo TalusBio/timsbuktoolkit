@@ -13,6 +13,11 @@ pub enum CliError {
     DataReading {
         source: String,
     },
+    /// Library prediction failed. Distinct from [`Self::DataReading`], which is
+    /// about reading an input: a build has no input to have misread.
+    LibraryBuild {
+        source: String,
+    },
 }
 
 impl std::fmt::Display for CliError {
@@ -28,6 +33,7 @@ impl std::fmt::Display for CliError {
                 }
             }
             CliError::DataReading { source } => write!(f, "Error reading data: {}", source),
+            CliError::LibraryBuild { source } => write!(f, "Error building library: {}", source),
         }
     }
 }

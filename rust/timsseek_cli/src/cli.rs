@@ -132,7 +132,7 @@ where
     }
 }
 
-#[derive(clap::Args, Debug, Default)]
+#[derive(clap::Args, Debug)]
 pub struct SearchArgs {
     /// Path to the log file.
     /// Defaults to {output_dir}/timsseek.log.
@@ -212,7 +212,7 @@ pub struct SearchArgs {
 /// beat the configuration file. The fallbacks live in
 /// [`LibraryConfig`](crate::config::LibraryConfig), which in turn falls back to
 /// msspeculator's defaults.
-#[derive(clap::Args, Debug, Default)]
+#[derive(clap::Args, Debug)]
 pub struct BuildLibraryArgs {
     /// Sequence database to digest.
     #[arg(long, value_name = "PATH")]

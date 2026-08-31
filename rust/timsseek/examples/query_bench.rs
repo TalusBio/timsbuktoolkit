@@ -75,7 +75,7 @@ fn main() {
     );
     let speclib_path = env(
         "BENCH_SPECLIB",
-        "/Users/sebastianpaez/fasta/asdad.msgpack.zstd",
+        "/Users/sebastianpaez/fasta/asdad.mzspeclib.txt.gz",
     );
     let n: usize = env("QB_N", "2000").parse().unwrap();
     let iters: usize = env("QB_ITERS", "1").parse().unwrap();

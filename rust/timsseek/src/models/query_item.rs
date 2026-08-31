@@ -76,7 +76,7 @@ impl<T: KeyLike + Default> Default for ExpectedIntensities<T> {
 impl<T: KeyLike + Default + std::fmt::Debug> ExpectedIntensities<T> {
     /// Construct from fragment and precursor pair iterators, erroring on any
     /// repeated key in either input. Preferred entry point for all library
-    /// load paths (speclib ndjson/msgpack, DIA-NN/Spectronaut/Skyline TSV).
+    /// load paths.
     pub fn try_from_pairs<FI, PI>(frags: FI, precs: PI) -> Result<Self, DuplicateKeyError>
     where
         FI: IntoIterator<Item = (T, f32)>,

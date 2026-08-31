@@ -27,9 +27,6 @@ use crate::config::{
 };
 use crate::errors::CliError;
 
-/// What `ModelSource::spec()` prefixes a compiled-in model with.
-const BUILTIN_PREFIX: &str = "builtin:";
-
 /// msspeculator's defaults, restated here only so a partially-specified
 /// `[library]` section does not have to name every field to change one.
 const DEFAULT_MODEL: &str = "builtin:small-v0";
@@ -192,8 +189,8 @@ pub fn run(resolved: &ResolvedBuild) -> Result<(), CliError> {
             generate_decoys: resolved.decoys,
         },
     })
-    .map_err(|e| CliError::DataReading {
-        source: format!("building library {}: {e:#}", resolved.out.display()),
+    .map_err(|e| CliError::LibraryBuild {
+        source: format!("{}: {e:#}", resolved.out.display()),
     })?;
 
     println!(
@@ -210,14 +207,23 @@ pub fn run(resolved: &ResolvedBuild) -> Result<(), CliError> {
 
 /// `builtin:NAME` for a model compiled into msspeculator, anything else a path
 /// to a `.safetensors` artifact.
+///
+/// The prefix and the set of names come from msspeculator, so a model added
+/// there is accepted here without an edit.
 fn parse_model_source(spec: &str) -> Result<ModelSource, CliError> {
-    match spec.strip_prefix(BUILTIN_PREFIX) {
-        Some("small-v0") => Ok(ModelSource::Builtin(BuiltinModel::SmallV0)),
-        Some(name) => Err(CliError::Config {
-            source: format!("--model: unknown builtin model {name:?}"),
-        }),
-        None => Ok(ModelSource::File(PathBuf::from(spec))),
-    }
+    let Some(name) = spec.strip_prefix(msspeculator_core::builtin::BUILTIN_PREFIX) else {
+        return Ok(ModelSource::File(PathBuf::from(spec)));
+    };
+    [BuiltinModel::SmallV0]
+        .into_iter()
+        .find(|model| model.name() == name)
+        .map(ModelSource::Builtin)
+        .ok_or_else(|| CliError::Config {
+            source: format!(
+                "--model: unknown builtin model {name:?}; this build carries: {}",
+                msspeculator_core::builtin::names().join(", ")
+            ),
+        })
 }
 
 /// A named setup fitted into the artifact, or the four acquisition factors

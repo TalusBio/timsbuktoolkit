@@ -7050,6 +7050,7 @@ dependencies = [
  "clap",
  "indicatif",
  "mimalloc",
+ "msspeculator-core",
  "msspeculator-inference",
  "rayon",
  "regex",

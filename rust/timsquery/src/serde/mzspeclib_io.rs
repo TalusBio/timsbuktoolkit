@@ -67,6 +67,13 @@ use crate::models::{
     TargetColumns,
 };
 
+/// What the parser yields. `MzSpecLibTextParser`'s `Iterator::Item` fixes the
+/// mass-output mode, so nothing downstream of it is generic over one.
+type Spectrum = AnnotatedSpectrum<mzcore::chemistry::OutputMolecularFormula>;
+
+/// One peak annotation, in the same fixed mode.
+type Annotation = Fragment<mzcore::chemistry::OutputMolecularFormula>;
+
 // ── The controlled vocabulary ────────────────────────────────────────────────
 //
 // Every bare `u32` accession in this file is a PSI-MS accession, and comparing
@@ -178,33 +185,36 @@ pub fn read_mzspeclib_library_file(path: &Path) -> Result<TargetTable, TargetRea
 
     let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
     let mut frag_intens: Vec<f32> = Vec::new();
-    let mut groups: Vec<String> = Vec::new();
-    let mut any_group_declared = false;
     let mut degradation = Degradation::default();
+    // `None` until a row declares a pair, so a library that declares none never
+    // allocates a group per row. Filled retroactively when the first one shows
+    // up, since the rows before it are their own groups.
+    let mut groups: Option<Vec<String>> = None;
 
     for (index, spectrum) in parser.enumerate() {
         let spectrum = spectrum.map_err(|e| {
             TargetReadingError::SpeclibParse(format!("mzSpecLib spectrum {}: {e}", index + 1))
         })?;
         let row = SpectrumRow::extract(&spectrum, &mut degradation)?;
+
         // Both halves of a pair have to land in one namespace. A decoy names
         // its target by `<Spectrum=N>` key, so an unpaired row is its own key
         // rather than its source id, which is a different string entirely.
-        any_group_declared |= row.declared_group.is_some();
-        groups.push(row.declared_group.unwrap_or_else(|| row.key.to_string()));
+        if let Some(group) = row.declared_group {
+            groups
+                .get_or_insert_with(|| (1..=index as u32).map(|key| key.to_string()).collect())
+                .push(group);
+        } else if let Some(groups) = groups.as_mut() {
+            groups.push(row.key.to_string());
+        }
 
-        frag_intens.extend(row.frags.iter().map(|(_, _, intensity)| *intensity));
-        let frags: Vec<(IonAnnot, f64)> = row
-            .frags
-            .iter()
-            .map(|(label, mz, _)| (*label, *mz))
-            .collect();
+        frag_intens.extend_from_slice(&row.intensities);
         geom.push_row(Row {
             precursor_mz: row.precursor_mz,
             charge: row.charge,
             rt_seconds: row.rt_seconds,
             mobility: row.mobility,
-            frags: &frags,
+            frags: &row.frags,
             seq_strip: &row.seq_strip,
             seq_mod: &row.seq_mod,
             is_decoy: row.is_decoy,
@@ -213,9 +223,8 @@ pub fn read_mzspeclib_library_file(path: &Path) -> Result<TargetTable, TargetRea
         });
     }
 
-    // A file that declares no pairing gets no group column: a row is then its
-    // own group and nothing is allocated.
-    if any_group_declared {
+    // Without a group column a row is its own group, derived rather than stored.
+    if let Some(groups) = groups {
         geom.set_decoy_groups(groups)?;
     }
     geom.seal()?;
@@ -297,13 +306,16 @@ struct SpectrumRow {
     declared_group: Option<String>,
     seq_strip: String,
     seq_mod: String,
-    /// `(label, theoretical m/z, intensity)`.
-    frags: Vec<(IonAnnot, f64, f32)>,
+    /// Parallel to `intensities`, and pushed straight into the arena.
+    frags: Vec<(IonAnnot, f64)>,
+    /// The reference-intensity sidecar for `frags`, kept separate because the
+    /// arena stores the two in different columns.
+    intensities: Vec<f32>,
 }
 
 impl SpectrumRow {
-    fn extract<M: mzcore::chemistry::MassOutputMode>(
-        spectrum: &AnnotatedSpectrum<M>,
+    fn extract(
+        spectrum: &Spectrum,
         degradation: &mut Degradation,
     ) -> Result<Self, TargetReadingError> {
         reject_unresolved_attribute_sets(spectrum)?;
@@ -325,6 +337,7 @@ impl SpectrumRow {
         let peak_mz_is_theoretical = origin_types(spectrum).any(declares_theoretical_mz);
         let mut counter = UnknownIonCounter::default();
         let mut frags = Vec::with_capacity(spectrum.peaks.len());
+        let mut intensities = Vec::with_capacity(spectrum.peaks.len());
         for peak in spectrum.peaks.iter() {
             let observed = peak.mz.value;
             match peak.annotations.as_slice() {
@@ -351,7 +364,8 @@ impl SpectrumRow {
                                 })?
                         }
                     };
-                    frags.push((label, mz, peak.intensity));
+                    frags.push((label, mz));
+                    intensities.push(peak.intensity);
                 }
                 // Several identities for one peak: no single theoretical mass
                 // exists, so there is nothing honest to store.
@@ -371,6 +385,7 @@ impl SpectrumRow {
             seq_strip,
             seq_mod,
             frags,
+            intensities,
         })
     }
 }
@@ -381,9 +396,7 @@ impl SpectrumRow {
 /// absent, and the decoy declaration is exactly what such a set usually carries.
 /// mzannotate drops an unresolvable claim silently but leaves the claim itself
 /// in the spectrum's leftover attributes, which is what this sees.
-fn reject_unresolved_attribute_sets<M: mzcore::chemistry::MassOutputMode>(
-    spectrum: &AnnotatedSpectrum<M>,
-) -> Result<(), TargetReadingError> {
+fn reject_unresolved_attribute_sets(spectrum: &Spectrum) -> Result<(), TargetReadingError> {
     // A resolved claim contributes its own attributes, so the origin type is
     // present; an unresolved one leaves only the claim.
     let origin_type_present = spectrum
@@ -423,7 +436,7 @@ fn stripped_sequence(ion: &mzcore::sequence::PeptidoformIon) -> String {
 
 /// What the file called this precursor. `MS:1003061|library spectrum name` when
 /// it has one, otherwise the `<Spectrum=N>` key.
-fn source_id<M: mzcore::chemistry::MassOutputMode>(spectrum: &AnnotatedSpectrum<M>) -> String {
+fn source_id(spectrum: &Spectrum) -> String {
     if spectrum.description.id.is_empty() {
         spectrum.key.to_string()
     } else {
@@ -434,8 +447,8 @@ fn source_id<M: mzcore::chemistry::MassOutputMode>(spectrum: &AnnotatedSpectrum<
 /// `MS:1000744|selected ion m/z` (DIA-NN), then
 /// `MS:1003208|experimental precursor monoisotopic m/z` (Spectronaut, which
 /// mzannotate routes to the isolation window), then the analyte's own mass.
-fn precursor_mz<M: mzcore::chemistry::MassOutputMode>(
-    spectrum: &AnnotatedSpectrum<M>,
+fn precursor_mz(
+    spectrum: &Spectrum,
     peptidoform: Option<&mzcore::sequence::PeptidoformIon>,
 ) -> f64 {
     if let Some(precursor) = spectrum.description.precursor.first() {
@@ -463,10 +476,7 @@ fn precursor_mz<M: mzcore::chemistry::MassOutputMode>(
 }
 
 /// `MS:1000041|charge state`, then the peptidoform's own charge carriers.
-fn charge<M: mzcore::chemistry::MassOutputMode>(
-    spectrum: &AnnotatedSpectrum<M>,
-    peptidoform: Option<&mzcore::sequence::PeptidoformIon>,
-) -> u8 {
+fn charge(spectrum: &Spectrum, peptidoform: Option<&mzcore::sequence::PeptidoformIon>) -> u8 {
     spectrum
         .description
         .precursor
@@ -491,7 +501,7 @@ fn charge<M: mzcore::chemistry::MassOutputMode>(
 /// zero and negative numbers are ordinary. Calibration fits a monotone path
 /// from it to observed time, so ordering is what has to survive here, not
 /// units. See the CONTEXT.md entry on retention time.
-fn rt_seconds<M: mzcore::chemistry::MassOutputMode>(spectrum: &AnnotatedSpectrum<M>) -> f32 {
+fn rt_seconds(spectrum: &Spectrum) -> f32 {
     const SECONDS_PER_MINUTE: f64 = 60.0;
     spectrum
         .description
@@ -504,7 +514,7 @@ fn rt_seconds<M: mzcore::chemistry::MassOutputMode>(spectrum: &AnnotatedSpectrum
 /// `MS:1002815|inverse reduced ion mobility` first, because that is the axis a
 /// timsTOF search filters on. `MS:1002476|ion mobility drift time` is the
 /// drift-tube spelling both vendor exports happen to use.
-fn mobility<M: mzcore::chemistry::MassOutputMode>(spectrum: &AnnotatedSpectrum<M>) -> f32 {
+fn mobility(spectrum: &Spectrum) -> f32 {
     let Some(scan) = spectrum.description.acquisition.scans.first() else {
         return 0.0;
     };
@@ -526,10 +536,7 @@ fn mobility<M: mzcore::chemistry::MassOutputMode>(spectrum: &AnnotatedSpectrum<M
 /// SpectraST's old spelling of shuffle-and-reposition or the current
 /// unnatural-peptidoform one, because membership comes from the `is_a` closure
 /// rather than from the term's name.
-fn is_decoy<M: mzcore::chemistry::MassOutputMode>(
-    spectrum: &AnnotatedSpectrum<M>,
-    degradation: &mut Degradation,
-) -> bool {
+fn is_decoy(spectrum: &Spectrum, degradation: &mut Degradation) -> bool {
     for accession in origin_types(spectrum) {
         match subsumes_decoy(accession) {
             Some(decoy) => return decoy,
@@ -550,9 +557,7 @@ fn is_decoy<M: mzcore::chemistry::MassOutputMode>(
 /// CURIE half is parsed. A value in another namespace yields nothing rather than
 /// a bare number: this is one of the two namespace boundaries described at the
 /// top of this file.
-fn origin_types<M: mzcore::chemistry::MassOutputMode>(
-    spectrum: &AnnotatedSpectrum<M>,
-) -> impl Iterator<Item = u32> + '_ {
+fn origin_types(spectrum: &Spectrum) -> impl Iterator<Item = u32> + '_ {
     spectrum
         .description
         .params
@@ -580,9 +585,7 @@ fn is_ms_term(param: &mzannotate::mzdata::params::Param, accession: u32) -> bool
 ///
 /// Both name the target a decoy was derived from, so the target and its decoy
 /// land in one group. `None` leaves the row as its own group.
-fn declared_group<M: mzcore::chemistry::MassOutputMode>(
-    spectrum: &AnnotatedSpectrum<M>,
-) -> Option<String> {
+fn declared_group(spectrum: &Spectrum) -> Option<String> {
     if let Some(param) = spectrum
         .description
         .params
@@ -611,8 +614,8 @@ fn declared_group<M: mzcore::chemistry::MassOutputMode>(
 /// theoretical mass, which is the case for every predicted library including
 /// the ones this project writes. An observed spectrum with neither has no
 /// theoretical mass to offer and the peak is skipped.
-fn theoretical_mz<M: mzcore::chemistry::MassOutputMode>(
-    annotation: &Fragment<M>,
+fn theoretical_mz(
+    annotation: &Annotation,
     observed: f64,
     peak_mz_is_theoretical: bool,
 ) -> Option<f64> {
@@ -635,9 +638,7 @@ fn theoretical_mz<M: mzcore::chemistry::MassOutputMode>(
 /// charge and isotope come off the typed annotation. Only the neutral loss goes
 /// through a formula, and that lookup is keyed by composition, so `CH3SOH` and
 /// `CH4OS` resolve to one loss rather than two labels for one ion.
-fn to_ion_annot<M: mzcore::chemistry::MassOutputMode>(
-    annotation: &Fragment<M>,
-) -> Option<IonAnnot> {
+fn to_ion_annot(annotation: &Annotation) -> Option<IonAnnot> {
     // The match yields only the kind; the annotation is built once below.
     let backbone = |letter: char, position: &mzcore::sequence::PeptidePosition| {
         IonSeriesOrdinal::from_series_char(letter, Some(u8::try_from(position.series_number).ok()?))
@@ -669,9 +670,7 @@ fn to_ion_annot<M: mzcore::chemistry::MassOutputMode>(
 /// discriminant for. `None` routes the peak to an unknown label rather than
 /// silently dropping the loss, which would put a lossy peak's m/z on the
 /// unlossy label.
-fn neutral_loss<M: mzcore::chemistry::MassOutputMode>(
-    annotation: &Fragment<M>,
-) -> Option<NeutralLoss> {
+fn neutral_loss(annotation: &Annotation) -> Option<NeutralLoss> {
     match annotation.neutral_loss.as_slice() {
         [] => Some(NeutralLoss::None),
         // A loss, and only a loss. `Gain` and `SideChainLoss` are outside what
@@ -688,13 +687,13 @@ fn neutral_loss<M: mzcore::chemistry::MassOutputMode>(
     }
 }
 
-fn charge_of<M: mzcore::chemistry::MassOutputMode>(annotation: &Fragment<M>) -> Option<i8> {
+fn charge_of(annotation: &Annotation) -> Option<i8> {
     i8::try_from(annotation.charge.value)
         .ok()
         .filter(|c| *c != 0)
 }
 
-fn isotope_of<M: mzcore::chemistry::MassOutputMode>(annotation: &Fragment<M>) -> Option<i8> {
+fn isotope_of(annotation: &Annotation) -> Option<i8> {
     match annotation.isotope.as_slice() {
         [] => Some(0),
         _ => None,

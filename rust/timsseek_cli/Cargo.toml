@@ -16,6 +16,9 @@ tempfile = { workspace = true }
 # there; this crate owns only the flag surface. Pinned to a revision rather than
 # a branch, and unpublished, so it is a git reference until it reaches crates.io.
 msspeculator-inference = { git = "https://github.com/TalusBio/msspeculator", rev = "bb8ef1220ec44b6f32d79d94f6ed9ed7016e9beb" }
+# For `builtin::BUILTIN_PREFIX` and `builtin::names()`, which the inference
+# crate does not re-export. Same revision, already in the graph.
+msspeculator-core = { git = "https://github.com/TalusBio/msspeculator", rev = "bb8ef1220ec44b6f32d79d94f6ed9ed7016e9beb" }
 calib_dash = { path = "../calib_dash", optional = true }
 
 regex = "1.11.1"
@@ -37,10 +40,6 @@ timsrust = { workspace = true }
 [[bin]]
 name = "timsseek"
 path = "src/main.rs"
-
-[[bin]]
-name = "timsseek_sample_speclib"
-path = "src/sample_speclib.rs"
 
 [target.'cfg(any(target_os = "windows", target_env = "musl"))'.dependencies]
 mimalloc = { workspace = true }
