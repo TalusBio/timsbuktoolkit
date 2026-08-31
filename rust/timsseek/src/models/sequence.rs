@@ -351,10 +351,12 @@ fn modification_to_mod(m: &mzcore::sequence::Modification) -> Option<Mod> {
 
 /// Rewrite `[U:<digits>]` to `[UNIMOD:<digits>]`, leaving `[U:<name>]` alone.
 ///
-/// Both are valid ProForma. The expansion exists only so the byte-walk parser's
-/// `classify_mod` recognizes an accession without a second spelling to match;
-/// a name has to survive verbatim, because mzcore resolves `U:<name>` and not
-/// `UNIMOD:<name>`.
+/// ProForma 2.1 pairs a name with the one-letter prefix (§6.2.1) and an
+/// accession with the long one (§6.2.2), and calls the short-prefix accession
+/// `[U:35]` incorrect outright. So this canonicalizes a spelling the spec
+/// rejects into the one it wants, which is also the one `classify_mod` reads --
+/// and leaves a name alone, since moving it to the long prefix would produce a
+/// form the spec does not define.
 fn expand_unimod_accessions(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
@@ -463,13 +465,16 @@ pub fn normalize_to_proforma(raw: &str) -> String {
 
     // Normalize any pre-existing bracket casing likewise.
     let mut s = replace_ascii_ci(&s, "[unimod:", "[UNIMOD:");
-    // `U:` is ProForma's own short spelling for UNIMOD and is expanded only for
-    // an accession, which is the form `classify_mod`'s fast path reads. A NAME
-    // is left alone: mzcore accepts `[U:Carbamidomethyl]` and rejects
-    // `[UNIMOD:Carbamidomethyl]`, so expanding it turned a sequence that parsed
-    // into one that did not -- and since the gate is library-wide, one such
-    // modification disabled sequence features for the whole file. Every
-    // mzSpecLib library naming its modifications hit this.
+    // Expanded only for an accession, which is the form `classify_mod`'s fast
+    // path reads. A NAME is left alone, because ProForma 2.1 keeps the two in
+    // separate namespaces: §6.2.1 gives names a ONE-LETTER prefix, and §6.2.2
+    // requires accessions to use the long one ("full accession numbers MUST be
+    // used in all cases"). So `[UNIMOD:Carbamidomethyl]` is in neither, and
+    // expanding a name produced a string no parser owes us an answer for.
+    //
+    // That is what made it a bug rather than a nicety: mzSpecLib names its
+    // modifications, the gate is library-wide, and one unparsable row turned
+    // sequence features off for a whole library.
     s = expand_unimod_accessions(&s);
 
     // A mod at the very start is N-terminal: ProForma wants `[UNIMOD:n]-SEQ`.
