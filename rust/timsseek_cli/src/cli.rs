@@ -63,7 +63,7 @@ pub struct Cli {
     /// Path to the .d file(s) (will over-write the config file)
     /// Can be specified multiple times for batch processing
     #[arg(long = "raw-inputs", alias = "dotd-files", value_name = "URI")]
-    pub raw_inputs: Vec<String>,
+    pub raw_inputs: Option<Vec<String>>,
 
     /// Path to the speclib file (will over-write the config file)
     #[arg(long = "speclib-uri", alias = "speclib-file")]

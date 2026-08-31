@@ -4,6 +4,7 @@ mod config;
 mod dashboard;
 mod errors;
 mod processing;
+mod run_inputs;
 
 use clap::Parser;
 use timsquery::utils::TupleRange;
@@ -38,8 +39,11 @@ use tracing_profile::{
 use cli::Cli;
 use config::{
     Config,
-    InputConfig,
     OutputConfig,
+};
+use run_inputs::{
+    ResolvedInputs,
+    resolve_run_inputs,
 };
 // use tracing_profile::PerfettoLayer;
 
@@ -60,56 +64,24 @@ static GLOBAL: MiMalloc = MiMalloc;
 #[global_allocator]
 static GLOBAL: alloc_track::TrackingAllocator = alloc_track::TrackingAllocator::new();
 
-struct ValidatedInputs {
-    raw_inputs: Vec<String>,
-    speclib_uri: String,
-    calib_lib_uri: Option<String>,
-    output_uri: String,
-    overwrite: bool,
-}
+use tims_stage::is_remote_uri;
 
-use tims_stage::{
-    expand_local_uri,
-    is_remote_uri,
-};
-
-fn validate_inputs(
-    config: &Config,
-    args: &Cli,
-) -> std::result::Result<ValidatedInputs, errors::CliError> {
+/// Probe the filesystem for everything the run is about to touch, so a missing
+/// input or a colliding artifact fails before the heavy analysis rather than
+/// after it. Every value it reads was resolved by [`resolve_run_inputs`].
+fn validate_inputs(resolved: &ResolvedInputs) -> std::result::Result<(), errors::CliError> {
     info!("Validating inputs and outputs before processing...");
 
-    // `~` is not expanded by `Path::exists` / `File::open`; canonicalise once
-    // so validation, staging and probes all see the same expanded form.
-    let raw_inputs: Vec<String> = match config.analysis.raw_inputs.clone() {
-        Some(files) => files.iter().map(|f| expand_local_uri(f)).collect(),
-        None => {
-            return Err(errors::CliError::Config {
-                source: "No raw files provided, please provide raw_inputs in either the config file or with the --raw-inputs flag".to_string(),
-            });
-        }
-    };
-
-    let speclib_uri: String = match &config.input {
-        Some(InputConfig::Speclib { uri }) => expand_local_uri(uri),
-        None => {
-            return Err(errors::CliError::Config {
-                source: "No input specified".to_string(),
-            });
-        }
-    };
-
-    let output_uri: String = match &config.output {
-        Some(output_config) => expand_local_uri(&output_config.uri),
-        None => {
-            return Err(errors::CliError::Config {
-                source: "No output directory specified".to_string(),
-            });
-        }
-    };
+    let ResolvedInputs {
+        raw_inputs,
+        speclib_uri,
+        calib_lib_uri,
+        output_uri,
+        overwrite,
+    } = resolved;
 
     // Local only: remote resolution happens at open.
-    if !is_remote_uri(&speclib_uri) && !std::path::Path::new(&speclib_uri).exists() {
+    if !is_remote_uri(speclib_uri) && !std::path::Path::new(speclib_uri).exists() {
         return Err(errors::CliError::Io {
             source: "Speclib file does not exist".to_string(),
             path: Some(speclib_uri.clone()),
@@ -117,8 +89,7 @@ fn validate_inputs(
     }
     info!("✓ Speclib URI: {}", speclib_uri);
 
-    let calib_lib_uri: Option<String> = args.calib_lib.as_deref().map(expand_local_uri);
-    if let Some(ref uri) = calib_lib_uri {
+    if let Some(uri) = calib_lib_uri {
         if !is_remote_uri(uri) && !std::path::Path::new(uri).exists() {
             return Err(errors::CliError::Io {
                 source: "Calibration library file does not exist".to_string(),
@@ -130,7 +101,7 @@ fn validate_inputs(
 
     // Local-path existence only; remote URIs are resolved by tims_stage at
     // staging time.
-    for raw_uri in &raw_inputs {
+    for raw_uri in raw_inputs {
         if !is_remote_uri(raw_uri) && !std::path::Path::new(raw_uri.as_str()).exists() {
             return Err(errors::CliError::Io {
                 source: "Raw file does not exist".to_string(),
@@ -141,8 +112,8 @@ fn validate_inputs(
     info!("✓ All {} raw input(s) validated", raw_inputs.len());
 
     // Remote outputs skip the writability probe -- the upload is the write test.
-    if !is_remote_uri(&output_uri) {
-        let output_dir_path = std::path::Path::new(&output_uri);
+    if !is_remote_uri(output_uri) {
+        let output_dir_path = std::path::Path::new(output_uri);
 
         match std::fs::create_dir_all(output_dir_path) {
             Ok(_) => {
@@ -178,16 +149,16 @@ fn validate_inputs(
     // writer sites (search for `ARTIFACT-LIST`):
     //   per-sample: processing.rs, main.rs overwrite-cleanup block
     //   run-level:  main.rs run report, OutputSink::finalize_run call site
-    if !args.overwrite {
+    if !overwrite {
         let mut collisions: Vec<String> = Vec::new();
-        for raw_uri in &raw_inputs {
+        for raw_uri in raw_inputs {
             let sample = sample_name_from_uri(raw_uri).ok_or_else(|| errors::CliError::Io {
                 source: "Unable to extract file stem".to_string(),
                 path: Some(raw_uri.clone()),
             })?;
             // ARTIFACT-LIST (per-sample)
             for artifact in ["results.parquet", "performance_report.json"] {
-                let uri = join_output_uri(&output_uri, &format!("{sample}/{artifact}"));
+                let uri = join_output_uri(output_uri, &format!("{sample}/{artifact}"));
                 if probe_uri_exists(&uri)? {
                     collisions.push(uri);
                 }
@@ -195,7 +166,7 @@ fn validate_inputs(
         }
         // ARTIFACT-LIST (run-level)
         for artifact in ["run_report.json", "config_used.json"] {
-            let uri = join_output_uri(&output_uri, artifact);
+            let uri = join_output_uri(output_uri, artifact);
             if probe_uri_exists(&uri)? {
                 collisions.push(uri);
             }
@@ -226,13 +197,7 @@ fn validate_inputs(
 
     info!("All validations passed! Starting processing...");
 
-    Ok(ValidatedInputs {
-        raw_inputs,
-        speclib_uri,
-        calib_lib_uri,
-        output_uri,
-        overwrite: args.overwrite,
-    })
+    Ok(())
 }
 
 /// Join an artifact path onto a base output URI. Remote URIs get a plain
@@ -586,15 +551,12 @@ struct TracingHandle {
 /// The `YYYYMMDDTHHMMSS` local-time suffix avoids clobbering previous runs
 /// sharing the directory. Logs never reach the terminal unless `--log-path -`
 /// opts in.
-fn init_tracing(args: &Cli, config: &Config) -> TracingHandle {
+fn init_tracing(args: &Cli, resolved: &ResolvedInputs) -> TracingHandle {
     let log_file_path: Option<std::path::PathBuf> = match args.log_path {
         Some(ref p) if p.to_str() == Some("-") => None,
         Some(ref p) => Some(p.clone()),
         None => {
-            let base: std::path::PathBuf = args
-                .output_uri
-                .as_ref()
-                .or(config.output.as_ref().map(|o| &o.uri))
+            let base: std::path::PathBuf = Some(&resolved.output_uri)
                 .filter(|d| !is_remote_uri(d.as_str()))
                 .map(std::path::PathBuf::from)
                 .unwrap_or_else(|| {
@@ -729,7 +691,7 @@ fn run() -> std::result::Result<(), errors::CliError> {
         return Ok(());
     }
 
-    let mut config = match args.config {
+    let config = match args.config {
         Some(ref config_path) => {
             let text = std::fs::read_to_string(config_path).map_err(|e| errors::CliError::Io {
                 source: e.to_string(),
@@ -762,41 +724,16 @@ fn run() -> std::result::Result<(), errors::CliError> {
         }
     };
 
-    // CLI args win over the config file.
-    if !args.raw_inputs.is_empty() {
-        config.analysis.raw_inputs = Some(args.raw_inputs.clone());
-    }
-    if let Some(ref speclib_uri) = args.speclib_uri {
-        config.input = Some(InputConfig::Speclib {
-            uri: speclib_uri.clone(),
-        });
-    }
-    if config.input.is_none() {
-        return Err(errors::CliError::Config {
-            source: "No input provided, please provide one in either the config file or with the --speclib-uri flag".to_string(),
-        });
-    }
-    if let Some(ref output_uri) = args.output_uri {
-        config.output = Some(OutputConfig {
-            uri: output_uri.clone(),
-        });
-    }
-
-    if let Some(strategy) = args.decoy_strategy {
-        config.analysis.decoy_strategy = strategy;
-    }
-    if let Some(model) = args.rescore_model {
-        config.analysis.rescore_model = model.into();
-    }
+    let (config, validated) = resolve_run_inputs(&args, config)?;
 
     // Held in `run()`'s scope so the instrumentation flush guard drops after
     // all work completes.
-    let _tracing = init_tracing(&args, &config);
+    let _tracing = init_tracing(&args, &validated);
 
     info!("Parsed configuration: {:#?}", config.clone());
     alloc_track::snap!("start");
 
-    let validated = validate_inputs(&config, &args)?;
+    validate_inputs(&validated)?;
 
     // The stale-tempdir sweep runs inside `PerRunTempdir::new`.
     let staging_cfg = config.staging.clone().unwrap_or_default();
