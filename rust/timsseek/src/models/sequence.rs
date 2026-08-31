@@ -5,41 +5,20 @@
 use crate::models::decoy::DecoyMarking;
 use serde::Serialize;
 use smallvec::SmallVec;
-use std::sync::{
-    Arc,
-    OnceLock,
-};
+use std::sync::Arc;
+use timsquery::chemistry::ontologies;
 
-/// Ontologies used by the fallback ProForma parser. GNOme is omitted because
-/// it adds 191,529 entries and 26.4 MB to initialization. Loading the other four
-/// indexes takes about 48 ms instead of 2.6 s for all six.
-///
-/// A GNO modification already produces no usable `ParsedSequence`.
-/// [`count_carbon_sulphur_in_sequence`](crate::fragment_mass::elution_group_converter::count_carbon_sulphur_in_sequence)
-/// rejects it during formula counting. `isotope_dist_or_averagine` receives a
-/// mod-stripped sequence, so this change does not affect its GNO handling.
-/// PSI-MOD, XL-MOD, and RESID remain loaded for formula counts.
-///
-/// DIA-NN writes `(UniMod:n)`. [`normalize_to_proforma`] changes that to
-/// `[UNIMOD:n]`, which the byte-walk parser handles without an ontology. A
-/// hand-written `[GNO:...]` input is the case that reaches this fallback.
-fn ontologies() -> &'static mzcore::ontology::Ontologies {
-    static ONTOLOGIES: OnceLock<mzcore::ontology::Ontologies> = OnceLock::new();
-    ONTOLOGIES.get_or_init(|| {
-        let mut ontologies = mzcore::ontology::Ontologies::empty();
-        *ontologies.unimod_mut() = mzcv::CVIndex::init_static();
-        *ontologies.psimod_mut() = mzcv::CVIndex::init_static();
-        *ontologies.xlmod_mut() = mzcv::CVIndex::init_static();
-        *ontologies.resid_mut() = mzcv::CVIndex::init_static();
-        ontologies
-    })
-}
-
-/// Parse a ProForma string with this module's cached ontologies.
+/// Parse a ProForma string with the process-wide ontologies.
 ///
 /// This handles input that the byte-walk parser in [`parse_sequence`] does not
-/// recognize. Build the indexes on first use. Inputs that match the fast grammar
-/// do not load them.
+/// recognize. The indexes are built on first use, so input that matches the fast
+/// grammar never loads them. They live in timsquery because the mzSpecLib reader
+/// needs the same set and cannot depend on this crate; see
+/// [`timsquery::chemistry`].
+///
+/// DIA-NN writes `(UniMod:n)`. [`normalize_to_proforma`] changes that to
+/// `[UNIMOD:n]`, which the byte-walk parser handles without an ontology, so a
+/// hand-written `[GNO:...]` input is the case that reaches this fallback.
 ///
 /// mzcore returns parse warnings with the peptidoform. Callers only need the
 /// success or failure result, so this function drops the warnings.

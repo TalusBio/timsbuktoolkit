@@ -20,7 +20,6 @@
 
 use std::io::BufRead;
 use std::path::Path;
-use std::sync::OnceLock;
 
 use micromzpaf::{
     IonAnnot,
@@ -57,28 +56,12 @@ use super::library_file::{
     TargetTable,
 };
 use super::psims_origin_type;
+use crate::chemistry::ontologies;
 use crate::models::{
     Row,
     TargetCapabilities,
     TargetColumns,
 };
-
-/// Ontologies for the ProForma parser mzannotate runs over each analyte.
-///
-/// GNOme is omitted for the same reason timsseek omits it: 191,529 entries and
-/// 26.4 MB of initialization that no reachable library needs. The other four
-/// index in about 48 ms, and only on the first library that reaches this.
-fn ontologies() -> &'static mzcore::ontology::Ontologies {
-    static ONTOLOGIES: OnceLock<mzcore::ontology::Ontologies> = OnceLock::new();
-    ONTOLOGIES.get_or_init(|| {
-        let mut ontologies = mzcore::ontology::Ontologies::empty();
-        *ontologies.unimod_mut() = mzcv::CVIndex::init_static();
-        *ontologies.psimod_mut() = mzcv::CVIndex::init_static();
-        *ontologies.xlmod_mut() = mzcv::CVIndex::init_static();
-        *ontologies.resid_mut() = mzcv::CVIndex::init_static();
-        ontologies
-    })
-}
 
 // ── The controlled vocabulary ────────────────────────────────────────────────
 //
