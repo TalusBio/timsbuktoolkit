@@ -415,15 +415,21 @@ impl TargetTable {
     }
 }
 
-/// A single spectral-library format reader. Adding a format = one struct + one
-/// line in [`registry`], instead of editing an enum, a method, and an ordered
+/// A single spectral-library format reader. Adding a format is one struct and
+/// one line in [`registry`], rather than an enum, a method and an ordered
 /// try-chain.
+///
+/// `read` returns the arena, not an intermediate. Formats that declare decoy
+/// groups have no way to express them through
+/// [`ElutionGroupCollection`], so returning that instead forced two of them to
+/// bypass the registry through hardcoded `if sniff(..)` blocks; the ones that
+/// do go through it call [`TargetTable::from_elution_groups`] themselves.
 pub trait LibraryReader: Send + Sync {
     fn name(&self) -> &'static str;
     /// Cheap probe: header bytes / extension / first data row. Must not read the
     /// whole file.
     fn sniff(&self, path: &Path) -> bool;
-    fn read(&self, path: &Path) -> Result<ElutionGroupCollection, TargetReadingError>;
+    fn read(&self, path: &Path, decoys: DecoyHandling) -> Result<TargetTable, TargetReadingError>;
 }
 
 struct DiannParquetReader;
@@ -440,16 +446,16 @@ impl LibraryReader for DiannParquetReader {
         sniff_diann_parquet_library_file(path)
     }
 
-    fn read(&self, path: &Path) -> Result<ElutionGroupCollection, TargetReadingError> {
+    fn read(&self, path: &Path, decoys: DecoyHandling) -> Result<TargetTable, TargetReadingError> {
         let egs = read_diann_parquet(path).map_err(|e| {
             warn!("Failed to read DIA-NN parquet library file: {:?}", e);
             TargetReadingError::UnableToParseElutionGroups
         })?;
         let (egs, extras): (Vec<_>, Vec<_>) = egs.into_iter().unzip();
-        Ok(ElutionGroupCollection::MzpafLabels(
-            egs,
-            Some(FileReadingExtras::Diann(extras)),
-        ))
+        TargetTable::from_elution_groups(
+            ElutionGroupCollection::MzpafLabels(egs, Some(FileReadingExtras::Diann(extras))),
+            decoys,
+        )
     }
 }
 
@@ -462,16 +468,16 @@ impl LibraryReader for DiannTsvReader {
         sniff_diann_library_file(path)
     }
 
-    fn read(&self, path: &Path) -> Result<ElutionGroupCollection, TargetReadingError> {
+    fn read(&self, path: &Path, decoys: DecoyHandling) -> Result<TargetTable, TargetReadingError> {
         let egs = read_diann_tsv(path).map_err(|e| {
             warn!("Failed to read DIA-NN TSV library file: {:?}", e);
             TargetReadingError::UnableToParseElutionGroups
         })?;
         let (egs, extras): (Vec<_>, Vec<_>) = egs.into_iter().unzip();
-        Ok(ElutionGroupCollection::MzpafLabels(
-            egs,
-            Some(FileReadingExtras::Diann(extras)),
-        ))
+        TargetTable::from_elution_groups(
+            ElutionGroupCollection::MzpafLabels(egs, Some(FileReadingExtras::Diann(extras))),
+            decoys,
+        )
     }
 }
 
@@ -484,16 +490,16 @@ impl LibraryReader for SpectronautReader {
         sniff_spectronaut_library_file(path).is_ok()
     }
 
-    fn read(&self, path: &Path) -> Result<ElutionGroupCollection, TargetReadingError> {
+    fn read(&self, path: &Path, decoys: DecoyHandling) -> Result<TargetTable, TargetReadingError> {
         let egs = read_spectronaut_tsv(path).map_err(|e| {
             warn!("Failed to read Spectronaut TSV library file: {:?}", e);
             TargetReadingError::UnableToParseElutionGroups
         })?;
         let (egs, extras): (Vec<_>, Vec<_>) = egs.into_iter().unzip();
-        Ok(ElutionGroupCollection::MzpafLabels(
-            egs,
-            Some(FileReadingExtras::Spectronaut(extras)),
-        ))
+        TargetTable::from_elution_groups(
+            ElutionGroupCollection::MzpafLabels(egs, Some(FileReadingExtras::Spectronaut(extras))),
+            decoys,
+        )
     }
 }
 
@@ -506,26 +512,70 @@ impl LibraryReader for SkylineReader {
         sniff_skyline_library_file(path).is_ok()
     }
 
-    fn read(&self, path: &Path) -> Result<ElutionGroupCollection, TargetReadingError> {
+    fn read(&self, path: &Path, decoys: DecoyHandling) -> Result<TargetTable, TargetReadingError> {
         let egs = read_skyline_csv(path).map_err(|e| {
             warn!("Failed to read Skyline transition list: {:?}", e);
             TargetReadingError::UnableToParseElutionGroups
         })?;
         let (egs, extras): (Vec<_>, Vec<_>) = egs.into_iter().unzip();
-        Ok(ElutionGroupCollection::MzpafLabels(
-            egs,
-            Some(FileReadingExtras::Skyline(extras)),
-        ))
+        TargetTable::from_elution_groups(
+            ElutionGroupCollection::MzpafLabels(egs, Some(FileReadingExtras::Skyline(extras))),
+            decoys,
+        )
+    }
+}
+
+struct DiannSpeclibReader;
+struct MzSpecLibReader;
+
+impl LibraryReader for DiannSpeclibReader {
+    fn name(&self) -> &'static str {
+        "diann-speclib"
+    }
+
+    fn sniff(&self, path: &Path) -> bool {
+        sniff_diann_speclib_library_file(path)
+    }
+
+    fn read(&self, path: &Path, _decoys: DecoyHandling) -> Result<TargetTable, TargetReadingError> {
+        // Ignores `decoys` because it discards the embedded ones either way:
+        // a shipped decoy with no declared competition group lands in a
+        // singleton group and always wins, silently breaking FDR. Honouring
+        // `Keep` here needs `Row` to carry a group first.
+        read_diann_speclib_library_file(path)
+    }
+}
+
+impl LibraryReader for MzSpecLibReader {
+    fn name(&self) -> &'static str {
+        "mzspeclib"
+    }
+
+    fn sniff(&self, path: &Path) -> bool {
+        sniff_mzspeclib_library_file(path)
+    }
+
+    fn read(&self, path: &Path, decoys: DecoyHandling) -> Result<TargetTable, TargetReadingError> {
+        read_mzspeclib_library_file(path, decoys)
     }
 }
 
 // JSON is deliberately not in the registry: it has no sniff, being what a file
 // that matched nothing else is tried as. It is the terminal arm of
-// `read_targets`.
+// `read_targets_with`.
 
+/// Every format, in sniff order.
+///
+/// Order matters where sniffs overlap, and the array is the only thing that
+/// states it. `diann-speclib` is first because its `read` is the one that can
+/// surface an `UnsupportedSpeclibVersion`, which its sniff cannot; `mzspeclib`
+/// precedes nothing in particular but must follow the binary formats, since its
+/// fallback probe reads a line of text.
 fn registry() -> &'static [&'static dyn LibraryReader] {
     &[
+        &DiannSpeclibReader,
         &DiannParquetReader,
+        &MzSpecLibReader,
         &DiannTsvReader,
         &SpectronautReader,
         &SkylineReader,
@@ -550,34 +600,18 @@ pub fn read_targets_with<T: AsRef<Path>>(
     decoys: DecoyHandling,
 ) -> Result<TargetTable, TargetReadingError> {
     let path = path.as_ref();
-    // The DIA-NN `.speclib` reader builds the columnar arena directly (with the
-    // reference-intensity sidecar); every other format still produces the legacy
-    // `ElutionGroupCollection`, adapted into the arena here. `.speclib` is
-    // sniffed first because its `read` path is the only one that can surface an
-    // `UnsupportedSpeclibVersion` diagnostic (the sniff has no version gate).
-    if sniff_diann_speclib_library_file(path) {
-        info!("Dispatching library read to diann-speclib (direct arena build)");
-        return read_diann_speclib_library_file(path);
-    }
-    // Also a direct arena build: the decoy groups an mzSpecLib file declares
-    // have no representation in `ElutionGroupCollection`.
-    if sniff_mzspeclib_library_file(path) {
-        info!("Dispatching library read to mzspeclib (direct arena build)");
-        return read_mzspeclib_library_file(path, decoys);
-    }
     let mut last_err = None;
     for reader in registry() {
         if reader.sniff(path) {
             info!("Dispatching library read to {}", reader.name());
-            match reader.read(path) {
-                Ok(egs) => return TargetTable::from_elution_groups(egs, decoys),
+            match reader.read(path, decoys) {
+                Ok(arena) => return Ok(arena),
                 // A sniff can fire on a file the reader then fails to parse
                 // (overlapping sniffs). Fall through to the next candidate
                 // instead of committing to the first sniff. Keep the FIRST
                 // error: readers run specific -> generic, so the earliest
-                // sniff-and-fail carries the most useful diagnostic (e.g. a
-                // `.speclib` desync), which the always-true JSON fallback's
-                // generic error would otherwise clobber.
+                // sniff-and-fail carries the most useful diagnostic, such as a
+                // `.speclib` desync, which JSON's generic error would clobber.
                 Err(e) => {
                     warn!("{} sniffed but failed to read: {:?}", reader.name(), e);
                     last_err.get_or_insert(e);
@@ -620,6 +654,42 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/diann_io_files")
             .join(name)
+    }
+
+    /// Every format goes through `registry()`. Two of them used to be
+    /// hardcoded `if sniff(..)` blocks ahead of the loop, because the trait
+    /// returned an intermediate they could not express decoy groups through.
+    /// A third bypass is the failure mode this guards.
+    #[test]
+    fn every_format_is_in_the_registry() {
+        let names: Vec<_> = super::registry().iter().map(|r| r.name()).collect();
+        assert_eq!(
+            names,
+            [
+                "diann-speclib",
+                "diann-parquet",
+                "mzspeclib",
+                "diann-tsv",
+                "spectronaut-tsv",
+                "skyline-csv",
+            ],
+            "a format outside this list is dispatched somewhere else"
+        );
+    }
+
+    /// Sniff order is what the array says. `mzspeclib` falls back to reading a
+    /// line of text when the name is unfamiliar, so it has to follow the binary
+    /// formats or it probes a parquet file as text.
+    #[test]
+    fn binary_formats_are_sniffed_before_the_text_probe() {
+        let position = |name: &str| {
+            super::registry()
+                .iter()
+                .position(|r| r.name() == name)
+                .expect("registered")
+        };
+        assert!(position("diann-parquet") < position("mzspeclib"));
+        assert!(position("diann-speclib") < position("mzspeclib"));
     }
 
     /// `sample_lib.tsv` carries `transition_group_id`; `sample_lib.txt` does
