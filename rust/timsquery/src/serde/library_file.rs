@@ -418,7 +418,6 @@ struct DiannParquetReader;
 struct DiannTsvReader;
 struct SpectronautReader;
 struct SkylineReader;
-struct JsonReader;
 
 impl LibraryReader for DiannParquetReader {
     fn name(&self) -> &'static str {
@@ -508,21 +507,9 @@ impl LibraryReader for SkylineReader {
     }
 }
 
-impl LibraryReader for JsonReader {
-    fn name(&self) -> &'static str {
-        "json"
-    }
-
-    /// Terminal fallback: always sniffs true so JSON is tried when nothing else
-    /// matched. Must be last in the registry.
-    fn sniff(&self, _path: &Path) -> bool {
-        true
-    }
-
-    fn read(&self, path: &Path) -> Result<ElutionGroupCollection, TargetReadingError> {
-        ElutionGroupCollection::try_read_json(path)
-    }
-}
+// JSON is deliberately not in the registry: it has no sniff, being what a file
+// that matched nothing else is tried as. It is the terminal arm of
+// `read_targets`.
 
 fn registry() -> &'static [&'static dyn LibraryReader] {
     &[
@@ -530,7 +517,6 @@ fn registry() -> &'static [&'static dyn LibraryReader] {
         &DiannTsvReader,
         &SpectronautReader,
         &SkylineReader,
-        &JsonReader,
     ]
 }
 
@@ -571,9 +557,14 @@ pub fn read_targets<T: AsRef<Path>>(path: T) -> Result<TargetTable, TargetReadin
             }
         }
     }
-    // Dead default in practice (JsonReader always sniffs true) -- a harmless
-    // defensive fallback.
-    Err(last_err.unwrap_or(TargetReadingError::UnableToParseElutionGroups))
+    // Nothing sniffed, or everything that sniffed failed to parse. Either way
+    // JSON is what is left to try; its own error is reported only if no reader
+    // got further, since a `.speclib` desync says more than "not valid JSON".
+    info!("Dispatching library read to json (terminal)");
+    match ElutionGroupCollection::try_read_json(path) {
+        Ok(egs) => TargetTable::from_elution_groups(egs),
+        Err(e) => Err(last_err.unwrap_or(e)),
+    }
 }
 
 #[cfg(test)]

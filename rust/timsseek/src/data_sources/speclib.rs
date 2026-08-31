@@ -29,21 +29,21 @@ pub struct LoadReport {
     pub sequence_features: SeqFeatureState,
 }
 
-/// Finalize a freshly-narrowed lazy `ReferenceLibrary` arena: apply the decoy
-/// strategy, seal, run the whole-library parse gate + averagine tally, and set
-/// `caps.sequence_features`. This is the single shared tail of the DEFAULT
-/// `.speclib` load (see `speclib_data_flow.md`) -- the memory-optimized path
-/// that avoids the 9 GB peak RSS of the fully-materialized target+2-decoy
-/// expansion.
+/// Finalize a narrowed `ReferenceLibrary` arena: apply the decoy strategy,
+/// seal, run the whole-library parse gate and averagine tally, and set
+/// `caps.sequence_features`. Every load path ends here.
 ///
-/// `policy` is the raw CLI decoy policy: this is the single place it is resolved
-/// (via `map_decoy_strategy`, keyed on whether the arena already ships decoys)
-/// and stamped onto `caps.decoys` BEFORE `seal()`, so the seal's
-/// `LazyMassShift -> Passthrough` downgrade (the Task-4 gate) sees it. The parse
-/// gate walks the MODIFIED sequence blob (the form
-/// `RefQuery::materialize_peptide_in_group` parses) and, if any row fails,
-/// disables sequence-derived features library-wide. The same pass counts
-/// averagine isotope fallbacks for the returned `LoadReport`.
+/// `policy` is the raw CLI decoy policy, and this is the one place it is
+/// resolved: `map_decoy_strategy` keys on whether the arena already ships
+/// decoys, and the result is stamped onto `caps.decoys` before `seal()`, which
+/// is what lets the seal downgrade `LazyMassShift` to `Passthrough`.
+///
+/// The parse gate walks the modified sequence blob, the form
+/// `RefQuery::materialize_peptide_in_group` parses, and disables
+/// sequence-derived features library-wide if any row fails. Library-scale and
+/// not per-row on purpose: per-row would mean targets and decoys scored with
+/// different features, and then FDR means nothing. The same pass counts
+/// averagine isotope fallbacks.
 fn finalize_reference_library(
     mut geom: TargetColumns<IonAnnot>,
     frag_intens: Vec<f32>,
@@ -158,18 +158,20 @@ fn finalize_reference_library(
     Ok((ReferenceLibrary { geom, frag_intens }, report))
 }
 
-/// The spectral library store. Collapsed to the single columnar
-/// `ReferenceLibrary` arena representation (the materialized AOS path was
-/// deleted in Task 9): both load paths produce a lazy arena, and scoring
-/// iterates `RefQuery` flyweights via [`ReferenceLibrary::item_at`].
+/// The spectral library store: one columnar arena, iterated as `RefQuery`
+/// flyweights via [`ReferenceLibrary::item_at`].
 pub type Speclib = ReferenceLibrary;
 
-/// The formats this project used to write and no longer reads.
+/// MessagePack and the native NDJSON format, which nothing reads and nothing
+/// writes.
 ///
-/// Nothing produces either one after this change, so a user holding one has a
-/// file that can only be rebuilt. Matched by extension and reported by name,
-/// because the alternative is a parse error from whichever reader the registry
-/// happens to try last, which says nothing about what to do next.
+/// A user holding one has a file that can only be rebuilt, so it is matched by
+/// extension and reported by name. The alternative is a parse error from
+/// whichever reader the registry tried last, which says nothing about what to
+/// do next.
+///
+/// Removable once no released version wrote either, which is any release after
+/// 0.34.
 fn retired_format(path: &Path) -> Option<&'static str> {
     let name = path.to_string_lossy().to_lowercase();
     let stem = name
@@ -259,26 +261,36 @@ mod tests {
         RefQuery,
     };
 
-    /// A user upgrading with a MessagePack library in hand gets told what the
-    /// file is and how to replace it, rather than a parse error from whichever
-    /// reader the registry tried last.
+    /// A retired format is recognised by name and rejected, whichever way its
+    /// compression is spelled.
+    ///
+    /// Asserted on the variant and the format name rather than on the error's
+    /// wording, so the sentence stays editable. Note these paths do not exist:
+    /// the check runs before any filesystem access, which is what makes the
+    /// diagnostic reachable for a file the user has but the test does not.
     #[test]
-    fn a_retired_format_says_what_it_is_and_how_to_rebuild() {
-        for name in [
-            "lib.msgpack",
-            "lib.msgpack.zst",
-            "lib.msgpack.zstd",
-            "lib.ndjson",
-            "lib.ndjson.zst",
+    fn a_retired_format_is_rejected_by_name() {
+        for (name, expected) in [
+            ("lib.msgpack", "MessagePack"),
+            ("lib.msgpack.zst", "MessagePack"),
+            ("lib.msgpack.zstd", "MessagePack"),
+            ("lib.ndjson", "the native NDJSON library format"),
+            ("lib.ndjson.zst", "the native NDJSON library format"),
         ] {
+            assert_eq!(
+                retired_format(std::path::Path::new(name)),
+                Some(expected),
+                "{name}"
+            );
             let err = Speclib::from_file(
                 std::path::Path::new(name),
                 crate::models::DecoyPolicy::default(),
             )
             .expect_err("a format nothing writes must not be read");
-            let msg = format!("{err:?}");
-            assert!(msg.contains("no longer reads"), "{name}: {msg}");
-            assert!(msg.contains("build-library"), "{name}: {msg}");
+            assert!(
+                matches!(err, TargetReadingError::UnsupportedFormat { .. }),
+                "{name}: got {err:?}"
+            );
         }
     }
 
@@ -295,14 +307,6 @@ mod tests {
         ] {
             assert_eq!(retired_format(std::path::Path::new(name)), None, "{name}");
         }
-    }
-
-    /// `Speclib` is now a type alias for `ReferenceLibrary` (Task 9 collapsed
-    /// the enum), so a loaded library is already the lazy arena. This identity
-    /// helper is kept so the fixture assertions below read as
-    /// "get the arena" without churning every call site.
-    fn expect_lazy(speclib: &Speclib) -> &ReferenceLibrary {
-        speclib
     }
 
     #[test]
@@ -337,7 +341,7 @@ mod tests {
             "Expected 6 entries (2 targets + 4 decoys)"
         );
 
-        let lib = expect_lazy(&speclib);
+        let lib = &speclib;
 
         // Verify first target entry structure (variant 0 == target)
         let first_target = lib
@@ -413,7 +417,7 @@ mod tests {
             "Expected 42 entries (14 targets + 28 decoys)"
         );
 
-        let lib = expect_lazy(&speclib);
+        let lib = &speclib;
         let n_rows = lib.iter().filter(|q| q.geom().variant() == 0).count();
         let n_decoys = lib.iter().filter(|q| q.geom().variant() != 0).count();
         assert_eq!(n_rows, 14, "Should have 14 targets");
@@ -460,7 +464,7 @@ mod tests {
             "Expected 6 entries (2 targets + 4 decoys)"
         );
 
-        let lib = expect_lazy(&speclib);
+        let lib = &speclib;
         let n_rows = lib.iter().filter(|q| q.geom().variant() == 0).count();
         let n_decoys = lib.iter().filter(|q| q.geom().variant() != 0).count();
 
@@ -495,7 +499,7 @@ mod tests {
             "Expected 9 entries (3 targets + 6 decoys)"
         );
 
-        let lib = expect_lazy(&speclib);
+        let lib = &speclib;
         let n_rows = lib.iter().filter(|q| q.geom().variant() == 0).count();
         let n_decoys = lib.iter().filter(|q| q.geom().variant() != 0).count();
 
@@ -526,7 +530,7 @@ mod tests {
         let speclib = Speclib::from_file(&test_file, crate::models::DecoyPolicy::default())
             .expect("Failed to load DIA-NN TSV library");
 
-        let lib = expect_lazy(&speclib);
+        let lib = &speclib;
 
         // Check that isotope intensities are normalized (M0 should be 1.0),
         // for every flat entry (targets AND decoy variants -- the envelope is
@@ -571,7 +575,7 @@ mod tests {
             "Should have 6 entries (2 targets + 4 decoys)"
         );
 
-        let lib = expect_lazy(&speclib);
+        let lib = &speclib;
         let n_rows = lib.iter().filter(|q| q.geom().variant() == 0).count();
         let n_decoys = lib.iter().filter(|q| q.geom().variant() != 0).count();
 
@@ -615,10 +619,10 @@ mod tests {
         let speclib = Speclib::from_file(&test_file, crate::models::DecoyPolicy::default())
             .expect("Failed to load DIA-NN TSV library");
 
-        let lib = expect_lazy(&speclib);
+        let lib = &speclib;
 
-        // Unified CH2 offset (see `map_decoy_strategy`), replacing the old
-        // 12.0 (materialized `IfMissing`) / 14.0 (materialized `Force`) split.
+        // The offset the arena shifts by, rather than a literal, so this cannot
+        // drift from `map_decoy_strategy`.
         use timsquery::models::capabilities::DECOY_CH2_OFFSET_DA;
 
         for tgt in lib.geom.rows() {
@@ -675,7 +679,7 @@ mod tests {
         let speclib = Speclib::from_file(&test_file, crate::models::DecoyPolicy::default())
             .expect("Failed to load DIA-NN TSV library");
 
-        let lib = expect_lazy(&speclib);
+        let lib = &speclib;
         for q in lib.iter() {
             let fragments: Vec<_> = q.iter_expected_fragments().collect();
             assert_eq!(
@@ -706,7 +710,7 @@ mod tests {
         let speclib = Speclib::from_file(path, crate::models::DecoyPolicy::default())
             .expect("from_file should load the .speclib fixture");
 
-        let lib = expect_lazy(&speclib);
+        let lib = &speclib;
         assert!(!lib.is_empty(), "library should have entries");
 
         let first = lib.item_at(lib.geom.flats().next().unwrap());

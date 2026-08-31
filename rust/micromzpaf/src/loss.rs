@@ -233,17 +233,33 @@ impl NeutralLoss {
 
     /// Resolve a loss expression (without the leading `-`) to a discriminant.
     ///
-    /// `None` means the composition is valid but not in the supported table.
+    /// Three outcomes, and the caller has to be able to tell them apart:
+    /// `Ok(Some)` a supported loss, `Ok(None)` a valid composition outside the
+    /// table, `Err` not a loss expression at all. Parsing `y1-HCOOH` as plain
+    /// `y1` would put a loss peak's m/z on the `y1` label, which is why the
+    /// middle case is not folded into the error.
     ///
-    /// The lookup is by composition, so `CH3SOH` and `CH4OS` resolve to the
-    /// same loss. Callers holding a loss as a formula string, rather than as an
-    /// mzPAF annotation, come in here.
-    pub fn from_expression(s: &str) -> Result<Option<Self>, IonParsingError> {
+    /// The lookup is by composition, so `CH3SOH` and `CH4OS` resolve to the same
+    /// loss.
+    pub(crate) fn from_expression(s: &str) -> Result<Option<Self>, IonParsingError> {
         let comp = Composition::parse_expression(s)?;
         Ok(TABLE
             .iter()
             .find(|(c, _, _)| *c == comp)
             .map(|(_, l, _)| *l))
+    }
+
+    /// The loss a formula names, or `None` if this build cannot represent it.
+    ///
+    /// For callers holding a loss as a formula rather than as an mzPAF
+    /// annotation, and which do not need the distinction between "a valid
+    /// composition outside the table" and "not a loss expression" -- both mean
+    /// the same thing to them: label the peak unknown. Leading `-` is accepted
+    /// so a Hill-notation `-2H2O` passes through unmodified.
+    pub fn lookup_formula(formula: &str) -> Option<Self> {
+        Self::from_expression(formula.strip_prefix('-').unwrap_or(formula))
+            .ok()
+            .flatten()
     }
 
     /// Canonical spelling, without the leading `-`. Empty for [`Self::None`].

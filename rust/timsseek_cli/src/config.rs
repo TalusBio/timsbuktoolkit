@@ -27,6 +27,21 @@ pub struct Config {
     pub library: Option<LibraryConfig>,
 }
 
+/// The slice of a configuration file `build-library` reads.
+///
+/// A separate type from [`Config`], which requires `[analysis]`: a build has no
+/// analysis, so a library-only file has to parse without one.
+///
+/// Unknown top-level keys are tolerated, which is what lets one file serve both
+/// a build and the searches that read what it built. `[input]`, `[analysis]` and
+/// the rest describe a search and are ignored. [`LibraryConfig`] still denies
+/// unknown fields, so a typo *inside* `[library]` is an error.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct BuildConfig {
+    #[serde(default)]
+    pub library: Option<LibraryConfig>,
+}
+
 /// How to predict a library.
 ///
 /// Every field is optional and falls through to msspeculator's own default, so

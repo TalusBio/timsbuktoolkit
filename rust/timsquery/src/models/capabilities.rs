@@ -35,14 +35,14 @@ pub enum DecoyStrategy {
     None,
 }
 
-/// The unified ±CH2 mass-shift offset (Da) and variant count for lazily-generated
-/// decoys. Single source of truth for timsseek's `map_decoy_strategy`, which
-/// is the only production caller that turns decoys on.
+/// The ±CH2 mass-shift offset (Da) and variant count for lazily-generated
+/// decoys. Every construction of [`DecoyStrategy::LazyMassShift`] uses these,
+/// including the test profiles, so a change here reaches all of them.
 ///
-/// Monoisotopic CH2: `12.0` (12-C, exact by definition) `+ 2 * 1.00782503207` (1-H).
-/// This was `14.0`, which is 15.65 mDa light of the group it is named after, or
-/// 22 ppm at m/z 700 charge 1 against a default 15 ppm tolerance. Every decoy m/z
-/// moves by that much.
+/// Monoisotopic CH2: `12.0` (12-C, exact by definition) `+ 2 * 1.00782503207`
+/// (1-H). Rounding it to `14.0` is 15.65 mDa light of the group it is named
+/// after, or 22 ppm at m/z 700 charge 1 against a default 15 ppm tolerance,
+/// which moves every decoy m/z by more than the tolerance allows.
 pub const DECOY_CH2_OFFSET_DA: f64 = 14.01565006414;
 pub const DECOY_N_DECOYS: u8 = 2;
 
@@ -52,13 +52,13 @@ impl TargetCapabilities {
     /// decoys.
     ///
     /// Decoy generation is a scoring decision, so no constructor in this crate
-    /// produces it -- `DecoyStrategy::LazyMassShift` has to be named outright,
-    /// and timsseek is the only thing that names it (`map_decoy_strategy`,
-    /// resolved once in `finalize_reference_library` before `seal`). This is
-    /// not a style preference: readers used to default to decoys here, and
-    /// timsquery_cli consequently emitted two mass-shifted variants per row
-    /// into Carafe's results, which key by `id`. See the regression test in
-    /// `timsquery_cli`'s `commands.rs`.
+    /// produces it: `DecoyStrategy::LazyMassShift` has to be named outright, and
+    /// timsseek is the only thing that names it, in `map_decoy_strategy`.
+    ///
+    /// A reader defaulting to decoys here makes `timsquery_cli` emit two
+    /// mass-shifted variants per row into Carafe's results, which key by `id`.
+    /// `test_extraction_does_not_expand_decoys` in `timsquery_cli`'s
+    /// `commands.rs` is what holds that.
     pub fn default_diann() -> Self {
         Self {
             sequence_features: SeqFeatureState::Available,

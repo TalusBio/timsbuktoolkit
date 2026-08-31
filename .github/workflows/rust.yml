@@ -76,12 +76,13 @@ jobs:
   # (`rust/timsquery/src/serde/psims_origin_type.rs`), because no crate in the
   # tree carries the PSI-MS vocabulary and the reader needs `is_a` to tell a
   # decoy from a target. A vendored snapshot can go stale silently, so this job
-  # compares its `data-version` against the published ontology.
+  # compares its `data-version` against the published ontology, over a ranged
+  # request for the first 400 bytes rather than the 1.2 MB file.
   #
-  # `continue-on-error` on purpose: the check reaches the network, and a HUPO-PSI
-  # release is not a reason to block a merge. It has to be loud, not fatal. When
-  # it fails, re-run the generator and look at whether any new term is a decoy
-  # subtype.
+  # `continue-on-error` on purpose. The check reaches the network, and most
+  # releases move the version without touching these ten terms, so a failure
+  # usually resolves to regenerating and committing one changed line. Loud, not
+  # fatal.
   psims-vocabulary:
     runs-on: ubuntu-latest
     continue-on-error: true

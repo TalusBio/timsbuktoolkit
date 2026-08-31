@@ -354,12 +354,10 @@ uri = "config_results"
 
     /// Flags belong on one side of the subcommand or the other, never both.
     ///
-    /// Two copies of `SearchArgs` exist -- the flattened one and the
-    /// subcommand's -- and `search_args()` returns one of them. Flags given
-    /// before the subcommand land in the copy it does not return, so without
-    /// `args_conflicts_with_subcommands` they parse and are then discarded:
-    /// `timsseek --speclib-uri lib.txt --raw-inputs a.d search` used to resolve
-    /// to no library and no raw inputs at all.
+    /// Two copies of `SearchArgs` exist, the flattened one and the subcommand's,
+    /// and `search_args()` returns one of them. A flag before the subcommand
+    /// lands in the copy it does not return, so anything short of a parse error
+    /// here silently discards it.
     #[test]
     fn flags_cannot_be_split_across_a_subcommand() {
         for argv in [

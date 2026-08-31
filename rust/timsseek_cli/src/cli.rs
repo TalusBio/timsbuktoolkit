@@ -48,10 +48,9 @@ impl From<RescoreModel> for CliRescoreModel {
 /// invocation keeps parsing to the same values.
 ///
 /// `args_conflicts_with_subcommands` is what makes the flattened arguments safe
-/// to have alongside a subcommand. Without it, `timsseek --speclib-uri lib.txt
-/// search` parses: the flags bind to the flattened copy, the subcommand supplies
-/// an empty one, and whichever the program reads discards the other silently.
-/// With it, mixing the two is a parse error naming the conflict.
+/// alongside a subcommand: two copies of [`SearchArgs`] exist and only one is
+/// read, so mixing the two has to be a parse error rather than a silent choice
+/// between them.
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 #[command(args_conflicts_with_subcommands = true)]

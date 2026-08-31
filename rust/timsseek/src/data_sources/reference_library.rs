@@ -366,9 +366,8 @@ mod tests {
 
     #[test]
     fn item_at_scores_reference_library() {
-        // Task 9 collapsed `Speclib` to the single `ReferenceLibrary` arena;
-        // scoring reads `RefQuery` flyweights via `item_at` (no materialized
-        // arm). Variant 0 is the target.
+        // Scoring reads `RefQuery` flyweights via `item_at`. Variant 0 is the
+        // target.
         let lib = tiny_ref_lib();
         let scored = lib.item_at(flat(&lib, 0));
         assert!(scored.is_target());

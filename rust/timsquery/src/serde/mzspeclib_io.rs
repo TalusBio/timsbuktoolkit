@@ -106,10 +106,7 @@ const MSSPECULATOR_PAIR_ID: &str = "msspeculator:decoy_pair_id";
 /// The `is_a` closure was resolved against the published vocabulary by
 /// `scripts/gen_psims_origin_type.py`, so this is a lookup rather than a walk.
 fn subsumes_decoy(accession: u32) -> Option<bool> {
-    psims_origin_type::ALL
-        .binary_search(&accession)
-        .ok()
-        .map(|_| psims_origin_type::DECOY.binary_search(&accession).is_ok())
+    psims_origin_type::lookup(accession).map(|term| term.decoy)
 }
 
 /// Whether this spectrum's peak m/z values are calculated rather than measured.
@@ -119,9 +116,7 @@ fn subsumes_decoy(accession: u32) -> Option<bool> {
 /// mass, so the peak is usable; on an observed one there is no theoretical mass
 /// to be had and the peak is skipped rather than mixed in at its observed m/z.
 fn declares_theoretical_mz(accession: u32) -> bool {
-    psims_origin_type::THEORETICAL_MZ
-        .binary_search(&accession)
-        .is_ok()
+    psims_origin_type::lookup(accession).is_some_and(|term| term.theoretical_mz)
 }
 
 // ── Reading a file ───────────────────────────────────────────────────────────
@@ -246,9 +241,8 @@ struct Degradation {
     // on a normalized scale rather than an absence -- it is an anchor point, and
     // it is what msspeculator's own libraries write -- so there is nothing to
     // test for. See the CONTEXT.md entry on retention time.
-    /// A set, not a list: this one is pushed per spectrum rather than per file,
-    /// so a five-million-row library with one unrecognised subtype would
-    /// otherwise hold a 20 MB `Vec` and print five million identical lines.
+    /// A set, because this is reached per spectrum rather than per file and a
+    /// library repeats one unrecognised term on every row.
     unrecognised_origin_types: std::collections::BTreeSet<u32>,
 }
 
@@ -644,39 +638,26 @@ fn theoretical_mz<M: mzcore::chemistry::MassOutputMode>(
 fn to_ion_annot<M: mzcore::chemistry::MassOutputMode>(
     annotation: &Fragment<M>,
 ) -> Option<IonAnnot> {
+    // The match yields only the kind; the annotation is built once below.
+    let backbone = |letter: char, position: &mzcore::sequence::PeptidePosition| {
+        IonSeriesOrdinal::from_series_char(letter, Some(u8::try_from(position.series_number).ok()?))
+            .ok()
+    };
     let series = match &annotation.ion {
-        FragmentType::a(pos, 0) => ('a', pos.series_number),
-        FragmentType::b(pos, 0) => ('b', pos.series_number),
-        FragmentType::c(pos, 0) => ('c', pos.series_number),
-        FragmentType::x(pos, 0) => ('x', pos.series_number),
-        FragmentType::y(pos, 0) => ('y', pos.series_number),
-        FragmentType::z(pos, 0) => ('z', pos.series_number),
+        FragmentType::a(pos, 0) => backbone('a', pos)?,
+        FragmentType::b(pos, 0) => backbone('b', pos)?,
+        FragmentType::c(pos, 0) => backbone('c', pos)?,
+        FragmentType::x(pos, 0) => backbone('x', pos)?,
+        FragmentType::y(pos, 0) => backbone('y', pos)?,
+        FragmentType::z(pos, 0) => backbone('z', pos)?,
         FragmentType::Immonium(_, residue) => {
-            let ordinal =
-                IonSeriesOrdinal::try_immonium(residue.aminoacid.aminoacid().one_letter_code()?)
-                    .ok()?;
-            return IonAnnot::new(
-                ordinal,
-                neutral_loss(annotation)?,
-                charge_of(annotation)?,
-                isotope_of(annotation)?,
-            )
-            .ok();
+            IonSeriesOrdinal::try_immonium(residue.aminoacid.aminoacid().one_letter_code()?).ok()?
         }
-        FragmentType::Precursor => {
-            return IonAnnot::new(
-                IonSeriesOrdinal::precursor,
-                neutral_loss(annotation)?,
-                charge_of(annotation)?,
-                isotope_of(annotation)?,
-            )
-            .ok();
-        }
+        FragmentType::Precursor => IonSeriesOrdinal::precursor,
         _ => return None,
     };
-    let ordinal = u8::try_from(series.1).ok()?;
     IonAnnot::new(
-        IonSeriesOrdinal::from_series_char(series.0, Some(ordinal)).ok()?,
+        series,
         neutral_loss(annotation)?,
         charge_of(annotation)?,
         isotope_of(annotation)?,
@@ -693,10 +674,15 @@ fn neutral_loss<M: mzcore::chemistry::MassOutputMode>(
 ) -> Option<NeutralLoss> {
     match annotation.neutral_loss.as_slice() {
         [] => Some(NeutralLoss::None),
-        [loss] => {
-            let formula = loss.to_string();
-            let formula = formula.strip_prefix('-').unwrap_or(&formula);
-            NeutralLoss::from_expression(formula).ok().flatten()
+        // A loss, and only a loss. `Gain` and `SideChainLoss` are outside what
+        // this build can spell, and are rejected on the variant rather than on
+        // their spelling.
+        //
+        // The multiplier stays in the string: Hill notation renders
+        // `Loss(2, H2O)` as `-2H2O`, which the composition lookup resolves to
+        // the two-water entry. Matching only `Loss(1, ..)` would drop it.
+        [loss @ mzcore::chemistry::NeutralLoss::Loss(..)] => {
+            NeutralLoss::lookup_formula(&loss.to_string())
         }
         _ => None,
     }
@@ -901,15 +887,11 @@ mod tests {
     /// `UO:0000010|second`, so every entry has to come back with the seconds it
     /// declared.
     ///
-    /// Six of ten used to read `0.0`. mzannotate gated its retention-time branch
-    /// on the attribute group holding exactly two members, and SpectraST groups a
-    /// consensus retention time with `MS:1003174|attribute maximum` and
-    /// `MS:1003175|attribute minimum`, so whether an entry kept its retention
-    /// time depended on what else its writer put in the group. Fixed upstream.
-    ///
-    /// Asserting the declared values rather than a distinctness property is what
-    /// makes that failure impossible to pass: six entries collapsing onto one
-    /// value satisfies "more than one distinct value".
+    /// The declared values, not a distinctness property. Several rows collapsing
+    /// onto one value satisfies "more than one distinct value", and that is the
+    /// shape a dropped retention time takes: six of these ten are grouped with
+    /// `MS:1003174|attribute maximum` and `MS:1003175|attribute minimum`, which
+    /// is where a reader is liable to lose them.
     #[test]
     fn every_declared_retention_time_survives_the_load() {
         let geom = arena("target_decoy_attribute_set.mzspeclib.txt");
@@ -925,36 +907,6 @@ mod tests {
             assert!(
                 (got - want).abs() < 0.1,
                 "row {row} declares {want} s, got {got}"
-            );
-        }
-    }
-
-    /// `binary_search` is only correct on a sorted slice, and the generator is
-    /// what sorts them. If a hand edit or a generator change breaks the order,
-    /// lookups start missing terms that are present, which is silent.
-    #[test]
-    fn the_generated_lists_are_sorted() {
-        for (name, list) in [
-            ("ALL", psims_origin_type::ALL),
-            ("DECOY", psims_origin_type::DECOY),
-            ("THEORETICAL_MZ", psims_origin_type::THEORETICAL_MZ),
-        ] {
-            assert!(list.is_sorted(), "{name} is not sorted: {list:?}");
-            assert!(!list.is_empty(), "{name} is empty");
-        }
-    }
-
-    /// Every subset has to be a subset. A term in `DECOY` but not in `ALL`
-    /// would be unreachable, because `subsumes_decoy` gates on `ALL` first.
-    #[test]
-    fn every_subset_is_contained_in_the_whole_subtree() {
-        for accession in psims_origin_type::DECOY
-            .iter()
-            .chain(psims_origin_type::THEORETICAL_MZ)
-        {
-            assert!(
-                psims_origin_type::ALL.binary_search(accession).is_ok(),
-                "MS:{accession} is in a subset but not in ALL"
             );
         }
     }

@@ -22,7 +22,7 @@ use tracing::info;
 
 use crate::cli::BuildLibraryArgs;
 use crate::config::{
-    Config,
+    BuildConfig,
     LibraryConfig,
 };
 use crate::errors::CliError;
@@ -69,7 +69,7 @@ pub struct ResolvedBuild {
 }
 
 /// Fold the command line over the configuration file's `[library]` section.
-pub fn resolve_build(args: &BuildLibraryArgs, config: &Config) -> ResolvedBuild {
+pub fn resolve_build(args: &BuildLibraryArgs, config: &BuildConfig) -> ResolvedBuild {
     let library = config.library.clone().unwrap_or_default();
     let LibraryConfig {
         model,
@@ -278,34 +278,35 @@ mod tests {
         .args
     }
 
-    fn config_with_library(toml: &str) -> Config {
-        let src = format!(
-            r#"{toml}
-[analysis]
-chunk_size = 20000
-
-[analysis.tolerance]
-ms = {{ Ppm = [15.0, 15.0] }}
-mobility = {{ Pct = [5.0, 5.0] }}
-quad = {{ Absolute = [0.1, 0.1] }}
-rt = "Unrestricted"
-"#
-        );
-        toml::from_str(&src).expect("test configuration must parse")
+    /// A library-only configuration file, with no search sections at all. That
+    /// it parses is half of what these tests cover.
+    fn build_config(toml: &str) -> BuildConfig {
+        toml::from_str(toml).expect("a library-only configuration must parse")
     }
 
+    /// The literals, not the constants. `x.unwrap_or(K) == K` holds whatever `K`
+    /// says, so a default drifting from msspeculator's would not show; spelled
+    /// out, it shows in the diff.
     #[test]
     fn an_absent_setting_falls_through_to_msspeculators_default() {
-        let resolved = resolve_build(&args(&[]), &Config::default_config());
-        assert_eq!(resolved.model, DEFAULT_MODEL);
-        assert_eq!(resolved.missed_cleavages, DEFAULT_MISSED_CLEAVAGES);
-        assert_eq!(resolved.fixed_mods, [DEFAULT_FIXED_MOD]);
+        let resolved = resolve_build(&args(&[]), &BuildConfig::default());
+        assert_eq!(resolved.model, "builtin:small-v0");
+        assert_eq!(resolved.missed_cleavages, 2);
+        assert_eq!(resolved.min_length, 7);
+        assert_eq!(resolved.max_length, 30);
+        assert_eq!(resolved.min_charge, 2);
+        assert_eq!(resolved.max_charge, 4);
+        assert_eq!(resolved.max_variable_mods, 1);
+        assert_eq!(resolved.min_intensity, 0.01);
+        assert_eq!(resolved.fixed_mods, ["C[UNIMOD:4]"]);
+        assert_eq!(resolved.variable_mods, ["M[UNIMOD:35]"]);
+        assert_eq!(resolved.max_fragments, None);
         assert!(!resolved.decoys);
     }
 
     #[test]
     fn the_configuration_beats_the_default() {
-        let config = config_with_library(
+        let config = build_config(
             r#"
 [library]
 missed_cleavages = 3
@@ -318,12 +319,51 @@ fixed_mods = ["C[UNIMOD:4]", "K[UNIMOD:737]"]
         assert!(resolved.decoys);
         assert_eq!(resolved.fixed_mods.len(), 2);
         // Untouched fields still fall through.
-        assert_eq!(resolved.min_length, DEFAULT_MIN_LENGTH);
+        assert_eq!(resolved.min_length, 7);
+    }
+
+    /// One file serves the build and the searches that read what it built, so a
+    /// configuration carrying search sections has to be accepted here and its
+    /// search half ignored.
+    #[test]
+    fn search_sections_are_ignored_rather_than_rejected() {
+        let config = build_config(
+            r#"
+[input]
+type = "speclib"
+uri = "lib.mzspeclib.txt.gz"
+
+[analysis]
+chunk_size = 20000
+
+[library]
+missed_cleavages = 3
+"#,
+        );
+        assert_eq!(resolve_build(&args(&[]), &config).missed_cleavages, 3);
+    }
+
+    /// Unknown *top-level* keys are tolerated, but a typo inside `[library]` is
+    /// still an error -- that is the half worth keeping strict.
+    #[test]
+    fn a_typo_inside_the_library_section_is_rejected() {
+        let err = toml::from_str::<BuildConfig>(
+            r#"
+[library]
+missed_cleavges = 3
+"#,
+        )
+        .expect_err("a misspelled library field must not be silently ignored")
+        .to_string();
+        assert!(
+            err.contains("missed_cleavges") || err.contains("unknown field"),
+            "got: {err}"
+        );
     }
 
     #[test]
     fn a_flag_beats_the_configuration() {
-        let config = config_with_library(
+        let config = build_config(
             r#"
 [library]
 missed_cleavages = 3
@@ -342,7 +382,7 @@ model = "builtin:from-config"
     /// rather than after a stem the suffix rules would have to agree with.
     #[test]
     fn the_sidecar_is_named_after_the_library() {
-        let resolved = resolve_build(&args(&[]), &Config::default_config());
+        let resolved = resolve_build(&args(&[]), &BuildConfig::default());
         assert_eq!(
             resolved.config_out.as_deref(),
             Some(std::path::Path::new("lib.mzspeclib.txt.gz.config.json"))
@@ -351,7 +391,7 @@ model = "builtin:from-config"
 
     #[test]
     fn no_config_out_skips_the_sidecar() {
-        let resolved = resolve_build(&args(&["--no-config-out"]), &Config::default_config());
+        let resolved = resolve_build(&args(&["--no-config-out"]), &BuildConfig::default());
         assert_eq!(resolved.config_out, None);
     }
 

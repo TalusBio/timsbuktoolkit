@@ -195,8 +195,8 @@ mod tests {
             fragment_features: FragmentFeatureState::Available,
             isotopes: IsotopeStrategy::FromComposition { n_isotopes: 3 },
             decoys: DecoyStrategy::LazyMassShift {
-                offset: 14.0,
-                n_decoys: 2,
+                offset: crate::models::capabilities::DECOY_CH2_OFFSET_DA,
+                n_decoys: crate::models::capabilities::DECOY_N_DECOYS,
             },
         });
         c.push_row(Row {
@@ -230,20 +230,20 @@ mod tests {
     fn plus_decoy_shifts_precursor_and_high_ordinal_only() {
         let lib = one_target_lib();
         let q = Query::new(&lib, lib.flat_for(first_row(&lib), 1)); // +shift
-        // precursor: +14.0/2
-        assert!((q.mono_precursor_mz() - (654.855 + 14.0 / 2.0)).abs() < 1e-9);
+        // precursor: +offset/2
+        assert!((q.mono_precursor_mz() - (654.855 + DECOY_CH2_OFFSET_DA / 2.0)).abs() < 1e-9);
         let frags: Vec<_> = q.iter_fragments_refs().collect();
         // y1 ordinal 1 -> unshifted
         assert!((frags[0].1 - 200.0).abs() < 1e-9);
-        // y8 ordinal 8, charge 1 -> +14.0/1
-        assert!((frags[1].1 - (896.5 + 14.0 / 1.0)).abs() < 1e-9);
+        // y8 ordinal 8, charge 1 -> +offset/1
+        assert!((frags[1].1 - (896.5 + DECOY_CH2_OFFSET_DA / 1.0)).abs() < 1e-9);
     }
 
     #[test]
     fn minus_decoy_shifts_negative() {
         let lib = one_target_lib();
         let q = Query::new(&lib, lib.flat_for(first_row(&lib), 2)); // -shift
-        assert!((q.mono_precursor_mz() - (654.855 - 14.0 / 2.0)).abs() < 1e-9);
+        assert!((q.mono_precursor_mz() - (654.855 - DECOY_CH2_OFFSET_DA / 2.0)).abs() < 1e-9);
     }
 
     #[test]
@@ -298,7 +298,7 @@ mod tests {
         let lib = one_target_lib();
         let q = Query::new(&lib, lib.flat_for(first_row(&lib), 1));
         let step = C13_C12_MASS_DIFF / 2.0;
-        let mono = 654.855 + 14.0 / 2.0;
+        let mono = 654.855 + DECOY_CH2_OFFSET_DA / 2.0;
         let (lo, hi) = q.precursor_mz_limits();
         assert!((lo - mono).abs() < 1e-9);
         assert!((hi - (mono + 2.0 * step)).abs() < 1e-9);

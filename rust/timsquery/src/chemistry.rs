@@ -6,10 +6,9 @@
 //! because timsseek depends on timsquery and not the reverse, so this is the
 //! lowest crate both can reach.
 //!
-//! Before this existed there were two byte-identical copies, one per crate, so
-//! a search that read an mzSpecLib library built four CV indexes twice. Nothing
-//! connected them: they were in different crates, so neither review nor the
-//! compiler had any reason to notice.
+//! Build the indexes anywhere else and the process holds two copies.
+//! `ast-grep --lang rust -p 'mzcv::CVIndex::init_static()'` should report only
+//! this file.
 
 use std::sync::OnceLock;
 
@@ -27,10 +26,10 @@ use std::sync::OnceLock;
 /// [`serde::psims_origin_type`](crate::serde). The names are close enough to
 /// mislead.
 ///
-/// Lazily built on purpose. A library whose sequences all match the fast
-/// byte-walk parser never touches this, which was verified against the real
-/// DIA-NN workload: zero initializations. That no longer holds for mzSpecLib,
-/// where mzannotate requires the ontologies to parse at all.
+/// Lazily built, and which libraries pay for it differs by format. A DIA-NN
+/// library whose sequences all match timsseek's fast byte-walk parser never
+/// reaches here. An mzSpecLib library always does: mzannotate takes
+/// `&Ontologies` to parse an analyte at all.
 pub fn ontologies() -> &'static mzcore::ontology::Ontologies {
     static ONTOLOGIES: OnceLock<mzcore::ontology::Ontologies> = OnceLock::new();
     ONTOLOGIES.get_or_init(|| {

@@ -709,7 +709,10 @@ fn run() -> std::result::Result<(), errors::CliError> {
         // own richer subscriber, which needs the resolved output directory to
         // place the log file and so cannot be hoisted here.
         init_stderr_logging();
-        let config = load_config(build.config.as_deref())?;
+        let config = match build.config.as_deref() {
+            Some(path) => parse_config_file(path)?,
+            None => config::BuildConfig::default(),
+        };
         return build_library::run(&build_library::resolve_build(build, &config));
     }
     search(cli.search_args())
@@ -723,6 +726,17 @@ fn load_config(path: Option<&std::path::Path>) -> Result<Config, errors::CliErro
         info!("No config file provided, using default configuration");
         return Ok(Config::default_config());
     };
+    parse_config_file(config_path)
+}
+
+/// Parse a configuration file into whichever view the caller needs.
+///
+/// TOML and JSON are both accepted, sniffed by extension. Generic over the
+/// target so a build reads only `[library]` while a search reads the whole
+/// thing; see [`config::BuildConfig`].
+fn parse_config_file<T: serde::de::DeserializeOwned>(
+    config_path: &std::path::Path,
+) -> Result<T, errors::CliError> {
     let text = std::fs::read_to_string(config_path).map_err(|e| errors::CliError::Io {
         source: e.to_string(),
         path: Some(config_path.to_string_lossy().to_string()),
@@ -732,7 +746,7 @@ fn load_config(path: Option<&std::path::Path>) -> Result<Config, errors::CliErro
         .and_then(|e| e.to_str())
         .map(|e| e.eq_ignore_ascii_case("toml"))
         .unwrap_or(false);
-    let parsed: Result<Config, String> = if is_toml {
+    let parsed: Result<T, String> = if is_toml {
         toml::from_str(&text).map_err(|e| e.to_string())
     } else {
         serde_json::from_str(&text).map_err(|e| e.to_string())
