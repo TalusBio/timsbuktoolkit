@@ -14,6 +14,7 @@ use msspeculator_inference::{
     BuiltinModel,
     LibraryOptions,
     ModelSource,
+    ProgressFn,
     StreamOptions,
     write_library,
 };
@@ -40,14 +41,13 @@ const DEFAULT_MIN_INTENSITY: f64 = 0.01;
 const DEFAULT_FIXED_MOD: &str = "C[UNIMOD:4]";
 const DEFAULT_VARIABLE_MOD: &str = "M[UNIMOD:35]";
 
-/// Every prediction setting, with the command line already resolved against the
-/// configuration file. Owned rather than borrowed so the caller holds one value
-/// per setting rather than three sources to consult.
+/// Every setting that decides what a library *contains*, with the command line
+/// already resolved against the configuration file. Owned rather than borrowed
+/// so the caller holds one value per setting rather than three sources to
+/// consult.
 #[derive(Debug, Clone, PartialEq)]
-pub struct ResolvedBuild {
+pub struct ResolvedPrediction {
     pub fasta: PathBuf,
-    pub out: PathBuf,
-    pub config_out: Option<PathBuf>,
     pub model: String,
     pub missed_cleavages: usize,
     pub min_length: usize,
@@ -60,66 +60,84 @@ pub struct ResolvedBuild {
     pub min_intensity: f64,
     pub max_fragments: Option<usize>,
     pub decoys: bool,
+}
+
+/// What to predict, plus where `build-library` puts it.
+///
+/// Two types rather than one because the output half means nothing to a caller
+/// that predicts into memory, and a placeholder `out` is a field whose value no
+/// reader could trust.
+#[derive(Debug, Clone, PartialEq)]
+pub struct ResolvedBuild {
+    pub prediction: ResolvedPrediction,
+    pub out: PathBuf,
+    pub config_out: Option<PathBuf>,
     pub overwrite: bool,
 }
 
 /// Fold the command line over the configuration file's `[library]` section.
 pub fn resolve_build(args: &BuildLibraryArgs, config: &BuildConfig) -> ResolvedBuild {
-    let library = config.library.clone().unwrap_or_default();
-    let LibraryConfig {
-        model,
-        missed_cleavages,
-        min_length,
-        max_length,
-        min_charge,
-        max_charge,
-        fixed_mods,
-        variable_mods,
-        max_variable_mods,
-        min_intensity,
-        max_fragments,
-        decoys,
-    } = library;
-
+    let library = library_overrides(args, config.library.clone().unwrap_or_default());
     ResolvedBuild {
-        fasta: args.fasta.clone(),
+        prediction: resolve_prediction(args.fasta.clone(), &library),
         out: args.out.clone(),
         config_out: sidecar_path(args),
-        model: args
-            .model
-            .clone()
-            .or(model)
-            .unwrap_or_else(|| DEFAULT_MODEL.to_string()),
-        missed_cleavages: args
-            .missed_cleavages
-            .or(missed_cleavages)
-            .unwrap_or(DEFAULT_MISSED_CLEAVAGES),
-        min_length: args.min_length.or(min_length).unwrap_or(DEFAULT_MIN_LENGTH),
-        max_length: args.max_length.or(max_length).unwrap_or(DEFAULT_MAX_LENGTH),
-        min_charge: args.min_charge.or(min_charge).unwrap_or(DEFAULT_MIN_CHARGE),
-        max_charge: args.max_charge.or(max_charge).unwrap_or(DEFAULT_MAX_CHARGE),
-        fixed_mods: args
-            .fixed_mods()
-            .or(fixed_mods)
-            .unwrap_or_else(|| vec![DEFAULT_FIXED_MOD.to_string()]),
-        variable_mods: args
-            .variable_mods
-            .clone()
-            .or(variable_mods)
-            .unwrap_or_else(|| vec![DEFAULT_VARIABLE_MOD.to_string()]),
-        max_variable_mods: args
-            .max_variable_mods
-            .or(max_variable_mods)
-            .unwrap_or(DEFAULT_MAX_VARIABLE_MODS),
-        min_intensity: args
-            .min_intensity
-            .or(min_intensity)
-            .unwrap_or(DEFAULT_MIN_INTENSITY),
-        max_fragments: args.max_fragments.or(max_fragments),
-        decoys: args.decoys().or(decoys).unwrap_or(false),
         // No configuration counterpart: replacing a file is a decision about
         // this invocation, not about how to predict.
         overwrite: args.overwrite,
+    }
+}
+
+/// The `[library]` section the command line would have written, so "the flag was
+/// given at all" is decided in one place and the defaults are applied in
+/// another.
+fn library_overrides(args: &BuildLibraryArgs, config: LibraryConfig) -> LibraryConfig {
+    LibraryConfig {
+        model: args.model.clone().or(config.model),
+        missed_cleavages: args.missed_cleavages.or(config.missed_cleavages),
+        min_length: args.min_length.or(config.min_length),
+        max_length: args.max_length.or(config.max_length),
+        min_charge: args.min_charge.or(config.min_charge),
+        max_charge: args.max_charge.or(config.max_charge),
+        fixed_mods: args.fixed_mods().or(config.fixed_mods),
+        variable_mods: args.variable_mods.clone().or(config.variable_mods),
+        max_variable_mods: args.max_variable_mods.or(config.max_variable_mods),
+        min_intensity: args.min_intensity.or(config.min_intensity),
+        max_fragments: args.max_fragments.or(config.max_fragments),
+        decoys: args.decoys().or(config.decoys),
+    }
+}
+
+/// Fill in msspeculator's defaults wherever the section said nothing.
+///
+/// The only place a default is applied, so a `build-library` run and a search
+/// that predicts its own library cannot read one `[library]` section two ways.
+pub fn resolve_prediction(fasta: PathBuf, library: &LibraryConfig) -> ResolvedPrediction {
+    ResolvedPrediction {
+        fasta,
+        model: library
+            .model
+            .clone()
+            .unwrap_or_else(|| DEFAULT_MODEL.to_string()),
+        missed_cleavages: library.missed_cleavages.unwrap_or(DEFAULT_MISSED_CLEAVAGES),
+        min_length: library.min_length.unwrap_or(DEFAULT_MIN_LENGTH),
+        max_length: library.max_length.unwrap_or(DEFAULT_MAX_LENGTH),
+        min_charge: library.min_charge.unwrap_or(DEFAULT_MIN_CHARGE),
+        max_charge: library.max_charge.unwrap_or(DEFAULT_MAX_CHARGE),
+        fixed_mods: library
+            .fixed_mods
+            .clone()
+            .unwrap_or_else(|| vec![DEFAULT_FIXED_MOD.to_string()]),
+        variable_mods: library
+            .variable_mods
+            .clone()
+            .unwrap_or_else(|| vec![DEFAULT_VARIABLE_MOD.to_string()]),
+        max_variable_mods: library
+            .max_variable_mods
+            .unwrap_or(DEFAULT_MAX_VARIABLE_MODS),
+        min_intensity: library.min_intensity.unwrap_or(DEFAULT_MIN_INTENSITY),
+        max_fragments: library.max_fragments,
+        decoys: library.decoys.unwrap_or(false),
     }
 }
 
@@ -131,7 +149,10 @@ pub fn resolve_build(args: &BuildLibraryArgs, config: &BuildConfig) -> ResolvedB
 /// through is a small change rather than an impossible one; until then the
 /// limitation is stated instead of discovered.
 fn reject_remote_paths(resolved: &ResolvedBuild) -> Result<(), CliError> {
-    for (flag, path) in [("--fasta", &resolved.fasta), ("--out", &resolved.out)] {
+    for (flag, path) in [
+        ("--fasta", &resolved.prediction.fasta),
+        ("--out", &resolved.out),
+    ] {
         let uri = path.to_string_lossy();
         if tims_stage::is_remote_uri(&uri) {
             return Err(CliError::Config {
@@ -176,16 +197,51 @@ fn sidecar_path(args: &BuildLibraryArgs) -> Option<PathBuf> {
     })
 }
 
+/// The only place a [`StreamOptions`] is built.
+///
+/// One construction site, because a search that predicts its own library has to
+/// ask msspeculator for exactly what `build-library` would have written, and two
+/// literals agreeing today is not the same as their agreeing next year.
+fn stream_options<'a>(
+    prediction: &'a ResolvedPrediction,
+    model: ModelSource,
+    report: &'a ProgressFn<'a>,
+) -> StreamOptions<'a> {
+    StreamOptions {
+        model,
+        progress: Some(report),
+        fasta: &prediction.fasta,
+        // No acquisition, activation or chromatography context: the model
+        // artifact's own defaults. Selecting a different one is a decision
+        // about the model, and this command chooses a model rather than
+        // reconfiguring one.
+        activation: None,
+        ms_context: None,
+        chrom_context: None,
+        min_intensity: prediction.min_intensity,
+        missed_cleavages: prediction.missed_cleavages,
+        min_length: prediction.min_length,
+        max_length: prediction.max_length,
+        min_charge: prediction.min_charge,
+        max_charge: prediction.max_charge,
+        fixed_mods: &prediction.fixed_mods,
+        variable_mods: &prediction.variable_mods,
+        max_variable_mods: prediction.max_variable_mods,
+        max_fragments: prediction.max_fragments,
+        generate_decoys: prediction.decoys,
+    }
+}
+
 /// Predict a library and write it, with no network and no server.
 pub fn run(resolved: &ResolvedBuild) -> Result<(), CliError> {
     reject_remote_paths(resolved)?;
     reject_existing_output(resolved)?;
-    let model = parse_model_source(&resolved.model)?;
+    let model = parse_model_source(&resolved.prediction.model)?;
 
     info!(
         "Predicting a library from {} with {}",
-        resolved.fasta.display(),
-        resolved.model
+        resolved.prediction.fasta.display(),
+        resolved.prediction.model
     );
     // Held in a binding: the callback borrows it, so a temporary would be
     // dropped before `write_library` is called.
@@ -194,29 +250,7 @@ pub fn run(resolved: &ResolvedBuild) -> Result<(), CliError> {
     let stats = write_library(&LibraryOptions {
         out: &resolved.out,
         config_out: resolved.config_out.as_deref(),
-        stream: StreamOptions {
-            model,
-            progress: Some(&report),
-            fasta: &resolved.fasta,
-            // No acquisition, activation or chromatography context: the model
-            // artifact's own defaults. Selecting a different one is a decision
-            // about the model, and this command chooses a model rather than
-            // reconfiguring one.
-            activation: None,
-            ms_context: None,
-            chrom_context: None,
-            min_intensity: resolved.min_intensity,
-            missed_cleavages: resolved.missed_cleavages,
-            min_length: resolved.min_length,
-            max_length: resolved.max_length,
-            min_charge: resolved.min_charge,
-            max_charge: resolved.max_charge,
-            fixed_mods: &resolved.fixed_mods,
-            variable_mods: &resolved.variable_mods,
-            max_variable_mods: resolved.max_variable_mods,
-            max_fragments: resolved.max_fragments,
-            generate_decoys: resolved.decoys,
-        },
+        stream: stream_options(&resolved.prediction, model, &report),
     })
     .map_err(|e| CliError::LibraryBuild {
         source: format!("{}: {e:#}", resolved.out.display()),
@@ -294,7 +328,7 @@ mod tests {
     /// out, it shows in the diff.
     #[test]
     fn an_absent_setting_falls_through_to_msspeculators_default() {
-        let resolved = resolve_build(&args(&[]), &BuildConfig::default());
+        let resolved = resolve_build(&args(&[]), &BuildConfig::default()).prediction;
         assert_eq!(resolved.model, "builtin:small-v0");
         assert_eq!(resolved.missed_cleavages, 2);
         assert_eq!(resolved.min_length, 7);
@@ -317,11 +351,11 @@ mod tests {
     fn a_flag_can_turn_a_configured_setting_off() {
         let config = build_config("[library]\ndecoys = true\nfixed_mods = [\"C[UNIMOD:4]\"]\n");
 
-        let on = resolve_build(&args(&[]), &config);
+        let on = resolve_build(&args(&[]), &config).prediction;
         assert!(on.decoys, "the configuration is in force with no flag");
         assert_eq!(on.fixed_mods, ["C[UNIMOD:4]"]);
 
-        let off = resolve_build(&args(&["--no-decoys", "--no-fixed-mods"]), &config);
+        let off = resolve_build(&args(&["--no-decoys", "--no-fixed-mods"]), &config).prediction;
         assert!(!off.decoys);
         assert!(
             off.fixed_mods.is_empty(),
@@ -339,7 +373,7 @@ decoys = true
 fixed_mods = ["C[UNIMOD:4]", "K[UNIMOD:737]"]
 "#,
         );
-        let resolved = resolve_build(&args(&[]), &config);
+        let resolved = resolve_build(&args(&[]), &config).prediction;
         assert_eq!(resolved.missed_cleavages, 3);
         assert!(resolved.decoys);
         assert_eq!(resolved.fixed_mods.len(), 2);
@@ -365,7 +399,12 @@ chunk_size = 20000
 missed_cleavages = 3
 "#,
         );
-        assert_eq!(resolve_build(&args(&[]), &config).missed_cleavages, 3);
+        assert_eq!(
+            resolve_build(&args(&[]), &config)
+                .prediction
+                .missed_cleavages,
+            3
+        );
     }
 
     /// Unknown *top-level* keys are tolerated, but a typo inside `[library]` is
@@ -398,7 +437,8 @@ model = "builtin:from-config"
         let resolved = resolve_build(
             &args(&["--missed-cleavages", "1", "--model", "builtin:from-flag"]),
             &config,
-        );
+        )
+        .prediction;
         assert_eq!(resolved.missed_cleavages, 1);
         assert_eq!(resolved.model, "builtin:from-flag");
     }
@@ -422,11 +462,10 @@ model = "builtin:from-config"
 
     /// `ResolvedBuild` for the guards, which read only the two paths.
     fn paths(fasta: &str, out: &str) -> ResolvedBuild {
-        ResolvedBuild {
-            fasta: PathBuf::from(fasta),
-            out: PathBuf::from(out),
-            ..resolve_build(&args(&[]), &BuildConfig::default())
-        }
+        let mut resolved = resolve_build(&args(&[]), &BuildConfig::default());
+        resolved.prediction.fasta = PathBuf::from(fasta);
+        resolved.out = PathBuf::from(out);
+        resolved
     }
 
     /// A remote URI is named, not left to surface as a missing file. A search
