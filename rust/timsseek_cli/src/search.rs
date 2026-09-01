@@ -164,6 +164,22 @@ fn validate_inputs(resolved: &ResolvedInputs) -> std::result::Result<(), errors:
     Ok(())
 }
 
+/// Record what the run resolved to, at the path the collision probe reserved.
+fn write_config_used(
+    config: &Config,
+    path: &std::path::Path,
+) -> std::result::Result<(), errors::CliError> {
+    let json = serde_json::to_string_pretty(config).map_err(|e| errors::CliError::ParseError {
+        msg: format!("Failed to serialize config: {}", e),
+    })?;
+    std::fs::write(path, json).map_err(|e| errors::CliError::Io {
+        source: e.to_string(),
+        path: Some(path.to_string_lossy().to_string()),
+    })?;
+    info!("Wrote final configuration to {:?}", path);
+    Ok(())
+}
+
 fn get_frag_range_from_index(
     index: &IndexedTimstofPeaks,
 ) -> Result<TupleRange<f64>, errors::CliError> {
@@ -382,6 +398,11 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
         })?;
     }
 
+    // Written before the library is touched, so a run that dies loading or
+    // predicting one still says what it was asked to do. Predicting fills in the
+    // provenance and writes it again; there is nothing to record until then.
+    write_config_used(&config, &config_output_path)?;
+
     let mut run_report = timsseek::scoring::RunReport {
         overwrite: validated.overwrite,
         ..Default::default()
@@ -405,11 +426,8 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
             (lib, td, None)
         }
         LibrarySource::Fasta(fasta) => {
-            let prediction = build_library::resolve_search_prediction(
-                fasta.clone(),
-                config.library.as_ref(),
-                config.analysis.decoy_strategy,
-            );
+            let prediction =
+                build_library::resolve_search_prediction(fasta.clone(), config.library.as_ref());
             let predicted =
                 build_library::predict_in_memory(&prediction, config.analysis.decoy_strategy)?;
             (predicted.library, None, Some(predicted.provenance))
@@ -447,19 +465,12 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
     run_report.speclib_entries = speclib.len();
     run_report.calib_lib_entries = calib_lib.as_ref().map_or(0, |l| l.len());
 
-    // Written once the library is in hand, not before: a run with no library
-    // file is traceable only through the provenance of what it predicted, and
-    // there is nothing to record until the prediction has run.
-    config.library_provenance = provenance;
-    let config_json =
-        serde_json::to_string_pretty(&config).map_err(|e| errors::CliError::ParseError {
-            msg: format!("Failed to serialize config: {}", e),
-        })?;
-    std::fs::write(&config_output_path, config_json).map_err(|e| errors::CliError::Io {
-        source: e.to_string(),
-        path: Some(config_output_path.to_string_lossy().to_string()),
-    })?;
-    info!("Wrote final configuration to {:?}", config_output_path);
+    // A run with no library file is traceable only through the provenance of
+    // what it predicted, so the record is rewritten once there is one to add.
+    if provenance.is_some() {
+        config.library_provenance = provenance;
+        write_config_used(&config, &config_output_path)?;
+    }
 
     let total_files = validated.raw_inputs.len();
     info!("Processing {} raw input(s)", total_files);

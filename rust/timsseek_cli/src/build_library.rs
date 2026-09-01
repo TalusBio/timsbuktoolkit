@@ -149,31 +149,21 @@ pub fn resolve_prediction(fasta: PathBuf, library: &LibraryConfig) -> ResolvedPr
 
 /// The prediction settings for a search that named no library, resolved from the
 /// same `[library]` section a `build-library` run reads.
+///
+/// The decoy policy does not enter here. `[library] decoys` decides what the
+/// library carries and the policy decides what happens to it at seal, exactly as
+/// for a library on disk: a predicted library carrying none gets mass-shift
+/// decoys derived under `if-missing`, has them derived over its own under
+/// `force`, and scores without any under `never` -- which
+/// `ReferenceLibrary::from_sealed_arena` warns about, because a run with nothing
+/// to estimate FDR from is worth saying out loud rather than silently correcting.
+/// Deriving the setting from the policy instead would override a `decoys = false`
+/// the user wrote down.
 pub fn resolve_search_prediction(
     fasta: PathBuf,
     library: Option<&LibraryConfig>,
-    policy: DecoyPolicy,
 ) -> ResolvedPrediction {
-    let mut prediction = resolve_prediction(fasta, &library.cloned().unwrap_or_default());
-    prediction.decoys = generate_decoys(prediction.decoys, policy);
-    prediction
-}
-
-/// Whether prediction has to generate decoys, given what the search does with
-/// the ones it finds.
-///
-/// For a library on disk the two questions are separable: `[library] decoys`
-/// says what the file carries, and a file carrying none still gets mass-shift
-/// decoys derived at load. [`DecoyPolicy::Never`] is where they stop being
-/// separable -- it derives nothing, so the only decoys the run can score are
-/// predicted ones, and with none every target competes against an empty half.
-///
-/// [`DecoyPolicy::Force`] leaves the setting alone even though it drops every
-/// predicted decoy at the row level. Suppressing them would save half the
-/// prediction and change the target rows too: a peptide predicted with decoys
-/// carries its pair id, which is the competition group the arena stores.
-fn generate_decoys(configured: bool, policy: DecoyPolicy) -> bool {
-    configured || policy == DecoyPolicy::Never
+    resolve_prediction(fasta, &library.cloned().unwrap_or_default())
 }
 
 /// A build reads and writes the filesystem directly, so a remote URI is
@@ -599,33 +589,23 @@ decoys = true
 "#,
         );
         let built = resolve_build(&args(&[]), &config).prediction;
-        let searched = resolve_search_prediction(
-            PathBuf::from("p.fasta"),
-            config.library.as_ref(),
-            DecoyPolicy::IfMissing,
-        );
+        let searched = resolve_search_prediction(PathBuf::from("p.fasta"), config.library.as_ref());
         assert_eq!(built, searched);
     }
 
-    /// `never` derives nothing, so a predicted library that carries no decoys
-    /// leaves every target competing against an empty half. Every other policy
-    /// takes the configured answer, which is what keeps a predicted library and
-    /// a built one carrying the same rows.
+    /// What a predicted library carries is `[library] decoys` and nothing else.
+    /// Reading the policy here as well would mean a search predicted a different
+    /// library than the `build-library` run it is supposed to match, and would
+    /// override a `decoys = false` the user wrote down.
     #[test]
-    fn a_policy_that_derives_no_decoys_makes_prediction_generate_them() {
-        for (configured, policy, expected) in [
-            (false, DecoyPolicy::IfMissing, false),
-            (true, DecoyPolicy::IfMissing, true),
-            (false, DecoyPolicy::Force, false),
-            (true, DecoyPolicy::Force, true),
-            (false, DecoyPolicy::Never, true),
-            (true, DecoyPolicy::Never, true),
-        ] {
-            assert_eq!(
-                generate_decoys(configured, policy),
-                expected,
-                "decoys = {configured} under {policy:?}"
-            );
+    fn the_decoy_policy_does_not_change_what_a_prediction_generates() {
+        for configured in [false, true] {
+            let library = LibraryConfig {
+                decoys: Some(configured),
+                ..Default::default()
+            };
+            let prediction = resolve_search_prediction(PathBuf::from("p.fasta"), Some(&library));
+            assert_eq!(prediction.decoys, configured);
         }
     }
 
