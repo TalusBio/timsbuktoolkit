@@ -444,11 +444,13 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
         "Decoy generation strategy: {}",
         config.analysis.decoy_strategy
     );
-    let step = TimedStep::begin(match &validated.library {
-        LibrarySource::File(_) => "Loading speclib",
-        LibrarySource::Fasta(_) => "Predicting speclib",
-        LibrarySource::Build { .. } => "Building speclib",
-    });
+    // Predicting draws its own progress bars, and a bar cannot share a line with
+    // an open `TimedStep` label, so those routes hold the label back to the end.
+    let step = match &validated.library {
+        LibrarySource::File(_) => TimedStep::begin("Loading speclib"),
+        LibrarySource::Fasta(_) => TimedStep::begin_deferred("Predicting speclib"),
+        LibrarySource::Build { .. } => TimedStep::begin_deferred("Building speclib"),
+    };
     let (speclib, _speclib_td, provenance) = match &validated.library {
         LibrarySource::File(uri) => {
             info!("Building database from speclib URI {uri}");

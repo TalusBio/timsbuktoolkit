@@ -65,6 +65,28 @@ impl BuildProgress {
         }
     }
 
+    /// The rendering choice, forced. `new` reads whether stderr is a terminal,
+    /// which under a test harness it is not, so the bar path is unreachable
+    /// otherwise.
+    #[cfg(test)]
+    fn with_terminal(terminal: bool) -> Self {
+        Self {
+            state: Mutex::new(None),
+            terminal,
+        }
+    }
+
+    /// The bar the phase being rendered is using, if it has one. `ProgressBar` is
+    /// a handle, so this observes the live one rather than a copy.
+    #[cfg(test)]
+    fn bar(&self) -> Option<ProgressBar> {
+        let state = self.state.lock().expect("progress state is never poisoned");
+        match &state.as_ref()?.current {
+            Current::Bar(bar) => Some(bar.clone()),
+            Current::Logged(_) => None,
+        }
+    }
+
     /// Hand this to `StreamOptions::progress`.
     pub fn callback(&self) -> impl Fn(Progress) + Send + Sync + '_ {
         move |progress| self.report(progress)
@@ -243,5 +265,39 @@ mod tests {
         ] {
             callback(update);
         }
+    }
+
+    /// A build walks three phases and each one's bar has to give way to the
+    /// next. A bar left open is a line whatever writes next continues, and a
+    /// phase whose bar never advances reads as a build that stopped.
+    #[test]
+    fn each_phase_advances_its_own_bar_and_closes_the_one_before_it() {
+        let progress = BuildProgress::with_terminal(true);
+
+        progress.report(at(Phase::Digesting, 0, 4));
+        let digesting = progress.bar().expect("a measured phase draws a bar");
+        progress.report(at(Phase::Digesting, 4, 4));
+        assert_eq!(digesting.position(), 4);
+        assert!(!digesting.is_finished());
+
+        // Loading measures nothing, so it is a line rather than a bar -- and it
+        // still has to take the previous phase's bar off the screen.
+        progress.report(at(Phase::Loading, 0, 0));
+        assert!(
+            digesting.is_finished(),
+            "digesting's bar outlived its phase"
+        );
+        assert!(
+            progress.bar().is_none(),
+            "a phase with no total draws no bar"
+        );
+
+        progress.report(at(Phase::Predicting, 0, 9));
+        let predicting = progress.bar().expect("predicting counts its peptides");
+        progress.report(at(Phase::Predicting, 9, 9));
+        assert_eq!(predicting.position(), 9);
+
+        progress.finish();
+        assert!(predicting.is_finished(), "the last bar outlived the build");
     }
 }
