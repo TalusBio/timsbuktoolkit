@@ -468,4 +468,30 @@ mod tests {
             );
         }
     }
+
+    /// The direction that bites: an alias added to clap and not to the table is
+    /// accepted forever without ever saying so. clap knows its own aliases, so
+    /// the table can be checked against them rather than against a memory.
+    #[test]
+    fn every_clap_alias_is_a_deprecated_flag() {
+        use clap::CommandFactory;
+        let command = Cli::command();
+        let arguments = command.get_arguments().chain(
+            command
+                .get_subcommands()
+                .flat_map(clap::Command::get_arguments),
+        );
+        for argument in arguments {
+            for alias in argument.get_all_aliases().unwrap_or_default() {
+                let spelling = format!("--{alias}");
+                assert!(
+                    DEPRECATED_FLAGS
+                        .iter()
+                        .any(|(deprecated, _)| *deprecated == spelling),
+                    "{spelling} is an accepted alias of `--{}` but nothing warns about it",
+                    argument.get_long().unwrap_or_default()
+                );
+            }
+        }
+    }
 }
