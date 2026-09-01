@@ -30,6 +30,17 @@ pub struct Config {
     pub library: Option<LibraryConfig>,
     #[serde(default)]
     pub sequences: Option<SequencesConfig>,
+    /// What produced the library a run predicted, as msspeculator reports it:
+    /// the model and the digests of what went into it.
+    ///
+    /// A record rather than a setting. Nothing reads it back and no
+    /// configuration file needs to carry it, but `config_used.json` is
+    /// serialized `Config`, so a run whose library exists only in memory has
+    /// nowhere else to leave its provenance -- and this type denies unknown
+    /// fields, so the artifact would not parse again without the field being
+    /// declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_provenance: Option<serde_json::Value>,
 }
 
 /// The slice of a configuration file `build-library` reads.
@@ -274,6 +285,26 @@ rt = "Unrestricted"
         assert_eq!(b.analysis.chunk_size, a.analysis.chunk_size);
     }
 
+    /// A run that predicted its library leaves the provenance in
+    /// `config_used.json`; a run that loaded one from a file predicted nothing,
+    /// and an empty key would say it had.
+    #[test]
+    fn the_provenance_is_serialized_when_a_run_has_one_and_the_key_is_absent_otherwise() {
+        let mut c: Config = toml::from_str(MINIMAL_TOML).unwrap();
+        let without = serde_json::to_string(&c).unwrap();
+        assert!(!without.contains("library_provenance"), "got: {without}");
+
+        c.library_provenance = Some(serde_json::json!({
+            "generator": { "tool": "msspeculator", "model": "builtin:small-v0" },
+        }));
+        let with = serde_json::to_string(&c).unwrap();
+        assert!(with.contains("builtin:small-v0"), "got: {with}");
+
+        let reread: Config =
+            serde_json::from_str(&with).expect("config_used.json has to parse as a Config");
+        assert_eq!(reread.library_provenance, c.library_provenance);
+    }
+
     /// Serde and clap derive names independently, so verify their spellings.
     #[test]
     fn rescore_model_spellings_agree_between_cli_and_toml() {
@@ -330,6 +361,10 @@ rt = "Unrestricted"
         assert!(c.staging.is_none(), "[staging] must be commented out");
         assert!(c.library.is_none(), "[library] must be commented out");
         assert!(c.sequences.is_none(), "[sequences] must be commented out");
+        assert!(
+            c.library_provenance.is_none(),
+            "provenance is recorded by a run, so the template must not mention it"
+        );
         assert!(c.analysis.raw_inputs.is_none());
 
         assert_eq!(

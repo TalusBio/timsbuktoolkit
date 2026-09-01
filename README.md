@@ -79,6 +79,22 @@ cargo run --release --bin timsseek -- \
     --raw-inputs $DOTD_FILE
 ```
 
+For a one-off search, skip the library file entirely. `--fasta` with no
+`--speclib-uri` predicts the library into memory and searches it, so the only
+thing written is the results:
+
+```bash
+cargo run --release --bin timsseek -- \
+    --fasta $FASTA_FILE \
+    --output-uri $RESULTS_DIR \
+    --raw-inputs $DOTD_FILE
+```
+
+The `[library]` section of the configuration file supplies the prediction
+settings, exactly as it does for `build-library`, and the model and FASTA digests
+land in `config_used.json` so a run with no library file is still traceable.
+Naming both a library and a FASTA loads the library.
+
 ## S3 inputs
 
 A search accepts `s3://` URIs anywhere a path is accepted (AWS / MinIO / R2). `.d` can be a directory, `.tar`, or S3 prefix; `.idx` sidecars short-circuit staging.

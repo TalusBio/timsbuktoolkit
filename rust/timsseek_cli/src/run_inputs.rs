@@ -6,6 +6,11 @@
 //! there is one resolved value per input rather than two sources consulted at
 //! different points.
 
+use std::path::{
+    Path,
+    PathBuf,
+};
+
 use crate::cli::SearchArgs;
 use crate::config::{
     Config,
@@ -24,10 +29,55 @@ use tims_stage::expand_local_uri;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedInputs {
     pub raw_inputs: Vec<String>,
-    pub speclib_uri: String,
+    pub library: LibrarySource,
     pub calib_lib_uri: Option<String>,
     pub output_uri: String,
     pub overwrite: bool,
+}
+
+/// Where the library a run scores against comes from.
+///
+/// Not an `Option<String>` with the FASTA read from elsewhere, because the two
+/// are one decision: a run has exactly one library and either opens it or
+/// predicts it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LibrarySource {
+    /// A library file, named by `--speclib-uri` or `[input]`. May be remote.
+    File(String),
+    /// No library was named, so one is predicted from this sequence database and
+    /// never written down.
+    Fasta(PathBuf),
+}
+
+/// Which of the two supplies the library.
+///
+/// A named library is used whether or not a FASTA was also given. Naming a
+/// library is what asks for it, and the FASTA is an input in its own right --
+/// the sequences a run reports against are not a substitute for its library --
+/// so one arriving does not reinterpret the other.
+fn library_source(
+    input: Option<&InputConfig>,
+    sequences: Option<&SequencesConfig>,
+) -> Result<LibrarySource, CliError> {
+    match (input, sequences) {
+        (Some(InputConfig::Speclib { uri, .. }), _) => {
+            Ok(LibrarySource::File(expand_local_uri(uri)))
+        }
+        (None, Some(SequencesConfig { fasta })) => {
+            Ok(LibrarySource::Fasta(expand_local_path(fasta)))
+        }
+        (None, None) => Err(CliError::Config {
+            source: "No library and no sequences provided; either name a library with \
+                     --speclib-uri or name a sequence database to predict one from with --fasta, \
+                     in the config file or on the command line"
+                .to_string(),
+        }),
+    }
+}
+
+/// `~` expanded on a path, so a FASTA is spelled the way every URI is.
+fn expand_local_path(path: &Path) -> PathBuf {
+    PathBuf::from(expand_local_uri(&path.to_string_lossy()))
 }
 
 /// Merge the command line into `config`, then read the run's inputs back out of
@@ -106,16 +156,10 @@ fn read_inputs(args: &SearchArgs, config: &Config) -> Result<ResolvedInputs, Cli
         }
     };
 
-    let (speclib_uri, calib_lib_uri) = match &config.input {
-        Some(InputConfig::Speclib { uri, calib_uri }) => (
-            expand_local_uri(uri),
-            calib_uri.as_deref().map(expand_local_uri),
-        ),
-        None => {
-            return Err(CliError::Config {
-                source: "No input provided, please provide one in either the config file or with the --speclib-uri flag".to_string(),
-            });
-        }
+    let library = library_source(config.input.as_ref(), config.sequences.as_ref())?;
+    let calib_lib_uri = match &config.input {
+        Some(InputConfig::Speclib { calib_uri, .. }) => calib_uri.as_deref().map(expand_local_uri),
+        None => None,
     };
 
     let output_uri = match &config.output {
@@ -129,7 +173,7 @@ fn read_inputs(args: &SearchArgs, config: &Config) -> Result<ResolvedInputs, Cli
 
     Ok(ResolvedInputs {
         raw_inputs,
-        speclib_uri,
+        library,
         calib_lib_uri,
         output_uri,
         overwrite: args.overwrite,
@@ -141,8 +185,12 @@ mod tests {
     use super::*;
     use crate::cli::Cli;
     use clap::Parser;
-    use std::path::PathBuf;
     use timsseek::DecoyPolicy;
+
+    /// The library a run resolved to, for the runs that name a file.
+    fn file(uri: &str) -> LibrarySource {
+        LibrarySource::File(uri.to_string())
+    }
 
     /// The search arguments a command line resolves to, whether they were
     /// given bare or under `search`.
@@ -211,7 +259,7 @@ rt = "Unrestricted"
         .expect("the canonical invocation resolves");
 
         assert_eq!(aliased, canonical);
-        assert_eq!(aliased.speclib_uri, "vimentin.ndjson");
+        assert_eq!(aliased.library, file("vimentin.ndjson"));
         assert_eq!(aliased.output_uri, "vimentin_search_results");
         assert_eq!(aliased.raw_inputs, vec!["my_data.d".to_string()]);
     }
@@ -241,7 +289,7 @@ uri = "config_results"
         )
         .unwrap();
 
-        assert_eq!(resolved.speclib_uri, "from_flag.ndjson");
+        assert_eq!(resolved.library, file("from_flag.ndjson"));
         assert_eq!(resolved.output_uri, "flag_results");
         assert_eq!(resolved.raw_inputs, vec!["from_flag.d".to_string()]);
     }
@@ -263,7 +311,7 @@ uri = "config_results"
 
         let resolved = resolve(&[], config).unwrap();
 
-        assert_eq!(resolved.speclib_uri, "from_config.ndjson");
+        assert_eq!(resolved.library, file("from_config.ndjson"));
         assert_eq!(resolved.output_uri, "config_results");
         assert_eq!(resolved.raw_inputs, vec!["from_config.d".to_string()]);
     }
@@ -290,8 +338,10 @@ uri = "config_results"
         assert_eq!(merged.analysis.decoy_strategy, DecoyPolicy::Never);
     }
 
+    /// Both flags, because a library file is no longer the only way to supply
+    /// one: a FASTA to predict from is the other.
     #[test]
-    fn a_run_with_no_library_names_the_flag_that_supplies_one() {
+    fn a_run_with_no_library_names_both_flags_that_supply_one() {
         let err = resolve(
             &["--raw-inputs", "a.d", "--output-uri", "out"],
             config_with(""),
@@ -299,6 +349,62 @@ uri = "config_results"
         .unwrap_err()
         .to_string();
         assert!(err.contains("--speclib-uri"), "got: {err}");
+        assert!(err.contains("--fasta"), "got: {err}");
+    }
+
+    /// The whole routing table, on the function that decides it: a named library
+    /// is loaded, a lone FASTA is predicted from, and naming neither is an error
+    /// that says what to name.
+    #[test]
+    fn a_named_library_wins_and_a_lone_fasta_is_predicted_from() {
+        let speclib = InputConfig::Speclib {
+            uri: "lib.mzspeclib.txt".to_string(),
+            calib_uri: None,
+        };
+        let sequences = SequencesConfig {
+            fasta: PathBuf::from("proteome.fasta"),
+        };
+
+        assert_eq!(
+            library_source(Some(&speclib), None).expect("a library alone resolves"),
+            file("lib.mzspeclib.txt")
+        );
+        assert_eq!(
+            library_source(Some(&speclib), Some(&sequences)).expect("both resolve"),
+            file("lib.mzspeclib.txt"),
+            "a named library is used, so the FASTA predicts nothing"
+        );
+        assert_eq!(
+            library_source(None, Some(&sequences)).expect("a FASTA alone resolves"),
+            LibrarySource::Fasta(PathBuf::from("proteome.fasta"))
+        );
+
+        let err = library_source(None, None)
+            .expect_err("a run with no library and no sequences has nothing to score against")
+            .to_string();
+        assert!(err.contains("--speclib-uri"), "got: {err}");
+        assert!(err.contains("--fasta"), "got: {err}");
+    }
+
+    /// A search from a FASTA and nothing else, which is the invocation that
+    /// writes no library to disk.
+    #[test]
+    fn a_run_that_names_only_a_fasta_predicts_its_own_library() {
+        let (_, resolved) = resolve_pair(
+            &[
+                "--fasta",
+                "proteome.fasta",
+                "--output-uri",
+                "out",
+                "--raw-inputs",
+                "a.d",
+            ],
+            config_with(""),
+        );
+        assert_eq!(
+            resolved.library,
+            LibrarySource::Fasta(PathBuf::from("proteome.fasta"))
+        );
     }
 
     #[test]
@@ -355,7 +461,7 @@ uri = "config_results"
             ),
         )
         .unwrap();
-        assert_eq!(resolved.speclib_uri, "flag.mzspeclib.txt");
+        assert_eq!(resolved.library, file("flag.mzspeclib.txt"));
         assert_eq!(
             resolved.calib_lib_uri.as_deref(),
             Some("calib.mzspeclib.txt"),
@@ -365,9 +471,10 @@ uri = "config_results"
 
     /// A sequence database and a spectral library are independent inputs: one
     /// can be predicted from the other, and neither replaces it, so naming both
-    /// is an ordinary invocation rather than a conflict.
+    /// is an ordinary invocation rather than a conflict -- and the named library
+    /// is the one searched.
     #[test]
-    fn a_fasta_and_a_library_are_accepted_together() {
+    fn a_fasta_and_a_library_are_accepted_together_and_the_library_is_searched() {
         let (merged, resolved) = resolve_pair(
             &[
                 "--speclib-uri",
@@ -381,7 +488,11 @@ uri = "config_results"
             ],
             config_with(""),
         );
-        assert_eq!(resolved.speclib_uri, "lib.mzspeclib.txt");
+        assert_eq!(
+            resolved.library,
+            file("lib.mzspeclib.txt"),
+            "the FASTA does not turn a named library into a prediction"
+        );
         assert_eq!(
             merged.sequences.map(|sequences| sequences.fasta),
             Some(PathBuf::from("proteome.fasta"))

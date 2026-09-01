@@ -16,8 +16,10 @@ use msspeculator_inference::{
     ModelSource,
     ProgressFn,
     StreamOptions,
+    stream_library,
     write_library,
 };
+use timsseek::DecoyPolicy;
 use tracing::info;
 
 use crate::build_progress::BuildProgress;
@@ -27,6 +29,10 @@ use crate::config::{
     LibraryConfig,
 };
 use crate::errors::CliError;
+use crate::predicted_library::{
+    self,
+    PredictedLibrary,
+};
 
 /// msspeculator's defaults, restated here only so a partially-specified
 /// `[library]` section does not have to name every field to change one.
@@ -141,6 +147,35 @@ pub fn resolve_prediction(fasta: PathBuf, library: &LibraryConfig) -> ResolvedPr
     }
 }
 
+/// The prediction settings for a search that named no library, resolved from the
+/// same `[library]` section a `build-library` run reads.
+pub fn resolve_search_prediction(
+    fasta: PathBuf,
+    library: Option<&LibraryConfig>,
+    policy: DecoyPolicy,
+) -> ResolvedPrediction {
+    let mut prediction = resolve_prediction(fasta, &library.cloned().unwrap_or_default());
+    prediction.decoys = generate_decoys(prediction.decoys, policy);
+    prediction
+}
+
+/// Whether prediction has to generate decoys, given what the search does with
+/// the ones it finds.
+///
+/// For a library on disk the two questions are separable: `[library] decoys`
+/// says what the file carries, and a file carrying none still gets mass-shift
+/// decoys derived at load. [`DecoyPolicy::Never`] is where they stop being
+/// separable -- it derives nothing, so the only decoys the run can score are
+/// predicted ones, and with none every target competes against an empty half.
+///
+/// [`DecoyPolicy::Force`] leaves the setting alone even though it drops every
+/// predicted decoy at the row level. Suppressing them would save half the
+/// prediction and change the target rows too: a peptide predicted with decoys
+/// carries its pair id, which is the competition group the arena stores.
+fn generate_decoys(configured: bool, policy: DecoyPolicy) -> bool {
+    configured || policy == DecoyPolicy::Never
+}
+
 /// A build reads and writes the filesystem directly, so a remote URI is
 /// rejected by name rather than reaching `File::open` and surfacing as "No such
 /// file or directory".
@@ -230,6 +265,44 @@ fn stream_options<'a>(
         max_fragments: prediction.max_fragments,
         generate_decoys: prediction.decoys,
     }
+}
+
+/// Predict a library straight into the arena a search scores, writing nothing.
+///
+/// The same settings, the same [`StreamOptions`] and the same progress rendering
+/// [`run`] uses; all that differs is where the rows land.
+pub(crate) fn predict_in_memory(
+    prediction: &ResolvedPrediction,
+    decoys: DecoyPolicy,
+) -> Result<PredictedLibrary, CliError> {
+    let model = parse_model_source(&prediction.model)?;
+
+    info!(
+        "Predicting a library from {} with {}",
+        prediction.fasta.display(),
+        prediction.model
+    );
+    // Held in a binding: the callback borrows it, so a temporary would be
+    // dropped before `stream_library` is called.
+    let progress = BuildProgress::new();
+    let report = progress.callback();
+    let (handle, sink) = predicted_library::sink();
+    let stats = stream_library(&stream_options(prediction, model, &report), sink).map_err(|e| {
+        CliError::LibraryBuild {
+            source: format!("predicting from {}: {e:#}", prediction.fasta.display()),
+        }
+    })?;
+    // Before anything else writes: an open bar is a line the next line out would
+    // land on the end of.
+    progress.finish();
+
+    // The digestion counts exist nowhere else on this path -- there is no
+    // sidecar and no library file to inspect afterwards.
+    info!(
+        "{} proteins -> {} peptides -> {} precursors ({} decoys) -> {} fragments",
+        stats.proteins, stats.peptides, stats.precursors, stats.decoys, stats.fragments,
+    );
+    handle.into_library(&stats, decoys)
 }
 
 /// Predict a library and write it, with no network and no server.
@@ -505,6 +578,55 @@ model = "builtin:from-config"
             &dir.path().join("new.mzspeclib.txt.gz").to_string_lossy(),
         );
         assert!(reject_existing_output(&fresh).is_ok());
+    }
+
+    /// The "same targets" criterion, as far as it can be asserted without a
+    /// model: both routes resolve one `[library]` section to the same settings.
+    ///
+    /// The `StreamOptions` half is not asserted, because there is one
+    /// construction site for it and comparing two calls to `stream_options`
+    /// would restate that rather than test it.
+    #[test]
+    fn a_search_resolves_the_prediction_settings_a_build_would() {
+        let config = build_config(
+            r#"
+[library]
+model = "builtin:small-v0"
+missed_cleavages = 3
+min_charge = 1
+max_fragments = 12
+decoys = true
+"#,
+        );
+        let built = resolve_build(&args(&[]), &config).prediction;
+        let searched = resolve_search_prediction(
+            PathBuf::from("p.fasta"),
+            config.library.as_ref(),
+            DecoyPolicy::IfMissing,
+        );
+        assert_eq!(built, searched);
+    }
+
+    /// `never` derives nothing, so a predicted library that carries no decoys
+    /// leaves every target competing against an empty half. Every other policy
+    /// takes the configured answer, which is what keeps a predicted library and
+    /// a built one carrying the same rows.
+    #[test]
+    fn a_policy_that_derives_no_decoys_makes_prediction_generate_them() {
+        for (configured, policy, expected) in [
+            (false, DecoyPolicy::IfMissing, false),
+            (true, DecoyPolicy::IfMissing, true),
+            (false, DecoyPolicy::Force, false),
+            (true, DecoyPolicy::Force, true),
+            (false, DecoyPolicy::Never, true),
+            (true, DecoyPolicy::Never, true),
+        ] {
+            assert_eq!(
+                generate_decoys(configured, policy),
+                expected,
+                "decoys = {configured} under {policy:?}"
+            );
+        }
     }
 
     /// A search flag under `build-library` is an error, not an argument that is

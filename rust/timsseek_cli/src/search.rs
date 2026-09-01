@@ -29,11 +29,13 @@ use crate::output_sink::{
     sample_name_from_uri,
 };
 use crate::run_inputs::{
+    LibrarySource,
     ResolvedInputs,
     resolve_run_inputs,
 };
 use crate::{
     artifacts,
+    build_library,
     errors,
     processing,
 };
@@ -46,20 +48,35 @@ fn validate_inputs(resolved: &ResolvedInputs) -> std::result::Result<(), errors:
 
     let ResolvedInputs {
         raw_inputs,
-        speclib_uri,
+        library,
         calib_lib_uri,
         output_uri,
         overwrite,
     } = resolved;
 
-    // Local only: remote resolution happens at open.
-    if !is_remote_uri(speclib_uri) && !std::path::Path::new(speclib_uri).exists() {
-        return Err(errors::CliError::Io {
-            source: "Speclib file does not exist".to_string(),
-            path: Some(speclib_uri.clone()),
-        });
+    match library {
+        // Local only: remote resolution happens at open.
+        LibrarySource::File(uri) => {
+            if !is_remote_uri(uri) && !std::path::Path::new(uri).exists() {
+                return Err(errors::CliError::Io {
+                    source: "Speclib file does not exist".to_string(),
+                    path: Some(uri.clone()),
+                });
+            }
+            info!("✓ Speclib URI: {}", uri);
+        }
+        // Probed here rather than left to msspeculator, which opens the FASTA
+        // after the model has loaded.
+        LibrarySource::Fasta(fasta) => {
+            if !fasta.exists() {
+                return Err(errors::CliError::Io {
+                    source: "Sequence database does not exist".to_string(),
+                    path: Some(fasta.to_string_lossy().to_string()),
+                });
+            }
+            info!("✓ FASTA to predict a library from: {}", fasta.display());
+        }
     }
-    info!("✓ Speclib URI: {}", speclib_uri);
 
     if let Some(uri) = calib_lib_uri {
         if !is_remote_uri(uri) && !std::path::Path::new(uri).exists() {
@@ -329,7 +346,7 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
     }
 
     let config = load_config(args.config.as_deref())?;
-    let (config, validated) = resolve_run_inputs(args, config)?;
+    let (mut config, validated) = resolve_run_inputs(args, config)?;
 
     // Held in `search()`'s scope so the instrumentation flush guard drops after
     // all work completes.
@@ -365,16 +382,6 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
         })?;
     }
 
-    let config_json =
-        serde_json::to_string_pretty(&config).map_err(|e| errors::CliError::ParseError {
-            msg: format!("Failed to serialize config: {}", e),
-        })?;
-    std::fs::write(&config_output_path, config_json).map_err(|e| errors::CliError::Io {
-        source: e.to_string(),
-        path: Some(config_output_path.to_string_lossy().to_string()),
-    })?;
-    info!("Wrote final configuration to {:?}", config_output_path);
-
     let mut run_report = timsseek::scoring::RunReport {
         overwrite: validated.overwrite,
         ..Default::default()
@@ -382,18 +389,32 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
     let mut failed_files: Vec<(String, errors::CliError)> = Vec::new();
     let mut successful_files: Vec<String> = Vec::new();
 
-    // Loaded once, shared across all files.
-    let step = TimedStep::begin("Loading speclib");
-    info!(
-        "Building database from speclib URI {}",
-        validated.speclib_uri
-    );
+    // Obtained once, shared across all files.
     info!(
         "Decoy generation strategy: {}",
         config.analysis.decoy_strategy
     );
-    let (speclib, _speclib_td) =
-        speclib_from_uri(&validated.speclib_uri, config.analysis.decoy_strategy)?;
+    let step = TimedStep::begin(match &validated.library {
+        LibrarySource::File(_) => "Loading speclib",
+        LibrarySource::Fasta(_) => "Predicting speclib",
+    });
+    let (speclib, _speclib_td, provenance) = match &validated.library {
+        LibrarySource::File(uri) => {
+            info!("Building database from speclib URI {uri}");
+            let (lib, td) = speclib_from_uri(uri, config.analysis.decoy_strategy)?;
+            (lib, td, None)
+        }
+        LibrarySource::Fasta(fasta) => {
+            let prediction = build_library::resolve_search_prediction(
+                fasta.clone(),
+                config.library.as_ref(),
+                config.analysis.decoy_strategy,
+            );
+            let predicted =
+                build_library::predict_in_memory(&prediction, config.analysis.decoy_strategy)?;
+            (predicted.library, None, Some(predicted.provenance))
+        }
+    };
     let load_speclib_ms = step
         .finish_with(format_args!(
             "{} entries, {:.1} frags/entry",
@@ -425,6 +446,20 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
     run_report.load_calib_lib_ms = load_calib_lib_ms;
     run_report.speclib_entries = speclib.len();
     run_report.calib_lib_entries = calib_lib.as_ref().map_or(0, |l| l.len());
+
+    // Written once the library is in hand, not before: a run with no library
+    // file is traceable only through the provenance of what it predicted, and
+    // there is nothing to record until the prediction has run.
+    config.library_provenance = provenance;
+    let config_json =
+        serde_json::to_string_pretty(&config).map_err(|e| errors::CliError::ParseError {
+            msg: format!("Failed to serialize config: {}", e),
+        })?;
+    std::fs::write(&config_output_path, config_json).map_err(|e| errors::CliError::Io {
+        source: e.to_string(),
+        path: Some(config_output_path.to_string_lossy().to_string()),
+    })?;
+    info!("Wrote final configuration to {:?}", config_output_path);
 
     let total_files = validated.raw_inputs.len();
     info!("Processing {} raw input(s)", total_files);

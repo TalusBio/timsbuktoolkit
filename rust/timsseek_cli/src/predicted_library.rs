@@ -14,10 +14,6 @@
 //! the finished rows come out through shared state: [`sink`] returns a handle
 //! that stays with the caller and the sink that goes into `stream_library`.
 
-// Reached only by its own tests until `search --fasta` calls it; the allow goes
-// with that command.
-#![allow(dead_code)]
-
 use std::sync::{
     Arc,
     Mutex,
