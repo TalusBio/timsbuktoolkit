@@ -3,14 +3,20 @@
 //!
 //! msspeculator hands every precursor to a [`LibrarySink`]; this one spells the
 //! rows into [`TargetColumns`] instead of into mzSpecLib or DIA-NN text. The
-//! result has to be indistinguishable from loading the same library off disk, so
-//! every spelling decision here mirrors the mzSpecLib reader in
-//! `timsquery::serde::mzspeclib_io` -- the two routes are compared by the numbers
-//! they produce, not by the strings they pass through.
+//! result has to agree with loading the same library off disk on every value a
+//! scorer reads, so every spelling decision here mirrors the mzSpecLib reader in
+//! `timsquery::serde::mzspeclib_io` -- the two routes agree on the numbers they
+//! store, not on the strings they pass through. Row order is the exception: the
+//! file route stores prediction-arrival order, this one sorts (see
+//! [`build_arena`]).
 //!
 //! The sink is moved onto msspeculator's writer thread and never handed back, so
 //! the finished rows come out through shared state: [`sink`] returns a handle
 //! that stays with the caller and the sink that goes into `stream_library`.
+
+// Reached only by its own tests until `search --fasta` calls it; the allow goes
+// with that command.
+#![allow(dead_code)]
 
 use std::sync::{
     Arc,
@@ -54,7 +60,9 @@ use crate::errors::CliError;
 /// With no chromatography context it is a dimensionless PROCAL-anchored index,
 /// which the mzSpecLib writer has to declare in `minute` because the vocabulary
 /// has no unit for an index, and the mzSpecLib reader multiplies by sixty
-/// regardless. Scoring only requires `rt_seconds` to be ordered, so scaling one
+/// regardless -- which recovers the declared minutes only because the pinned
+/// mzannotate leaves a `minute`-declared value alone (a release divides it by
+/// sixty). Scoring only requires `rt_seconds` to be ordered, so scaling one
 /// route and not the other gives two libraries 60x apart that each work alone
 /// and disagree the moment a run holds one of each --
 /// `check_rt_scale_compatibility` then reports a pair with no overlapping RT
@@ -80,8 +88,9 @@ pub(crate) struct PredictedLibraryHandle {
 pub(crate) struct PredictedLibrarySink {
     shared: Arc<Mutex<Handoff>>,
     /// Every row so far, owned. A [`SpectrumRow`] borrows from the prediction it
-    /// came out of, so nothing kept past `spectrum` can borrow, and the arena
-    /// cannot be built row by row anyway (see [`build_arena`]).
+    /// came out of, so nothing kept past `spectrum` can borrow; and the rows are
+    /// held rather than pushed as they arrive because [`build_arena`] needs the
+    /// whole set to order it.
     rows: Vec<PredictedRow>,
 }
 
@@ -265,10 +274,10 @@ impl PredictedRow {
             precursor_mz: row.precursor_mz,
             charge,
             // `rt` is the quantity the mzSpecLib writer puts under the term the
-            // file route reads back: gradient minutes with a chromatography
-            // context, the normalized index without one. `irt` is the second
-            // copy that exists only in the first case, and the file route never
-            // sees it, so neither does this.
+            // file route reads back as `start_time`: gradient minutes with a
+            // chromatography context, the normalized index without one. `irt`
+            // carries the index alongside a gradient time, under a term the
+            // reader keeps as a scan param and never scores on.
             rt_seconds: row.rt * SECONDS_PER_MINUTE,
             mobility: row.mobility as f32,
             frags,
@@ -396,6 +405,8 @@ fn build_arena(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use msspeculator_core::peptide::Peptide;
     use msspeculator_inference::{
         ProteinGroup,
@@ -403,6 +414,7 @@ mod tests {
     };
     use timsquery::models::{
         DecoyStrategy,
+        RowIdx,
         SeqFeatureState,
     };
 
@@ -494,10 +506,13 @@ mod tests {
 
     /// Drive the sink the way `stream_library` does, minus the header, whose
     /// `LibraryProvenance` cannot be built here.
-    fn build(rows: Vec<SpectrumRow<'_>>, decoys: DecoyPolicy) -> PredictedLibrary {
+    ///
+    /// Borrows the rows rather than taking them so one set can be put through
+    /// this route and the file route both.
+    fn build(rows: &[SpectrumRow<'_>], decoys: DecoyPolicy) -> PredictedLibrary {
         let (handle, mut collector) = sink();
         collector.record_test_provenance();
-        for row in &rows {
+        for row in rows {
             collector.spectrum(row).expect("row converts");
         }
         collector.finish().expect("stream finishes");
@@ -536,7 +551,7 @@ mod tests {
         let second = Fixture::new("MMMPEPTIDER", "MMMPEPTIDER");
 
         let ordered = build(
-            vec![
+            &[
                 first.row(2, false, None, peaks(3)),
                 first.row(3, false, None, peaks(2)),
                 second.row(2, false, None, peaks(4)),
@@ -544,7 +559,7 @@ mod tests {
             DecoyPolicy::Never,
         );
         let shuffled = build(
-            vec![
+            &[
                 second.row(2, false, None, peaks(4)),
                 first.row(3, false, None, peaks(2)),
                 first.row(2, false, None, peaks(3)),
@@ -561,7 +576,7 @@ mod tests {
         let target = Fixture::new("PEPTIDEK", "PEPTIDEK");
         let decoy = Fixture::new("PDITPEEK", "PDITPEEK");
         let lib = build(
-            vec![
+            &[
                 target.row(2, false, Some(7), peaks(3)),
                 decoy.row(2, true, Some(7), peaks(3)),
             ],
@@ -584,12 +599,15 @@ mod tests {
         );
     }
 
+    /// Only what `decoy_group` reports, which is all this can see: whether the
+    /// label column was stored or dropped is not observable from outside
+    /// timsquery, and both states give a groupless row its own id back.
     #[test]
-    fn a_library_whose_rows_declare_no_pair_id_keeps_no_group_column() {
+    fn a_row_that_declares_no_pair_reports_its_own_id_as_its_group() {
         let first = Fixture::new("PEPTIDEK", "PEPTIDEK");
         let second = Fixture::new("PEPTIDER", "PEPTIDER");
         let lib = build(
-            vec![
+            &[
                 first.row(2, false, None, peaks(2)),
                 second.row(2, false, None, peaks(2)),
             ],
@@ -612,7 +630,7 @@ mod tests {
         let target = Fixture::new("PEPTIDEK", "PEPTIDEK");
         let decoy = Fixture::new("PDITPEEK", "PDITPEEK");
         let lib = build(
-            vec![
+            &[
                 target.row(2, false, Some(1), peaks(3)),
                 decoy.row(2, true, Some(1), peaks(5)),
             ],
@@ -631,27 +649,20 @@ mod tests {
     fn the_intensity_sidecar_is_as_long_as_the_fragment_label_arena() {
         let fixture = Fixture::new("PEPTIDEK", "PEPTIDEK");
         let lib = build(
-            vec![
+            &[
                 fixture.row(2, false, None, peaks(6)),
                 fixture.row(3, false, None, peaks(4)),
             ],
             DecoyPolicy::Never,
         );
 
-        assert_eq!(
-            lib.library.frag_intens.len(),
-            lib.library.geom.n_fragments()
-        );
-        assert_eq!(lib.library.frag_intens.len(), 10);
+        assert_eq!(lib.library.frag_intens.len(), 6 + 4);
     }
 
     #[test]
     fn a_predicted_library_keeps_sequence_features_for_sequences_that_parse() {
         let fixture = Fixture::new("PEPC[UNIMOD:4]IDEK", "PEPCIDEK");
-        let lib = build(
-            vec![fixture.row(2, false, None, peaks(3))],
-            DecoyPolicy::Never,
-        );
+        let lib = build(&[fixture.row(2, false, None, peaks(3))], DecoyPolicy::Never);
 
         let tgt = lib.library.geom.rows().next().unwrap();
         assert_eq!(lib.library.geom.seq_mod(tgt), "PEPC[UNIMOD:4]IDEK/2");
@@ -666,7 +677,7 @@ mod tests {
     fn a_predicted_peak_gets_the_label_the_file_route_parses_from_the_same_annotation() {
         let fixture = Fixture::new("PEPTIDEK", "PEPTIDEK");
         let lib = build(
-            vec![fixture.row(
+            &[fixture.row(
                 2,
                 false,
                 None,
@@ -693,10 +704,7 @@ mod tests {
     #[test]
     fn retention_is_stored_on_the_scale_the_file_route_reads_the_same_library_back_on() {
         let fixture = Fixture::new("PEPTIDEK", "PEPTIDEK");
-        let lib = build(
-            vec![fixture.row(2, false, None, peaks(2))],
-            DecoyPolicy::Never,
-        );
+        let lib = build(&[fixture.row(2, false, None, peaks(2))], DecoyPolicy::Never);
 
         let tgt = lib.library.geom.rows().next().unwrap();
         assert!((lib.library.geom.rt_seconds(tgt) - 93.56484).abs() < 1e-3);
@@ -713,7 +721,7 @@ mod tests {
             irt: Some(37.75),
             ..fixture.row(2, false, None, peaks(2))
         };
-        let lib = build(vec![contextual], DecoyPolicy::Never);
+        let lib = build(&[contextual], DecoyPolicy::Never);
 
         let tgt = lib.library.geom.rows().next().unwrap();
         assert!((lib.library.geom.rt_seconds(tgt) - 1890.0).abs() < 1e-3);
@@ -736,16 +744,297 @@ mod tests {
         );
     }
 
+    /// The header `MzSpecLibSink::header` would write, minus the provenance
+    /// pairs, written by hand.
+    ///
+    /// `header` takes a `LibraryProvenance`, which is `#[non_exhaustive]` with no
+    /// constructor, so no test outside msspeculator can call it. Its `spectrum`
+    /// does not depend on it having run, so every per-row value below still comes
+    /// out of the real writer; what is reproduced here is only the framing the
+    /// reader needs to parse one -- the format version, and the two attribute
+    /// sets that carry `spectrum origin type`, which is where `is_decoy` reads
+    /// from. The provenance pairs are dropped because no per-row value comes from
+    /// them.
+    fn write_mzspeclib_header(out: &mut impl std::io::Write) {
+        for line in [
+            "<mzSpecLib>",
+            "MS:1003186|library format version=1.0",
+            "MS:1003188|library name=both_routes",
+            "<AttributeSet Spectrum=all>",
+            "MS:1000511|ms level=2",
+            "MS:1003072|spectrum origin type=MS:1003074|predicted spectrum",
+            "MS:1003065|spectrum aggregation type=MS:1003074|predicted spectrum",
+            "<AttributeSet Spectrum=Decoy>",
+            "MS:1003072|spectrum origin type=MS:1003195|unnatural peptidoform decoy spectrum",
+        ] {
+            writeln!(out, "{line}").expect("header writes");
+        }
+    }
+
+    /// The other route: msspeculator's own mzSpecLib writer to a file, then this
+    /// project's reader back off it, which is what a `build-library` followed by
+    /// a `search` does.
+    fn via_file(rows: &[SpectrumRow<'_>]) -> TargetColumns<IonAnnot> {
+        let dir = tempfile::tempdir().expect("temp dir");
+        // The name the sniffer dispatches on: it takes `.mzspeclib.` anywhere in
+        // the file name, and reads plain text for anything not ending `.gz`.
+        let path = dir.path().join("both_routes.mzspeclib.txt");
+        {
+            let mut file = std::fs::File::create(&path).expect("library file");
+            write_mzspeclib_header(&mut file);
+            // The sink appends to the same handle at the cursor the header left,
+            // and closes it when this scope drops it.
+            let mut writer = msspeculator_inference::mzspeclib::MzSpecLibSink::new(file, &path);
+            for row in rows {
+                writer.spectrum(row).expect("row writes");
+            }
+            writer.finish().expect("file finishes");
+        }
+        let TargetTable::Mzpaf { geom, .. } =
+            timsquery::serde::read_targets_with(&path, DecoyPolicy::Never)
+                .expect("the file this project writes reads back")
+        else {
+            panic!("an mzSpecLib library is mzpaf-labelled");
+        };
+        geom
+    }
+
+    /// This row's fragments as label to m/z, which is how the two routes can be
+    /// compared at all: the writer sorts peaks by m/z and the sink keeps
+    /// `(position, ion type)`, so the sequences differ where the mapping does not.
+    fn fragments(geom: &TargetColumns<IonAnnot>, at: RowIdx) -> BTreeMap<String, f64> {
+        geom.frag_labels(at)
+            .iter()
+            .map(|label| label.to_string())
+            .zip(geom.frag_mzs(at).iter().copied())
+            .collect()
+    }
+
+    /// Find the row carrying `id`, since row order is the one thing the two
+    /// routes are not expected to share (see [`build_arena`]).
+    fn row_named(geom: &TargetColumns<IonAnnot>, id: &str) -> RowIdx {
+        geom.rows()
+            .find(|row| geom.output_id(*row).to_string() == id)
+            .unwrap_or_else(|| panic!("no row named {id}"))
+    }
+
+    /// The premise the rest of this module rests on: one prediction through both
+    /// routes agrees on every value a scorer reads.
+    ///
+    /// Every such quantity rather than a sample of them, because the two routes
+    /// spell each one independently and any of them could drift. Two charge
+    /// states of one peptide, which msspeculator gives one `decoy_pair_id`, so
+    /// the group column is stored rather than derived and the comparison of it
+    /// means something.
+    ///
+    /// Fragment m/z is compared to 1e-5 rather than exactly: the writer prints
+    /// six decimal places, so the file route reads back a rounded value of what
+    /// the sink keeps whole.
+    #[test]
+    fn a_prediction_lands_on_the_same_values_through_this_sink_as_through_a_file() {
+        let peptide = Fixture::new("PEPTIDEK", "PEPTIDEK");
+        let rows = [
+            peptide.row(
+                2,
+                false,
+                Some(4),
+                vec![
+                    peak("y", 7, 1, 800.4, 1.0),
+                    peak("b", 3, 1, 324.1, 0.25),
+                    peak("y", 7, 2, 400.7, 0.5),
+                ],
+            ),
+            peptide.row(3, false, Some(4), peaks(4)),
+        ];
+
+        let predicted = build(&rows, DecoyPolicy::Never);
+        let sunk = &predicted.library.geom;
+        let from_file = via_file(&rows);
+        assert_eq!(sunk.n_rows(), from_file.n_rows());
+
+        for row in sunk.rows() {
+            let id = sunk.output_id(row).to_string();
+            let mirror = row_named(&from_file, &id);
+
+            assert_eq!(sunk.charge(row), from_file.charge(mirror), "charge of {id}");
+            assert_eq!(
+                sunk.decoy_group(row).to_string(),
+                from_file.decoy_group(mirror).to_string(),
+                "competition group of {id}",
+            );
+            assert_ne!(
+                sunk.decoy_group(row).to_string(),
+                id,
+                "a declared pair is a group of its own, so this comparison is not the id twice",
+            );
+            assert!(
+                (sunk.precursor_mz(row) - from_file.precursor_mz(mirror)).abs() < 1e-6,
+                "precursor m/z of {id}",
+            );
+            assert!(
+                (sunk.rt_seconds(row) - from_file.rt_seconds(mirror)).abs() < 1e-3,
+                "retention of {id}: {} against {}",
+                sunk.rt_seconds(row),
+                from_file.rt_seconds(mirror),
+            );
+            assert!(
+                (sunk.mobility(row) - from_file.mobility(mirror)).abs() < 1e-6,
+                "mobility of {id}",
+            );
+
+            let (sunk_frags, file_frags) = (fragments(sunk, row), fragments(&from_file, mirror));
+            assert_eq!(
+                sunk_frags.keys().collect::<Vec<_>>(),
+                file_frags.keys().collect::<Vec<_>>(),
+                "fragment labels of {id}",
+            );
+            for (label, mz) in &sunk_frags {
+                assert!(
+                    (mz - file_frags[label]).abs() < 1e-5,
+                    "m/z of {label} on {id}: {mz} against {}",
+                    file_frags[label],
+                );
+            }
+        }
+    }
+
+    /// A decoy is the one row the two routes do not agree on, and it loses
+    /// everything a scorer would match it by.
+    ///
+    /// msspeculator's writer claims `MS:1003195|unnatural peptidoform decoy
+    /// spectrum` for a decoy, which replaces the `MS:1003074|predicted spectrum`
+    /// its `Spectrum=all` set gives everything else. Only the latter is in the
+    /// closure of origin types that declare their peak m/z calculated, so the
+    /// reader stops treating a decoy's stated m/z as theoretical, finds neither a
+    /// composition nor a mass-error suffix to recover one from, and drops every
+    /// peak. The same thing happens to the committed
+    /// `msspeculator_built.mzspeclib.txt`, whose two decoys load with no
+    /// fragments at all.
+    ///
+    /// Asserted rather than left as a surprise so that the sink is not read as
+    /// matching the file route on a shipped decoy: on this it is the file route
+    /// that is wrong, and a fix there should fail this test.
+    #[test]
+    fn a_shipped_decoy_keeps_its_fragments_through_this_sink_and_loses_them_through_a_file() {
+        let target = Fixture::new("PEPTIDEK", "PEPTIDEK");
+        let decoy = Fixture::new("PDITPEEK", "PDITPEEK");
+        let rows = [
+            target.row(2, false, Some(4), peaks(3)),
+            decoy.row(2, true, Some(4), peaks(4)),
+        ];
+
+        let predicted = build(&rows, DecoyPolicy::Never);
+        let sunk = &predicted.library.geom;
+        let from_file = via_file(&rows);
+
+        let sunk_decoy = row_named(sunk, "PDITPEEK/2");
+        let file_decoy = row_named(&from_file, "PDITPEEK/2");
+        assert!(sunk.is_decoy(sunk_decoy) && from_file.is_decoy(file_decoy));
+
+        // Everything but the peaks still agrees, so the divergence is the origin
+        // type's effect on the peak list and nothing wider.
+        assert_eq!(
+            sunk.decoy_group(sunk_decoy).to_string(),
+            from_file.decoy_group(file_decoy).to_string(),
+        );
+        assert_eq!(sunk.charge(sunk_decoy), from_file.charge(file_decoy));
+
+        assert_eq!(fragments(sunk, sunk_decoy).len(), 4);
+        assert_eq!(
+            fragments(&from_file, file_decoy).len(),
+            0,
+            "the file route drops a decoy's peaks; see this test's doc comment",
+        );
+        // The target alongside it keeps its own, so this is the decoy's origin
+        // type and not the file.
+        assert_eq!(
+            fragments(&from_file, row_named(&from_file, "PEPTIDEK/2")).len(),
+            3,
+        );
+    }
+
+    /// The shape a panicked inference worker leaves behind: `finish` ran and
+    /// published, so the rows are there, but fewer of them than the stream
+    /// counted. Sealing that would put an FDR on a fraction of the proteome.
+    #[test]
+    fn a_stream_that_published_fewer_rows_than_it_counted_hands_over_no_library() {
+        let fixture = Fixture::new("PEPTIDEK", "PEPTIDEK");
+        let (handle, mut collector) = sink();
+        collector.record_test_provenance();
+        for charge in 2..=3 {
+            collector
+                .spectrum(&fixture.row(charge, false, None, peaks(3)))
+                .expect("row converts");
+        }
+        collector.finish().expect("stream finishes");
+
+        let Err(error) = handle.into_library(&stats(5), DecoyPolicy::Never) else {
+            panic!("a prefix of a library is not a library");
+        };
+        let error = format!("{error}");
+        for number in ["5", "2"] {
+            assert!(
+                error.contains(number),
+                "the error names both counts, got: {error}",
+            );
+        }
+    }
+
+    #[test]
+    fn a_prediction_that_produced_no_precursors_at_all_is_an_error_and_not_an_empty_library() {
+        let (handle, mut collector) = sink();
+        collector.record_test_provenance();
+        collector.finish().expect("stream finishes");
+
+        let Err(error) = handle.into_library(&stats(0), DecoyPolicy::Never) else {
+            panic!("a library with nothing in it searches to nothing and reports no reason");
+        };
+        assert!(
+            format!("{error}").contains("charge range"),
+            "the error says what to check, got: {error}",
+        );
+    }
+
+    #[test]
+    fn a_stream_that_published_rows_without_a_header_hands_over_no_library() {
+        let fixture = Fixture::new("PEPTIDEK", "PEPTIDEK");
+        let (handle, mut collector) = sink();
+        collector
+            .spectrum(&fixture.row(2, false, None, peaks(3)))
+            .expect("row converts");
+        collector.finish().expect("stream finishes");
+
+        let Err(error) = handle.into_library(&stats(1), DecoyPolicy::Never) else {
+            panic!("a library whose provenance is unknown is not one this can record");
+        };
+        assert!(
+            format!("{error}").contains("provenance"),
+            "unexpected error: {error}",
+        );
+    }
+
     #[test]
     fn a_peak_whose_series_is_not_an_mzpaf_letter_fails_the_row_rather_than_losing_the_peak() {
         let fixture = Fixture::new("PEPTIDEK", "PEPTIDEK");
-        let (_handle, mut collector) = sink();
+        let (handle, mut collector) = sink();
+        collector.record_test_provenance();
         let error = collector
             .spectrum(&fixture.row(2, false, None, vec![peak("Q", 3, 1, 300.0, 1.0)]))
             .expect_err("Q is not a series letter");
         assert!(
             format!("{error:#}").contains("PEPTIDEK/2"),
             "unexpected error: {error:#}",
+        );
+
+        // Nothing partial survived the rejected row: the peak it could not label
+        // took the whole row with it, so there is no library left to seal.
+        collector.finish().expect("stream finishes");
+        let Err(error) = handle.into_library(&stats(0), DecoyPolicy::Never) else {
+            panic!("a rejected row left a library behind");
+        };
+        assert!(
+            format!("{error}").contains("no precursors"),
+            "unexpected error: {error}",
         );
     }
 }

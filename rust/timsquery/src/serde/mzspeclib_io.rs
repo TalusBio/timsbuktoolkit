@@ -904,6 +904,17 @@ mod tests {
         );
         assert_eq!(geom.seq_strip(first), "VLSAAKPEDR");
         assert_eq!(geom.frag_labels(first).len(), 4);
+        // The only fixture declaring `MS:1000896` in `minute`, and so the only
+        // one that pins the minute path: the entry says 1.559414, and 60x that
+        // is what a reader has to come back with. Which mzannotate build is in
+        // the graph decides it -- the pinned one leaves a `minute`-declared
+        // value alone for the `* 60` here to scale, a release divides it by
+        // sixty first and hands back a sixtieth of the number.
+        assert!(
+            (geom.rt_seconds(first) - 93.564_84).abs() < 1e-3,
+            "declared 1.559414 minute, got {} s",
+            geom.rt_seconds(first),
+        );
     }
 
     /// A third-party library carries no `msspeculator:` attributes and no

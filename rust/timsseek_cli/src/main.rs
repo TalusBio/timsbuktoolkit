@@ -8,9 +8,6 @@ mod dashboard;
 mod errors;
 mod logging;
 mod output_sink;
-// No command reaches this module, so a binary build has no use for any of its
-// items; its own tests are what exercise them.
-#[allow(dead_code)]
 mod predicted_library;
 mod processing;
 mod run_inputs;
