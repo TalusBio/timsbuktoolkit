@@ -95,6 +95,29 @@ settings, exactly as it does for `build-library`, and the model and FASTA digest
 land in `config_used.json` so a run with no library file is still traceable.
 Naming both a library and a FASTA loads the library.
 
+To predict the library on the first run and read it on every run after, add
+`--build-if-missing`. It writes the library to the path `--speclib-uri` names
+and then searches it; a library that is already there is simply opened, so the
+same command is safe to leave in a script:
+
+```bash
+cargo run --release --bin timsseek -- \
+    --speclib-uri $SPECLIB_NAME \
+    --fasta $FASTA_FILE \
+    --output-uri $RESULTS_DIR \
+    --raw-inputs $DOTD_FILE \
+    --build-if-missing
+```
+
+With no `--speclib-uri`, the library is written to
+`$RESULTS_DIR/<FASTA stem>.mzspeclib.txt.gz`, with the same `.config.json`
+sidecar `build-library` writes, and an earlier run's library there is reported
+as a collision unless `--overwrite` is passed. Without the flag, a library that
+is not there is an error rather than a prediction: a mistyped path should not
+cost minutes of prediction. Libraries are written through the filesystem, so a
+remote `--speclib-uri` or output directory that would have to be built into is
+rejected by name.
+
 ## S3 inputs
 
 A search accepts `s3://` URIs anywhere a path is accepted (AWS / MinIO / R2). `.d` can be a directory, `.tar`, or S3 prefix; `.idx` sidecars short-circuit staging.

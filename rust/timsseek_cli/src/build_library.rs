@@ -8,7 +8,10 @@
 //! configuration file's `[library]` section, which beats msspeculator's own
 //! default, and "beats" means the flag was given at all.
 
-use std::path::PathBuf;
+use std::path::{
+    Path,
+    PathBuf,
+};
 
 use msspeculator_inference::{
     BuiltinModel,
@@ -166,6 +169,27 @@ pub fn resolve_search_prediction(
     resolve_prediction(fasta, &library.cloned().unwrap_or_default())
 }
 
+/// The build a `--build-if-missing` search performs before it opens the library
+/// it just wrote.
+///
+/// The sidecar is written here as it is for `build-library`: a library on disk
+/// and no record of the settings that produced it is a library nobody can
+/// reproduce, and the two routes writing the same pair of files means a library
+/// is the same artifact whichever command made it.
+pub(crate) fn resolve_search_build(
+    out: PathBuf,
+    fasta: PathBuf,
+    library: Option<&LibraryConfig>,
+    overwrite: bool,
+) -> ResolvedBuild {
+    ResolvedBuild {
+        prediction: resolve_search_prediction(fasta, library),
+        config_out: Some(default_sidecar(&out)),
+        out,
+        overwrite,
+    }
+}
+
 /// A build reads and writes the filesystem directly, so a remote URI is
 /// rejected by name rather than reaching `File::open` and surfacing as "No such
 /// file or directory".
@@ -215,11 +239,17 @@ fn sidecar_path(args: &BuildLibraryArgs) -> Option<PathBuf> {
     if args.no_config_out {
         return None;
     }
-    args.config_out.clone().or_else(|| {
-        let mut path = args.out.clone().into_os_string();
-        path.push(".config.json");
-        Some(PathBuf::from(path))
-    })
+    args.config_out
+        .clone()
+        .or_else(|| Some(default_sidecar(&args.out)))
+}
+
+/// The sidecar that belongs to a library, named after the file rather than a
+/// stem, because the suffix is what picks the format.
+fn default_sidecar(out: &Path) -> PathBuf {
+    let mut path = out.to_path_buf().into_os_string();
+    path.push(".config.json");
+    PathBuf::from(path)
 }
 
 /// The only place a [`StreamOptions`] is built.
@@ -591,6 +621,24 @@ decoys = true
         let built = resolve_build(&args(&[]), &config).prediction;
         let searched = resolve_search_prediction(PathBuf::from("p.fasta"), config.library.as_ref());
         assert_eq!(built, searched);
+    }
+
+    /// A library a search built and one `build-library` wrote are the same pair
+    /// of files, produced from the same settings.
+    #[test]
+    fn a_search_that_builds_a_library_writes_what_build_library_would() {
+        let built = resolve_build(&args(&[]), &BuildConfig::default());
+        let searched = resolve_search_build(
+            built.out.clone(),
+            built.prediction.fasta.clone(),
+            None,
+            false,
+        );
+        assert_eq!(searched.prediction, built.prediction);
+        assert_eq!(
+            searched.config_out, built.config_out,
+            "a library with no record of the settings that produced it is not reproducible"
+        );
     }
 
     /// What a predicted library carries is `[library] decoys` and nothing else.

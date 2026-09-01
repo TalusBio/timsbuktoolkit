@@ -40,6 +40,33 @@ use crate::{
     processing,
 };
 
+/// A library that is not there, and the two ways out of it: point at one that
+/// exists, or ask for it to be predicted.
+///
+/// Naming the flag here is what keeps a run from being a guessing game -- the
+/// alternative is a bare "does not exist" and a second failed run to find out
+/// there was a way to fix it.
+fn missing_library_error(uri: &str) -> errors::CliError {
+    errors::CliError::Io {
+        source: "Speclib file does not exist; pass --build-if-missing with --fasta to predict it \
+                 and write it there"
+            .to_string(),
+        path: Some(uri.to_string()),
+    }
+}
+
+/// The sequence database a run predicts from, probed here rather than left to
+/// msspeculator, which opens the FASTA after the model has loaded.
+fn validate_fasta(fasta: &std::path::Path) -> std::result::Result<(), errors::CliError> {
+    if !fasta.exists() {
+        return Err(errors::CliError::Io {
+            source: "Sequence database does not exist".to_string(),
+            path: Some(fasta.to_string_lossy().to_string()),
+        });
+    }
+    Ok(())
+}
+
 /// Probe the filesystem for everything the run is about to touch, so a missing
 /// input or a colliding artifact fails before the heavy analysis rather than
 /// after it. Every value it reads was resolved by [`resolve_run_inputs`].
@@ -58,23 +85,21 @@ fn validate_inputs(resolved: &ResolvedInputs) -> std::result::Result<(), errors:
         // Local only: remote resolution happens at open.
         LibrarySource::File(uri) => {
             if !is_remote_uri(uri) && !std::path::Path::new(uri).exists() {
-                return Err(errors::CliError::Io {
-                    source: "Speclib file does not exist".to_string(),
-                    path: Some(uri.clone()),
-                });
+                return Err(missing_library_error(uri));
             }
             info!("✓ Speclib URI: {}", uri);
         }
-        // Probed here rather than left to msspeculator, which opens the FASTA
-        // after the model has loaded.
         LibrarySource::Fasta(fasta) => {
-            if !fasta.exists() {
-                return Err(errors::CliError::Io {
-                    source: "Sequence database does not exist".to_string(),
-                    path: Some(fasta.to_string_lossy().to_string()),
-                });
-            }
+            validate_fasta(fasta)?;
             info!("✓ FASTA to predict a library from: {}", fasta.display());
+        }
+        LibrarySource::Build { out, fasta } => {
+            validate_fasta(fasta)?;
+            info!(
+                "✓ FASTA to build {} from: {}",
+                out.display(),
+                fasta.display()
+            );
         }
     }
 
@@ -134,7 +159,11 @@ fn validate_inputs(resolved: &ResolvedInputs) -> std::result::Result<(), errors:
     // Probe every artifact up-front so a collision fails before the heavy
     // analysis rather than after it.
     if !overwrite {
-        let collisions = artifacts::probe_collisions(output_uri, raw_inputs)?;
+        let built_library = match library {
+            LibrarySource::Build { out, .. } => Some(out.as_path()),
+            LibrarySource::File(_) | LibrarySource::Fasta(_) => None,
+        };
+        let collisions = artifacts::probe_collisions(output_uri, raw_inputs, built_library)?;
         if !collisions.is_empty() {
             let list = collisions
                 .iter()
@@ -418,6 +447,7 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
     let step = TimedStep::begin(match &validated.library {
         LibrarySource::File(_) => "Loading speclib",
         LibrarySource::Fasta(_) => "Predicting speclib",
+        LibrarySource::Build { .. } => "Building speclib",
     });
     let (speclib, _speclib_td, provenance) = match &validated.library {
         LibrarySource::File(uri) => {
@@ -431,6 +461,19 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
             let predicted =
                 build_library::predict_in_memory(&prediction, config.analysis.decoy_strategy)?;
             (predicted.library, None, Some(predicted.provenance))
+        }
+        // Written and then read back rather than kept in the arena, so the
+        // library the next run opens is the one this run searched.
+        LibrarySource::Build { out, fasta } => {
+            build_library::run(&build_library::resolve_search_build(
+                out.clone(),
+                fasta.clone(),
+                config.library.as_ref(),
+                validated.overwrite,
+            ))?;
+            let (lib, td) =
+                speclib_from_uri(&out.to_string_lossy(), config.analysis.decoy_strategy)?;
+            (lib, td, None)
         }
     };
     let load_speclib_ms = step
@@ -606,4 +649,31 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
     }
 
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The first run of a script that names a library it has not built yet, and
+    /// what it is told: the file is missing, and here is what would produce it.
+    #[test]
+    fn a_missing_library_names_the_flag_that_would_have_built_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("absent.mzspeclib.txt.gz");
+        let resolved = ResolvedInputs {
+            raw_inputs: Vec::new(),
+            library: LibrarySource::File(missing.to_string_lossy().to_string()),
+            calib_lib_uri: None,
+            output_uri: dir.path().to_string_lossy().to_string(),
+            overwrite: false,
+        };
+
+        let err = validate_inputs(&resolved)
+            .expect_err("a library that is not there stops the run")
+            .to_string();
+        assert!(err.contains("--build-if-missing"), "got: {err}");
+        assert!(err.contains("--fasta"), "got: {err}");
+        assert!(err.contains("absent.mzspeclib.txt.gz"), "got: {err}");
+    }
 }

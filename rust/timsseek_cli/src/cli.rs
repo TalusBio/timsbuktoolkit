@@ -215,6 +215,19 @@ pub struct SearchArgs {
     #[arg(long, value_name = "PATH")]
     pub fasta: Option<PathBuf>,
 
+    /// Predict the library named by `--speclib-uri` when it is not there yet,
+    /// write it, and search it. With no library named, it is written to
+    /// `<output>/<FASTA stem>.mzspeclib.txt.gz`. Requires `--fasta`.
+    ///
+    /// A library that is already there is opened and the flag does nothing, so
+    /// a script can carry it every run and pay for the prediction once.
+    ///
+    /// No configuration counterpart, for the reason `--overwrite` has none:
+    /// whether to spend minutes predicting a library is a decision about this
+    /// invocation rather than about how to search.
+    #[arg(long)]
+    pub build_if_missing: bool,
+
     /// Path to the output directory
     #[arg(long = "output-uri", short = 'o', alias = "output-dir")]
     pub output_uri: Option<String>,

@@ -11,6 +11,7 @@ use std::path::{
     PathBuf,
 };
 
+use crate::artifacts::built_library_path;
 use crate::cli::SearchArgs;
 use crate::config::{
     Config,
@@ -19,7 +20,10 @@ use crate::config::{
     SequencesConfig,
 };
 use crate::errors::CliError;
-use tims_stage::expand_local_uri;
+use tims_stage::{
+    expand_local_uri,
+    is_remote_uri,
+};
 
 /// A run's inputs after the merge, with `~` expanded so validation, staging and
 /// existence probes all see the same spelling.
@@ -47,25 +51,75 @@ pub enum LibrarySource {
     /// No library was named, so one is predicted from this sequence database and
     /// never written down.
     Fasta(PathBuf),
+    /// The library to search is not on disk yet, so `--build-if-missing`
+    /// predicts one from this sequence database, writes it to `out`, and opens
+    /// what it wrote. Local only: writing is done through the filesystem.
+    Build { out: PathBuf, fasta: PathBuf },
 }
 
-/// Which of the two supplies the library.
+/// Whether the library a run named is already there.
+///
+/// Injected so the routing table can be exercised without touching a filesystem
+/// or making a network round trip; the run itself passes
+/// [`probe_uri_exists`](crate::output_sink::probe_uri_exists), which is the same
+/// probe the collision check uses and answers for remote URIs too.
+type ExistsFn<'a> = &'a dyn Fn(&str) -> Result<bool, CliError>;
+
+/// Which of the three supplies the library.
 ///
 /// A named library is used whether or not a FASTA was also given. Naming a
 /// library is what asks for it, and the FASTA is an input in its own right --
 /// the sequences a run reports against are not a substitute for its library --
 /// so one arriving does not reinterpret the other.
+///
+/// `build_if_missing` is what turns a FASTA into a library on disk. Without it a
+/// library that is not there is an error, because inferring "predict it" from a
+/// missing file would turn a mistyped path into minutes of prediction; with it,
+/// the library named is the library written, and a run that finds one already
+/// there just opens it.
 fn library_source(
     input: Option<&InputConfig>,
     sequences: Option<&SequencesConfig>,
+    build_if_missing: bool,
+    output_uri: &str,
+    exists: ExistsFn<'_>,
 ) -> Result<LibrarySource, CliError> {
-    match (input, sequences) {
-        (Some(InputConfig::Speclib { uri, .. }), _) => {
-            Ok(LibrarySource::File(expand_local_uri(uri)))
+    let fasta = sequences.map(|SequencesConfig { fasta }| expand_local_path(fasta));
+    match (input, fasta) {
+        (Some(InputConfig::Speclib { uri, .. }), fasta) => {
+            let uri = expand_local_uri(uri);
+            // The probe is skipped without the flag: the library is opened
+            // either way, and `validate_inputs` is where a missing one is
+            // reported.
+            if !build_if_missing || exists(&uri)? {
+                return Ok(LibrarySource::File(uri));
+            }
+            let Some(fasta) = fasta else {
+                return Err(CliError::Config {
+                    source: format!(
+                        "{uri} does not exist, and --build-if-missing has nothing to predict it \
+                         from; name a sequence database with --fasta, in the config file or on \
+                         the command line"
+                    ),
+                });
+            };
+            reject_remote_build(&uri)?;
+            Ok(LibrarySource::Build {
+                out: PathBuf::from(uri),
+                fasta,
+            })
         }
-        (None, Some(SequencesConfig { fasta })) => {
-            Ok(LibrarySource::Fasta(expand_local_path(fasta)))
+        // A derived library is an output of the run rather than an input it was
+        // pointed at, so it is not probed here: the collision check reports one
+        // an earlier run left behind, alongside every other artifact in the way.
+        (None, Some(fasta)) if build_if_missing => {
+            reject_remote_build(output_uri)?;
+            Ok(LibrarySource::Build {
+                out: built_library_path(output_uri, &fasta),
+                fasta,
+            })
         }
+        (None, Some(fasta)) => Ok(LibrarySource::Fasta(fasta)),
         (None, None) => Err(CliError::Config {
             source: "No library and no sequences provided; either name a library with \
                      --speclib-uri or name a sequence database to predict one from with --fasta, \
@@ -73,6 +127,25 @@ fn library_source(
                 .to_string(),
         }),
     }
+}
+
+/// A library is written through the filesystem, so a remote destination is
+/// named rather than left to fail at open.
+///
+/// The same limitation `build-library` states for `--out`, reached the same way:
+/// a search stages the remote inputs it *reads*, and staging a write back is a
+/// separate piece of machinery.
+fn reject_remote_build(destination: &str) -> Result<(), CliError> {
+    if !is_remote_uri(destination) {
+        return Ok(());
+    }
+    Err(CliError::Config {
+        source: format!(
+            "{destination} is a remote URI, and --build-if-missing writes a library through the \
+             filesystem. Build it locally with `timsseek build-library`, upload it, and name it \
+             with --speclib-uri."
+        ),
+    })
 }
 
 /// `~` expanded on a path, so a FASTA is spelled the way every URI is.
@@ -86,9 +159,10 @@ fn expand_local_path(path: &Path) -> PathBuf {
 /// writes it to `config_used.json`.
 ///
 /// Every input has a configuration home, so `config_used.json` records the whole
-/// run. `--overwrite` is the exception and is read straight from argv: it is a
-/// decision about one invocation rather than about how to search, and it is
-/// recorded in `run_report.json` instead.
+/// run. `--overwrite` and `--build-if-missing` are the exceptions and are read
+/// straight from argv: each is a decision about one invocation rather than about
+/// how to search. `--overwrite` is recorded in `run_report.json` instead, and
+/// what `--build-if-missing` builds is recorded by the library it writes.
 pub fn resolve_run_inputs(
     args: &SearchArgs,
     mut config: Config,
@@ -156,12 +230,8 @@ fn read_inputs(args: &SearchArgs, config: &Config) -> Result<ResolvedInputs, Cli
         }
     };
 
-    let library = library_source(config.input.as_ref(), config.sequences.as_ref())?;
-    let calib_lib_uri = match &config.input {
-        Some(InputConfig::Speclib { calib_uri, .. }) => calib_uri.as_deref().map(expand_local_uri),
-        None => None,
-    };
-
+    // Ahead of the library, which is named after the output directory when
+    // `--build-if-missing` was given nowhere else to write it.
     let output_uri = match &config.output {
         Some(output) => expand_local_uri(&output.uri),
         None => {
@@ -169,6 +239,18 @@ fn read_inputs(args: &SearchArgs, config: &Config) -> Result<ResolvedInputs, Cli
                 source: "No output directory specified".to_string(),
             });
         }
+    };
+
+    let library = library_source(
+        config.input.as_ref(),
+        config.sequences.as_ref(),
+        args.build_if_missing,
+        &output_uri,
+        &crate::output_sink::probe_uri_exists,
+    )?;
+    let calib_lib_uri = match &config.input {
+        Some(InputConfig::Speclib { calib_uri, .. }) => calib_uri.as_deref().map(expand_local_uri),
+        None => None,
     };
 
     Ok(ResolvedInputs {
@@ -190,6 +272,52 @@ mod tests {
     /// The library a run resolved to, for the runs that name a file.
     fn file(uri: &str) -> LibrarySource {
         LibrarySource::File(uri.to_string())
+    }
+
+    /// One row of the routing table: what was named, whether the named library
+    /// is already there, and whether the flag that builds one was given.
+    ///
+    /// The output directory is a literal, because every row that reads it reads
+    /// it the same way.
+    fn route(
+        uri: Option<&str>,
+        fasta: Option<&str>,
+        build_if_missing: bool,
+        exists: bool,
+    ) -> Result<LibrarySource, CliError> {
+        route_into("out", uri, fasta, build_if_missing, exists)
+    }
+
+    /// A row of the table for a run whose output directory is worth naming.
+    fn route_into(
+        output_uri: &str,
+        uri: Option<&str>,
+        fasta: Option<&str>,
+        build_if_missing: bool,
+        exists: bool,
+    ) -> Result<LibrarySource, CliError> {
+        let input = uri.map(|uri| InputConfig::Speclib {
+            uri: uri.to_string(),
+            calib_uri: None,
+        });
+        let sequences = fasta.map(|fasta| SequencesConfig {
+            fasta: PathBuf::from(fasta),
+        });
+        library_source(
+            input.as_ref(),
+            sequences.as_ref(),
+            build_if_missing,
+            output_uri,
+            &move |_| Ok(exists),
+        )
+    }
+
+    /// The library a run builds, for the rows that predict one and write it.
+    fn build(out: &str, fasta: &str) -> LibrarySource {
+        LibrarySource::Build {
+            out: PathBuf::from(out),
+            fasta: PathBuf::from(fasta),
+        }
     }
 
     /// The search arguments a command line resolves to, whether they were
@@ -352,38 +480,148 @@ uri = "config_results"
         assert!(err.contains("--fasta"), "got: {err}");
     }
 
-    /// The whole routing table, on the function that decides it: a named library
-    /// is loaded, a lone FASTA is predicted from, and naming neither is an error
-    /// that says what to name.
+    /// A named library is what a run searches, whether or not a FASTA came with
+    /// it, and a lone FASTA is predicted from.
     #[test]
     fn a_named_library_wins_and_a_lone_fasta_is_predicted_from() {
-        let speclib = InputConfig::Speclib {
-            uri: "lib.mzspeclib.txt".to_string(),
-            calib_uri: None,
-        };
-        let sequences = SequencesConfig {
-            fasta: PathBuf::from("proteome.fasta"),
-        };
-
         assert_eq!(
-            library_source(Some(&speclib), None).expect("a library alone resolves"),
+            route(Some("lib.mzspeclib.txt"), None, false, true).expect("a library alone resolves"),
             file("lib.mzspeclib.txt")
         );
         assert_eq!(
-            library_source(Some(&speclib), Some(&sequences)).expect("both resolve"),
+            route(
+                Some("lib.mzspeclib.txt"),
+                Some("proteome.fasta"),
+                false,
+                true
+            )
+            .expect("both resolve"),
             file("lib.mzspeclib.txt"),
             "a named library is used, so the FASTA predicts nothing"
         );
         assert_eq!(
-            library_source(None, Some(&sequences)).expect("a FASTA alone resolves"),
-            LibrarySource::Fasta(PathBuf::from("proteome.fasta"))
+            route(None, Some("proteome.fasta"), false, false).expect("a FASTA alone resolves"),
+            LibrarySource::Fasta(PathBuf::from("proteome.fasta")),
+            "a lone FASTA is predicted into memory and never written down"
         );
+    }
 
-        let err = library_source(None, None)
-            .expect_err("a run with no library and no sequences has nothing to score against")
+    /// Naming neither is the one row no flag rescues, so the message has to name
+    /// both of the things that would.
+    #[test]
+    fn a_run_that_names_no_library_and_no_sequences_says_what_to_name() {
+        for build_if_missing in [false, true] {
+            let err = route(None, None, build_if_missing, false)
+                .expect_err("a run with no library and no sequences has nothing to score against")
+                .to_string();
+            assert!(err.contains("--speclib-uri"), "got: {err}");
+            assert!(err.contains("--fasta"), "got: {err}");
+        }
+    }
+
+    /// The point of the flag: a library that is already there is opened, so a
+    /// script can carry the flag every run and pay for the prediction once.
+    #[test]
+    fn the_build_flag_is_inert_when_the_library_is_already_there() {
+        for fasta in [None, Some("proteome.fasta")] {
+            let without = route(Some("lib.mzspeclib.txt.gz"), fasta, false, true)
+                .expect("an existing library resolves");
+            let with = route(Some("lib.mzspeclib.txt.gz"), fasta, true, true)
+                .expect("an existing library resolves with the flag too");
+            assert_eq!(with, without, "fasta: {fasta:?}");
+            assert_eq!(with, file("lib.mzspeclib.txt.gz"));
+        }
+    }
+
+    /// The row the flag exists for: the library named is the library written,
+    /// and the search reads back what it just predicted.
+    #[test]
+    fn a_missing_library_with_the_flag_is_built_where_it_was_named() {
+        assert_eq!(
+            route(
+                Some("lib.mzspeclib.txt.gz"),
+                Some("proteome.fasta"),
+                true,
+                false
+            )
+            .expect("a missing library with a FASTA and the flag is built"),
+            build("lib.mzspeclib.txt.gz", "proteome.fasta")
+        );
+    }
+
+    /// Without the flag a missing library stays a missing library, even with a
+    /// FASTA sitting right there: `validate_inputs` is what reports it, and a
+    /// mistyped path must not buy minutes of prediction.
+    #[test]
+    fn a_missing_library_without_the_flag_is_still_opened_rather_than_built() {
+        assert_eq!(
+            route(
+                Some("lib.mzspeclib.txt.gz"),
+                Some("proteome.fasta"),
+                false,
+                false
+            )
+            .expect("the missing file is reported at validation, not here"),
+            file("lib.mzspeclib.txt.gz")
+        );
+    }
+
+    /// The flag asks for a library to be built and names nothing to build it
+    /// from, so the error is about the sequence database rather than about the
+    /// file that is missing.
+    #[test]
+    fn a_missing_library_with_the_flag_and_no_fasta_names_the_flag_that_supplies_one() {
+        let err = route(Some("lib.mzspeclib.txt.gz"), None, true, false)
+            .expect_err("there is nothing to predict from")
             .to_string();
-        assert!(err.contains("--speclib-uri"), "got: {err}");
         assert!(err.contains("--fasta"), "got: {err}");
+        assert!(err.contains("lib.mzspeclib.txt.gz"), "got: {err}");
+    }
+
+    /// With nowhere named to write it, the library lands in the output
+    /// directory under the FASTA's own name -- which is what makes the second
+    /// run of the same command find one.
+    #[test]
+    fn a_fasta_and_the_flag_alone_write_the_library_into_the_output_directory() {
+        assert_eq!(
+            route_into("results", None, Some("/seq/proteome.fasta"), true, false)
+                .expect("a FASTA and the flag resolve"),
+            build(
+                &PathBuf::from("results")
+                    .join("proteome.mzspeclib.txt.gz")
+                    .to_string_lossy(),
+                "/seq/proteome.fasta"
+            )
+        );
+    }
+
+    /// A build writes through the filesystem, so a remote destination is named
+    /// up front rather than surfacing as a failure to open a bucket as a file.
+    /// Both destinations a build can be pointed at get the same treatment.
+    #[test]
+    fn a_library_that_would_have_to_be_built_remotely_is_rejected_by_name() {
+        let named = route(
+            Some("s3://bkt/lib.mzspeclib.txt.gz"),
+            Some("proteome.fasta"),
+            true,
+            false,
+        )
+        .expect_err("a remote library cannot be written")
+        .to_string();
+        assert!(named.contains("remote URI"), "got: {named}");
+        assert!(named.contains("build-library"), "got: {named}");
+
+        let derived = route_into("s3://bkt/out", None, Some("proteome.fasta"), true, false)
+            .expect_err("a remote output directory cannot hold a library a search built")
+            .to_string();
+        assert!(derived.contains("remote URI"), "got: {derived}");
+
+        assert_eq!(
+            route(Some("s3://bkt/lib.mzspeclib.txt.gz"), None, true, true)
+                .expect("a remote library that is already there is just opened"),
+            file("s3://bkt/lib.mzspeclib.txt.gz"),
+            "the flag stays inert against a library that exists, remote or not"
+        );
     }
 
     /// A search from a FASTA and nothing else, which is the invocation that
@@ -404,6 +642,32 @@ uri = "config_results"
         assert_eq!(
             resolved.library,
             LibrarySource::Fasta(PathBuf::from("proteome.fasta"))
+        );
+    }
+
+    /// The flag is read off argv rather than out of the merged configuration,
+    /// so the wiring from the command line to the routing is worth one run
+    /// through `resolve_run_inputs` -- with a library path that is not there,
+    /// which is the whole premise of the flag.
+    #[test]
+    fn the_build_flag_reaches_the_routing_from_the_command_line() {
+        let (_, resolved) = resolve_pair(
+            &[
+                "--speclib-uri",
+                "absent.mzspeclib.txt.gz",
+                "--fasta",
+                "proteome.fasta",
+                "--output-uri",
+                "out",
+                "--raw-inputs",
+                "a.d",
+                "--build-if-missing",
+            ],
+            config_with(""),
+        );
+        assert_eq!(
+            resolved.library,
+            build("absent.mzspeclib.txt.gz", "proteome.fasta")
         );
     }
 
