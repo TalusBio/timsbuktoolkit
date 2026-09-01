@@ -8,113 +8,128 @@
 use tims_stage::is_remote_uri;
 
 use crate::errors;
-
-/// Local-vs-remote output routing: a remote `dest_uri` (s3://, gs://, az://)
+/// Local-vs-remote output routing: a remote destination (s3://, gs://, az://)
 /// writes into a tempdir and uploads per-sample; a local one writes directly.
+///
+/// The tempdir is owned by the `Remote` variant so it outlives the uploads and
+/// so a local destination has no tempdir to accidentally consult.
+enum Destination {
+    Local(std::path::PathBuf),
+    Remote {
+        uri: String,
+        tempdir: tempfile::TempDir,
+    },
+}
+
 pub(crate) struct OutputSink {
-    dest_uri: String,
-    working_dir: std::path::PathBuf,
-    remote: bool,
-    _tempdir: Option<tempfile::TempDir>,
+    dest: Destination,
 }
 
 impl OutputSink {
     pub(crate) fn new(dest_uri: &str) -> Result<Self, errors::CliError> {
-        if is_remote_uri(dest_uri) {
-            let td = tempfile::Builder::new()
+        let dest = if is_remote_uri(dest_uri) {
+            let tempdir = tempfile::Builder::new()
                 .prefix("timsseek-output-")
                 .tempdir()
                 .map_err(|e| errors::CliError::Io {
                     source: format!("output tempdir: {e}"),
                     path: None,
                 })?;
-            let working_dir = td.path().to_path_buf();
-            Ok(Self {
-                dest_uri: dest_uri.to_string(),
-                working_dir,
-                remote: true,
-                _tempdir: Some(td),
-            })
+            Destination::Remote {
+                uri: dest_uri.to_string(),
+                tempdir,
+            }
         } else {
             std::fs::create_dir_all(dest_uri).map_err(|e| errors::CliError::Io {
                 source: format!("create output dir: {e}"),
                 path: Some(dest_uri.to_string()),
             })?;
-            Ok(Self {
-                dest_uri: dest_uri.to_string(),
-                working_dir: std::path::PathBuf::from(dest_uri),
-                remote: false,
-                _tempdir: None,
-            })
-        }
+            Destination::Local(std::path::PathBuf::from(dest_uri))
+        };
+        Ok(Self { dest })
     }
 
     fn sample_dir(&self, sample: &str) -> std::path::PathBuf {
-        self.working_dir.join(sample)
+        self.root().join(sample)
     }
 
+    /// Where the run writes: the destination itself when it is local, the
+    /// staging tempdir when it is remote.
     pub(crate) fn root(&self) -> &std::path::Path {
-        &self.working_dir
+        match &self.dest {
+            Destination::Local(dir) => dir,
+            Destination::Remote { tempdir, .. } => tempdir.path(),
+        }
     }
 
-    /// Where a sample's files *end up*, not the working tempdir. Use for
+    /// Where the run's artifacts *end up*, not the working tempdir. Use for
     /// user-facing output so users don't see a tempdir that will be wiped.
-    pub(crate) fn dest_uri_for_sample(&self, sample: &str) -> String {
-        if self.remote {
-            format!("{}/{}", self.dest_uri.trim_end_matches('/'), sample)
-        } else {
-            self.sample_dir(sample).to_string_lossy().into_owned()
+    pub(crate) fn dest_root(&self) -> String {
+        match &self.dest {
+            Destination::Local(dir) => dir.to_string_lossy().into_owned(),
+            Destination::Remote { uri, .. } => uri.trim_end_matches('/').to_string(),
         }
+    }
+
+    /// The only place a relative artifact path is joined onto the destination,
+    /// so local and remote spellings cannot drift apart.
+    pub(crate) fn dest_uri_for(&self, rel: &str) -> String {
+        join_output_uri(&self.dest_root(), rel)
     }
 
     /// Upload and remove a per-sample subdir after the sample has finished
-    /// writing; no-op for local destinations.
+    /// writing; no-op for local destinations, which wrote in place.
     pub(crate) fn finalize_sample(&self, sample: &str) -> Result<(), errors::CliError> {
-        if !self.remote {
-            return Ok(());
+        match &self.dest {
+            Destination::Local(_) => Ok(()),
+            Destination::Remote { .. } => {
+                let local = self.sample_dir(sample);
+                for entry in std::fs::read_dir(&local).map_err(|e| errors::CliError::Io {
+                    source: format!("read sample dir: {e}"),
+                    path: Some(local.to_string_lossy().to_string()),
+                })? {
+                    let entry = entry.map_err(|e| errors::CliError::Io {
+                        source: format!("read dir entry: {e}"),
+                        path: None,
+                    })?;
+                    let bn = entry.file_name().to_string_lossy().to_string();
+                    let dest = self.dest_uri_for(&format!("{sample}/{bn}"));
+                    tims_stage::upload_file(&entry.path(), &dest).map_err(|e| {
+                        errors::CliError::Io {
+                            source: format!("upload {dest}: {e}"),
+                            path: None,
+                        }
+                    })?;
+                }
+                std::fs::remove_dir_all(&local).map_err(|e| errors::CliError::Io {
+                    source: format!("cleanup sample dir: {e}"),
+                    path: Some(local.to_string_lossy().to_string()),
+                })?;
+                Ok(())
+            }
         }
-        let local = self.sample_dir(sample);
-        let sample_dest = self.dest_uri_for_sample(sample);
-        for entry in std::fs::read_dir(&local).map_err(|e| errors::CliError::Io {
-            source: format!("read sample dir: {e}"),
-            path: Some(local.to_string_lossy().to_string()),
-        })? {
-            let entry = entry.map_err(|e| errors::CliError::Io {
-                source: format!("read dir entry: {e}"),
-                path: None,
-            })?;
-            let bn = entry.file_name().to_string_lossy().to_string();
-            let dest = format!("{sample_dest}/{bn}");
-            tims_stage::upload_file(&entry.path(), &dest).map_err(|e| errors::CliError::Io {
-                source: format!("upload {dest}: {e}"),
-                path: None,
-            })?;
-        }
-        std::fs::remove_dir_all(&local).map_err(|e| errors::CliError::Io {
-            source: format!("cleanup sample dir: {e}"),
-            path: Some(local.to_string_lossy().to_string()),
-        })?;
-        Ok(())
     }
 
     /// Upload named top-level files (run_report.json, config_used.json)
     /// that exist in the working dir; no-op for local destinations.
     pub(crate) fn finalize_run(&self, files: &[&str]) -> Result<(), errors::CliError> {
-        if !self.remote {
-            return Ok(());
-        }
-        for bn in files {
-            let local = self.working_dir.join(bn);
-            if !local.exists() {
-                continue;
+        match &self.dest {
+            Destination::Local(_) => Ok(()),
+            Destination::Remote { .. } => {
+                for bn in files {
+                    let local = self.root().join(bn);
+                    if !local.exists() {
+                        continue;
+                    }
+                    let dest = self.dest_uri_for(bn);
+                    tims_stage::upload_file(&local, &dest).map_err(|e| errors::CliError::Io {
+                        source: format!("upload {dest}: {e}"),
+                        path: None,
+                    })?;
+                }
+                Ok(())
             }
-            let dest = format!("{}/{}", self.dest_uri.trim_end_matches('/'), bn);
-            tims_stage::upload_file(&local, &dest).map_err(|e| errors::CliError::Io {
-                source: format!("upload {dest}: {e}"),
-                path: None,
-            })?;
         }
-        Ok(())
     }
 }
 
@@ -187,6 +202,36 @@ mod sample_name_tests {
         assert_eq!(
             sample_name_from_uri("s3://bkt/run.d.idx/").as_deref(),
             Some("run")
+        );
+    }
+}
+
+#[cfg(test)]
+mod destination_tests {
+    use super::OutputSink;
+
+    #[test]
+    fn a_local_sink_writes_where_it_says_it_writes() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = OutputSink::new(dir.path().to_str().unwrap()).unwrap();
+
+        assert_eq!(sink.dest_root(), sink.root().to_string_lossy());
+        assert_eq!(
+            sink.dest_uri_for("run"),
+            sink.root().join("run").to_string_lossy()
+        );
+    }
+
+    #[test]
+    fn a_remote_sink_reports_the_remote_uri_rather_than_its_tempdir() {
+        let sink = OutputSink::new("s3://bkt/out/").unwrap();
+
+        assert_eq!(sink.dest_root(), "s3://bkt/out");
+        assert_eq!(sink.dest_uri_for("run"), "s3://bkt/out/run");
+        assert!(
+            sink.root().is_dir() && !sink.root().starts_with("s3:"),
+            "a remote run stages locally first: {:?}",
+            sink.root()
         );
     }
 }

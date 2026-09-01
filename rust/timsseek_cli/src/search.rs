@@ -496,7 +496,7 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
         // between them, so batched runs still show per-input wall time.
         println!("=== [{}/{}] {} ===", idx + 1, total_files, sample_name);
         let file_start = std::time::Instant::now();
-        let sample_dest = sink.dest_uri_for_sample(&sample_name);
+        let sample_dest = sink.dest_uri_for(&sample_name);
 
         match process_single_file(
             raw_uri,
@@ -581,10 +581,7 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
     let finalize_step = TimedStep::begin("Finalize run");
     // Must happen before serialization so the report self-describes where to
     // fetch everything.
-    let dest_root = sink
-        .dest_uri_for_sample("")
-        .trim_end_matches('/')
-        .to_string();
+    let dest_root = sink.dest_root();
     run_report.artifacts = vec![
         format!("{dest_root}/run_report.json"),
         format!("{dest_root}/config_used.json"),
