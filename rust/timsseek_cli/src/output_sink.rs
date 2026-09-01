@@ -27,9 +27,9 @@ pub(crate) struct OutputSink {
 
 impl OutputSink {
     pub(crate) fn new(dest_uri: &str) -> Result<Self, errors::CliError> {
-        // Normalised on the way in so every reader sees one spelling of the
-        // destination; a trailing separator kept here reaches the run report as
-        // `out//run_report.json`.
+        // Normalised once, so `dest_root()` never carries a trailing separator:
+        // the run report formats it into artifact paths verbatim, which would
+        // otherwise read `out//run_report.json`.
         let dest_uri = trim_trailing_separator(dest_uri);
         let dest = if is_remote_uri(dest_uri) {
             let tempdir = tempfile::Builder::new()
@@ -158,8 +158,9 @@ impl OutputSink {
     }
 }
 
-/// Strip a trailing separator so a destination has one spelling. A bare root
-/// (`/`, `s3://`) is left alone: the separators are the whole path.
+/// Strip a trailing `/` so a destination has one spelling. A value that is
+/// nothing but a root (`/`) or a bare scheme (`s3://`) is left alone: trimming
+/// it would leave no destination at all.
 fn trim_trailing_separator(uri: &str) -> &str {
     let trimmed = uri.trim_end_matches('/');
     if trimmed.is_empty() || trimmed.ends_with(':') {

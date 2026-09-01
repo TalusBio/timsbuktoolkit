@@ -132,7 +132,7 @@ fn validate_inputs(resolved: &ResolvedInputs) -> std::result::Result<(), errors:
             };
             return Err(errors::CliError::Config {
                 source: format!(
-                    "{} output artifact(s) already exist; pass --overwrite/-O to replace them:\n{list}{more}",
+                    "{} output artifact(s) already exist; pass --overwrite/-O to replace or remove them:\n{list}{more}",
                     collisions.len()
                 ),
             });
@@ -535,10 +535,9 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
     let finalize_step = TimedStep::begin("Finalize run");
     // Must happen before serialization so the report self-describes where to
     // fetch everything.
-    let dest_root = sink.dest_root();
     run_report.artifacts = artifacts::RUN_ARTIFACTS
         .iter()
-        .map(|artifact| format!("{dest_root}/{artifact}"))
+        .map(|artifact| sink.dest_uri_for(artifact))
         .collect();
     let run_report_path = sink.root().join(artifacts::RUN_REPORT);
     if let Ok(json) = serde_json::to_string_pretty(&run_report) {
