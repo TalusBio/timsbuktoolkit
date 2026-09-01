@@ -25,6 +25,7 @@ use anyhow::{
 use msspeculator_inference::{
     LibraryProvenance,
     LibrarySink,
+    LibraryStats,
     Peak,
     SpectrumRow,
 };
@@ -66,10 +67,8 @@ const SECONDS_PER_MINUTE: f32 = 60.0;
 pub(crate) struct PredictedLibrary {
     pub library: ReferenceLibrary,
     /// msspeculator's provenance, as the JSON its own sidecar carries, for a
-    /// caller recording what a run used. `None` when the stream never reached
-    /// its header, which is also the only way to hold this type without one:
-    /// `LibraryProvenance` cannot be constructed outside msspeculator.
-    pub provenance: Option<serde_json::Value>,
+    /// caller recording what a run used.
+    pub provenance: serde_json::Value,
 }
 
 /// The caller's half of [`sink`]: what the prediction produced, once it has.
@@ -88,10 +87,13 @@ pub(crate) struct PredictedLibrarySink {
 
 /// What crosses from the writer thread back to the caller.
 ///
-/// `rows` is `Some` only once `finish` ran, which msspeculator calls on the
-/// success path alone. A stream that failed therefore leaves nothing here and
-/// [`PredictedLibraryHandle::into_library`] refuses, rather than handing back the
-/// prefix of a library that arrived before the error.
+/// `rows` is `Some` only once `finish` ran, which is not the same as the stream
+/// having succeeded: msspeculator's `run_library` joins its inference workers
+/// before its writer, so a worker that panics drops the result channel, the
+/// writer's loop over it ends cleanly, and `finish` publishes whatever arrived
+/// before the panic. `stream_library` still returns the error, which is why
+/// [`PredictedLibraryHandle::into_library`] takes the [`LibraryStats`] only a
+/// successful stream produces and checks its count against what arrived.
 #[derive(Default)]
 struct Handoff {
     provenance: Option<serde_json::Value>,
@@ -115,10 +117,25 @@ pub(crate) fn sink() -> (PredictedLibraryHandle, PredictedLibrarySink) {
 impl PredictedLibraryHandle {
     /// Seal what the prediction handed over into a scorable library.
     ///
+    /// `stats` is the witness that the stream succeeded: it is what
+    /// `stream_library` returns, and it returns nothing on the error path. Taking
+    /// it by reference is what stops the sequence a `finish`-ran flag cannot
+    /// catch -- log the error from `stream_library`, then seal the rows that
+    /// arrived before it -- because there is no `LibraryStats` to pass.
+    ///
+    /// `stats.precursors` is then checked against the rows that arrived.
+    /// msspeculator increments it once per `spectrum` call, immediately before
+    /// making it, so the two are the same count of the same thing: what the sink
+    /// was handed, ahead of the decoy policy dropping any of it.
+    ///
     /// The decoy policy arrives here rather than at [`sink`] because it decides
     /// which rows reach the arena, and no row reaches it until every row has
     /// arrived.
-    pub(crate) fn into_library(self, decoys: DecoyPolicy) -> Result<PredictedLibrary, CliError> {
+    pub(crate) fn into_library(
+        self,
+        stats: &LibraryStats,
+        decoys: DecoyPolicy,
+    ) -> Result<PredictedLibrary, CliError> {
         let handoff = std::mem::take(&mut *self.shared.lock().expect("handoff mutex poisoned"));
         let Some(rows) = handoff.rows else {
             return Err(CliError::LibraryBuild {
@@ -126,19 +143,51 @@ impl PredictedLibraryHandle {
                     .to_string(),
             });
         };
+        if rows.len() != stats.precursors {
+            return Err(CliError::LibraryBuild {
+                source: format!(
+                    "the prediction reported {} precursors but the sink received {}, so what it \
+                     handed over is a prefix of the library that was asked for",
+                    stats.precursors,
+                    rows.len(),
+                ),
+            });
+        }
+        let Some(provenance) = handoff.provenance else {
+            return Err(CliError::LibraryBuild {
+                source: "the prediction stream handed over rows without a header, so its \
+                         provenance is unknown"
+                    .to_string(),
+            });
+        };
         let arena = build_arena(rows, decoys).map_err(|e| CliError::LibraryBuild {
             source: format!("assembling the predicted library: {e:?}"),
         })?;
-        // The one finalize every library goes through, file-loaded or predicted:
-        // decoy reporting, the whole-library parse gate, the entry tally.
         let library =
             ReferenceLibrary::from_sealed_arena(arena).map_err(|e| CliError::LibraryBuild {
                 source: format!("finalizing the predicted library: {e:?}"),
             })?;
         Ok(PredictedLibrary {
             library,
-            provenance: handoff.provenance,
+            provenance,
         })
+    }
+}
+
+impl PredictedLibrarySink {
+    fn record_provenance(&mut self, provenance: serde_json::Value) {
+        self.shared
+            .lock()
+            .expect("handoff mutex poisoned")
+            .provenance = Some(provenance);
+    }
+
+    /// Stand in for [`LibrarySink::header`], which no test can call:
+    /// `LibraryProvenance` is `#[non_exhaustive]` and has no constructor, so only
+    /// msspeculator can build one.
+    #[cfg(test)]
+    fn record_test_provenance(&mut self) {
+        self.record_provenance(serde_json::json!({ "generator": { "tool": "test" } }));
     }
 }
 
@@ -146,10 +195,7 @@ impl LibrarySink for PredictedLibrarySink {
     fn header(&mut self, provenance: &LibraryProvenance) -> Result<()> {
         // Kept as the JSON `to_json` builds, unflattened: this is a record of
         // what produced the library, and nothing here reads it.
-        self.shared
-            .lock()
-            .expect("handoff mutex poisoned")
-            .provenance = Some(provenance.to_json());
+        self.record_provenance(provenance.to_json());
         Ok(())
     }
 
@@ -166,18 +212,18 @@ impl LibrarySink for PredictedLibrarySink {
 }
 
 /// One prediction, owned and already spelled the way the arena stores it.
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug)]
 struct PredictedRow {
     /// `{proforma}/{charge}`, which is the name the mzSpecLib writer gives the
     /// same precursor under `MS:1003061|library spectrum name`, so a row keeps
-    /// one name across both routes.
+    /// one name across both routes. Pushed as the arena's `seq_mod` too, which
+    /// wants the same string: a proforma peptidoform ion with its charge.
     id: String,
     /// The source peptide's pair id, `None` when decoys are off. All modified
     /// forms and all charges of one peptide share it, so a group is a peptide
     /// rather than a target/decoy couple.
     group: Option<String>,
     seq_strip: String,
-    seq_mod: String,
     precursor_mz: f64,
     charge: u8,
     rt_seconds: f32,
@@ -214,7 +260,6 @@ impl PredictedRow {
             // `Display` reads a decoy's residues with its interior reversed, so
             // this is the decoy's own sequence rather than its target's.
             seq_strip: row.stripped.to_string(),
-            seq_mod: id.clone(),
             id,
             group: row.decoy_pair_id.map(|pair| pair.to_string()),
             precursor_mz: row.precursor_mz,
@@ -275,6 +320,17 @@ fn build_arena(
     mut rows: Vec<PredictedRow>,
     decoys: DecoyPolicy,
 ) -> Result<TargetTable, TargetReadingError> {
+    // A zero-row arena seals: ids and groups are both vacuously consistent, the
+    // parse gate has nothing to reject, and the result searches to zero results
+    // without ever reporting why. msspeculator only refuses an empty digest, so
+    // a FASTA whose peptides all fall outside the windows gets this far.
+    if rows.is_empty() {
+        return Err(TargetReadingError::SpeclibParse(
+            "the prediction produced no precursors; check the charge range and the length range \
+             against the peptides the FASTA actually digests to"
+                .to_string(),
+        ));
+    }
     rows.sort_unstable_by(|a, b| a.id.cmp(&b.id));
 
     let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
@@ -301,7 +357,7 @@ fn build_arena(
             mobility: row.mobility,
             frags: &row.frags,
             seq_strip: &row.seq_strip,
-            seq_mod: &row.seq_mod,
+            seq_mod: &row.id,
             is_decoy: row.is_decoy,
             id: Some(row.id.clone().into()),
             decoy_group: Some(group.into()),
@@ -310,6 +366,17 @@ fn build_arena(
             // sequence carries the same information.
             ..Default::default()
         });
+    }
+
+    // The same empty arena the guard above refuses, reached the other way round:
+    // every row that arrived was a shipped decoy and the policy dropped all of
+    // them, leaving nothing to derive decoys against.
+    if geom.n_rows() == 0 {
+        return Err(TargetReadingError::SpeclibParse(format!(
+            "all {} predicted rows were shipped decoys, which {decoys:?} drops, so the library \
+             holds no targets",
+            rows.len(),
+        )));
     }
 
     let geom = geom.seal(decoys)?;
@@ -416,15 +483,27 @@ mod tests {
             .collect()
     }
 
-    /// Drive the sink the way `stream_library` does, minus the header it cannot
-    /// be handed here.
+    /// The stats a stream that handed over `precursors` rows would return, which
+    /// is the only field [`PredictedLibraryHandle::into_library`] reads.
+    fn stats(precursors: usize) -> LibraryStats {
+        LibraryStats {
+            precursors,
+            ..LibraryStats::default()
+        }
+    }
+
+    /// Drive the sink the way `stream_library` does, minus the header, whose
+    /// `LibraryProvenance` cannot be built here.
     fn build(rows: Vec<SpectrumRow<'_>>, decoys: DecoyPolicy) -> PredictedLibrary {
         let (handle, mut collector) = sink();
+        collector.record_test_provenance();
         for row in &rows {
             collector.spectrum(row).expect("row converts");
         }
         collector.finish().expect("stream finishes");
-        handle.into_library(decoys).expect("library seals")
+        handle
+            .into_library(&stats(rows.len()), decoys)
+            .expect("library seals")
     }
 
     /// Everything a scorer can observe about a library, so two of them can be
@@ -648,7 +727,7 @@ mod tests {
             .spectrum(&fixture.row(2, false, None, peaks(3)))
             .expect("row converts");
 
-        let Err(error) = handle.into_library(DecoyPolicy::Never) else {
+        let Err(error) = handle.into_library(&stats(1), DecoyPolicy::Never) else {
             panic!("a library that was never finished is not a library");
         };
         assert!(
