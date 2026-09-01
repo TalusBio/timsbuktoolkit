@@ -8,9 +8,7 @@
 use tims_stage::is_remote_uri;
 
 use crate::errors;
-/// Local-vs-remote output routing: a remote destination (s3://, gs://, az://)
-/// writes into a tempdir and uploads per-sample; a local one writes directly.
-///
+
 /// The tempdir is owned by the `Remote` variant so it outlives the uploads and
 /// so a local destination has no tempdir to accidentally consult.
 enum Destination {
@@ -21,12 +19,18 @@ enum Destination {
     },
 }
 
+/// Local-vs-remote output routing: a remote destination (s3://, gs://, az://)
+/// writes into a tempdir and uploads per-sample; a local one writes directly.
 pub(crate) struct OutputSink {
     dest: Destination,
 }
 
 impl OutputSink {
     pub(crate) fn new(dest_uri: &str) -> Result<Self, errors::CliError> {
+        // Normalised on the way in so every reader sees one spelling of the
+        // destination; a trailing separator kept here reaches the run report as
+        // `out//run_report.json`.
+        let dest_uri = trim_trailing_separator(dest_uri);
         let dest = if is_remote_uri(dest_uri) {
             let tempdir = tempfile::Builder::new()
                 .prefix("timsseek-output-")
@@ -67,7 +71,7 @@ impl OutputSink {
     pub(crate) fn dest_root(&self) -> String {
         match &self.dest {
             Destination::Local(dir) => dir.to_string_lossy().into_owned(),
-            Destination::Remote { uri, .. } => uri.trim_end_matches('/').to_string(),
+            Destination::Remote { uri, .. } => uri.clone(),
         }
     }
 
@@ -79,9 +83,13 @@ impl OutputSink {
 
     /// Remove whatever an earlier run left in a sample's directory, so fresh
     /// results are never mixed with older ones.
+    ///
+    /// Effectively a no-op for remote destinations: it clears the staging
+    /// tempdir, which is empty. A remote artifact this run rewrites is
+    /// overwritten on upload, but a stale one it does not rewrite survives.
     pub(crate) fn clear_existing(&self, sample: &str) -> Result<(), errors::CliError> {
         let dir = self.sample_dir(sample);
-        for artifact in crate::artifacts::per_sample_artifacts(true) {
+        for artifact in crate::artifacts::PER_SAMPLE_ARTIFACTS {
             let path = dir.join(artifact);
             if !path.exists() {
                 continue;
@@ -127,8 +135,8 @@ impl OutputSink {
         }
     }
 
-    /// Upload named top-level files (run_report.json, config_used.json)
-    /// that exist in the working dir; no-op for local destinations.
+    /// Upload the named run-level artifacts that exist in the working dir;
+    /// no-op for local destinations.
     pub(crate) fn finalize_run(&self, files: &[&str]) -> Result<(), errors::CliError> {
         match &self.dest {
             Destination::Local(_) => Ok(()),
@@ -147,6 +155,17 @@ impl OutputSink {
                 Ok(())
             }
         }
+    }
+}
+
+/// Strip a trailing separator so a destination has one spelling. A bare root
+/// (`/`, `s3://`) is left alone: the separators are the whole path.
+fn trim_trailing_separator(uri: &str) -> &str {
+    let trimmed = uri.trim_end_matches('/');
+    if trimmed.is_empty() || trimmed.ends_with(':') {
+        uri
+    } else {
+        trimmed
     }
 }
 
@@ -232,11 +251,26 @@ mod destination_tests {
         let dir = tempfile::tempdir().unwrap();
         let sink = OutputSink::new(dir.path().to_str().unwrap()).unwrap();
 
-        assert_eq!(sink.dest_root(), sink.root().to_string_lossy());
+        assert_eq!(sink.dest_root(), dir.path().to_string_lossy());
         assert_eq!(
             sink.dest_uri_for("run"),
-            sink.root().join("run").to_string_lossy()
+            dir.path().join("run").to_string_lossy()
         );
+    }
+
+    #[test]
+    fn a_local_destination_spelled_with_a_trailing_separator_reports_one_root() {
+        let dir = tempfile::tempdir().unwrap();
+        let with_separator = format!("{}/", dir.path().to_string_lossy());
+        let sink = OutputSink::new(&with_separator).unwrap();
+
+        assert_eq!(
+            sink.dest_root(),
+            dir.path().to_string_lossy(),
+            "the run report quotes `dest_root()` verbatim, so it cannot carry a separator"
+        );
+        let uri = sink.dest_uri_for("run");
+        assert!(!uri.contains("//"), "doubled separator in {uri}");
     }
 
     #[test]

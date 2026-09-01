@@ -22,29 +22,26 @@ pub(crate) const CONFIG_USED: &str = "config_used.json";
 pub(crate) const RUN_ARTIFACTS: &[&str] = &[RUN_REPORT, CONFIG_USED];
 
 /// Written into a per-sample subdirectory of the output destination. The two
-/// feature sidecars appear only when the run is rescoring with feature stats
-/// enabled.
+/// feature sidecars appear only when feature stats are enabled.
 ///
-/// The overwrite cleanup asks for them unconditionally, whatever the current
-/// run does: a sidecar from an earlier run describes that run's model, and one
-/// left sitting next to fresh results reads as though it described those.
-pub(crate) fn per_sample_artifacts(feature_stats: bool) -> Vec<&'static str> {
-    let mut artifacts = vec![RESULTS_PARQUET, PERFORMANCE_REPORT];
-    if feature_stats {
-        artifacts.push(FEATURE_STATS_TSV);
-        artifacts.push(FEATURE_IMPORTANCE_TSV);
-    }
-    artifacts
-}
+/// The collision probe and the overwrite cleanup both read the whole list,
+/// whatever the current run is configured to write: a sidecar from an earlier
+/// run describes that run's model, and one left sitting next to fresh results
+/// reads as though it described those.
+pub(crate) const PER_SAMPLE_ARTIFACTS: &[&str] = &[
+    RESULTS_PARQUET,
+    PERFORMANCE_REPORT,
+    FEATURE_STATS_TSV,
+    FEATURE_IMPORTANCE_TSV,
+];
 
-/// Probe every artifact the run is about to write, returning the URIs of the
-/// ones already there. Raw inputs rather than sample names, because the sample
-/// name is derived from the URI and a URI with no derivable name is an error
-/// worth reporting here.
+/// Probe every artifact a run can write, returning the URIs of the ones already
+/// there. Raw inputs rather than sample names, because the sample name is
+/// derived from the URI and a URI with no derivable name is an error worth
+/// reporting here.
 pub(crate) fn probe_collisions(
     output_uri: &str,
     raw_inputs: &[String],
-    feature_stats: bool,
 ) -> Result<Vec<String>, CliError> {
     let mut collisions: Vec<String> = Vec::new();
     for raw_uri in raw_inputs {
@@ -52,7 +49,7 @@ pub(crate) fn probe_collisions(
             source: "Unable to extract file stem".to_string(),
             path: Some(raw_uri.clone()),
         })?;
-        for artifact in per_sample_artifacts(feature_stats) {
+        for artifact in PER_SAMPLE_ARTIFACTS {
             let uri = join_output_uri(output_uri, &format!("{sample}/{artifact}"));
             if probe_uri_exists(&uri)? {
                 collisions.push(uri);
@@ -72,8 +69,9 @@ pub(crate) fn probe_collisions(
 mod tests {
     use super::*;
 
-    /// The sidecars are as much a result as the parquet is, so a rerun that
-    /// would write them has to see the ones already on disk.
+    /// The sidecars are as much a result as the parquet is, and a run that
+    /// writes no sidecar of its own leaves the earlier one describing results
+    /// it never produced, so the probe has to report it either way.
     #[test]
     fn the_probe_reports_a_feature_stats_sidecar_from_an_earlier_run() {
         let dir = tempfile::tempdir().unwrap();
@@ -84,7 +82,7 @@ mod tests {
         let raw_inputs = vec!["/data/run.d".to_string()];
         let output_uri = dir.path().to_string_lossy().to_string();
 
-        let collisions = probe_collisions(&output_uri, &raw_inputs, true).unwrap();
+        let collisions = probe_collisions(&output_uri, &raw_inputs).unwrap();
         assert_eq!(
             collisions,
             vec![
@@ -93,13 +91,6 @@ mod tests {
                     .to_string_lossy()
                     .to_string()
             ]
-        );
-
-        assert!(
-            probe_collisions(&output_uri, &raw_inputs, false)
-                .unwrap()
-                .is_empty(),
-            "a run that writes no sidecar cannot collide with one"
         );
     }
 }

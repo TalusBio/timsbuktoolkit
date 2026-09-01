@@ -41,13 +41,7 @@ use crate::{
 /// Probe the filesystem for everything the run is about to touch, so a missing
 /// input or a colliding artifact fails before the heavy analysis rather than
 /// after it. Every value it reads was resolved by [`resolve_run_inputs`].
-///
-/// `feature_stats` decides whether the feature sidecars are among the artifacts
-/// this run would write, and so whether an existing one is a collision.
-fn validate_inputs(
-    resolved: &ResolvedInputs,
-    feature_stats: bool,
-) -> std::result::Result<(), errors::CliError> {
+fn validate_inputs(resolved: &ResolvedInputs) -> std::result::Result<(), errors::CliError> {
     info!("Validating inputs and outputs before processing...");
 
     let ResolvedInputs {
@@ -123,7 +117,7 @@ fn validate_inputs(
     // Probe every artifact up-front so a collision fails before the heavy
     // analysis rather than after it.
     if !overwrite {
-        let collisions = artifacts::probe_collisions(output_uri, raw_inputs, feature_stats)?;
+        let collisions = artifacts::probe_collisions(output_uri, raw_inputs)?;
         if !collisions.is_empty() {
             let list = collisions
                 .iter()
@@ -337,14 +331,14 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
     let config = load_config(args.config.as_deref())?;
     let (config, validated) = resolve_run_inputs(args, config)?;
 
-    // Held in `run()`'s scope so the instrumentation flush guard drops after
+    // Held in `search()`'s scope so the instrumentation flush guard drops after
     // all work completes.
     let _tracing = init_tracing(args, &validated);
 
     info!("Parsed configuration: {:#?}", config.clone());
     alloc_track::snap!("start");
 
-    validate_inputs(&validated, !args.no_feature_stats)?;
+    validate_inputs(&validated)?;
 
     // The stale-tempdir sweep runs inside `PerRunTempdir::new`.
     let staging_cfg = config.staging.clone().unwrap_or_default();
