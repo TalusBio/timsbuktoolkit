@@ -40,6 +40,17 @@ use crate::predicted_library::{
 /// msspeculator's defaults, restated here only so a partially-specified
 /// `[library]` section does not have to name every field to change one.
 const DEFAULT_MODEL: &str = "builtin:small-v0";
+/// The one default that is this project's rather than msspeculator's, whose
+/// `--decoys` is off.
+///
+/// Every library built here exists to be searched, and a search needs a decoy
+/// for every target to put an FDR on. Predicting them costs twice the
+/// prediction; the alternative costs more, because a library that ships none
+/// gets ±CH2 mass-shift decoys derived at load, and a mass shift is a far
+/// weaker null than a pseudo-reversed sequence run through the same model.
+/// Those exist for libraries nothing can regenerate -- a vendor export -- not
+/// for one being predicted right here.
+const DEFAULT_DECOYS: bool = true;
 const DEFAULT_MISSED_CLEAVAGES: usize = 2;
 const DEFAULT_MIN_LENGTH: usize = 7;
 const DEFAULT_MAX_LENGTH: usize = 30;
@@ -146,7 +157,7 @@ pub fn resolve_prediction(fasta: PathBuf, library: &LibraryConfig) -> ResolvedPr
             .unwrap_or(DEFAULT_MAX_VARIABLE_MODS),
         min_intensity: library.min_intensity.unwrap_or(DEFAULT_MIN_INTENSITY),
         max_fragments: library.max_fragments,
-        decoys: library.decoys.unwrap_or(false),
+        decoys: library.decoys.unwrap_or(DEFAULT_DECOYS),
     }
 }
 
@@ -155,13 +166,11 @@ pub fn resolve_prediction(fasta: PathBuf, library: &LibraryConfig) -> ResolvedPr
 ///
 /// The decoy policy does not enter here. `[library] decoys` decides what the
 /// library carries and the policy decides what happens to it at seal, exactly as
-/// for a library on disk: a predicted library carrying none gets mass-shift
-/// decoys derived under `if-missing`, has them derived over its own under
-/// `force`, and scores without any under `never` -- which
-/// `ReferenceLibrary::from_sealed_arena` warns about, because a run with nothing
-/// to estimate FDR from is worth saying out loud rather than silently correcting.
-/// Deriving the setting from the policy instead would override a `decoys = false`
-/// the user wrote down.
+/// for a library on disk. Predicting them is the default, so the usual run seals
+/// with real decoys and derives nothing; a `decoys = false` gets mass-shift
+/// decoys under `if-missing` and none at all under `never`, which
+/// `ReferenceLibrary::from_sealed_arena` warns about. Reading the policy here
+/// instead would override a `decoys = false` the user wrote down.
 pub fn resolve_search_prediction(
     fasta: PathBuf,
     library: Option<&LibraryConfig>,
@@ -419,6 +428,9 @@ mod tests {
     /// The literals, not the constants. `x.unwrap_or(K) == K` holds whatever `K`
     /// says, so a default drifting from msspeculator's would not show; spelled
     /// out, it shows in the diff.
+    ///
+    /// `decoys` is the exception and is asserted the other way round, because it
+    /// is deliberately not msspeculator's answer.
     #[test]
     fn an_absent_setting_falls_through_to_msspeculators_default() {
         let resolved = resolve_build(&args(&[]), &BuildConfig::default()).prediction;
@@ -433,7 +445,10 @@ mod tests {
         assert_eq!(resolved.fixed_mods, ["C[UNIMOD:4]"]);
         assert_eq!(resolved.variable_mods, ["M[UNIMOD:35]"]);
         assert_eq!(resolved.max_fragments, None);
-        assert!(!resolved.decoys);
+        assert!(
+            resolved.decoys,
+            "predicted decoys beat the mass-shift ones a search would derive"
+        );
     }
 
     /// A flag has to be able to turn a configured setting *off*, which a bare

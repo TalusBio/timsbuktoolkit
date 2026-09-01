@@ -336,7 +336,8 @@ pub struct BuildLibraryArgs {
     #[arg(long, value_name = "N")]
     pub max_fragments: Option<usize>,
 
-    /// Add pseudo-reversed decoy precursors. `--no-decoys` turns them off.
+    /// Add pseudo-reversed decoy precursors, on by default. `--no-decoys` turns
+    /// them off, leaving a search to derive weaker mass-shift decoys instead.
     ///
     /// Two flags on one field, so "not given" stays distinct from "off": a bare
     /// `bool` could not disable a configured `decoys = true`, which left the

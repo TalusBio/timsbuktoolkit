@@ -67,7 +67,6 @@ cargo run --release --bin timsseek -- build-library \
     --fasta $FASTA_FILE \
     --fixed-mod "C[UNIMOD:4]" \
     --max-fragments 10 \
-    --decoys \
     -o $SPECLIB_NAME
 
 # Run timsseek. Config is optional; defaults work for most runs.
@@ -136,7 +135,7 @@ Not supported by `build-library` right now, having been dropped along with the s
 - **Acquisition and chromatography context.** A build uses the model artifact's own defaults; picking a different one is a decision about the model.
 - **A peptide list instead of a FASTA.** Digestion is the only input path.
 - **Fragment and precursor filters** beyond `--min-intensity` and `--max-fragments`: no minimum transition count, and no precursor or fragment *m/z* bounds.
-- **A choice of decoy method.** `--decoys` is pseudo-reversal; the old `reverse` / `edge_mutate` selection is gone.
+- **A choice of decoy method.** Decoys are pseudo-reversed; the old `reverse` / `edge_mutate` selection is gone. They are predicted by default, because a search derives ±CH2 mass-shift decoys for a library that ships none and a mass shift is a far weaker null than a reversed sequence through the same model. `--no-decoys` opts out.
 
 Auth via AWS default chain. MinIO/R2: set `AWS_ENDPOINT_URL`. See `docs/development.md` for `[staging]` config + env var list.
 
