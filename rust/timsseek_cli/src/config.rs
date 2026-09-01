@@ -6,6 +6,9 @@ use timsquery::Tolerance;
 use timsseek::DecoyPolicy;
 use timsseek::ml::RescoreModel;
 use timsseek::scoring::CalibrationConfig;
+use tracing::info;
+
+use crate::errors;
 
 /// Hand-authored default configuration template, and the SINGLE source of the
 /// built-in defaults: `Config::default_config()` parses this string, and
@@ -159,6 +162,51 @@ impl Config {
     pub fn default_config() -> Self {
         toml::from_str(DEFAULT_CONFIG_TOML).expect("embedded default template must parse")
     }
+}
+
+/// Read a configuration file, or the built-in defaults when none was named.
+///
+/// TOML and JSON are both accepted, sniffed by extension.
+pub(crate) fn load_config(path: Option<&std::path::Path>) -> Result<Config, errors::CliError> {
+    let Some(config_path) = path else {
+        info!("No config file provided, using default configuration");
+        return Ok(Config::default_config());
+    };
+    parse_config_file(config_path)
+}
+
+/// Parse a configuration file into whichever view the caller needs.
+///
+/// TOML and JSON are both accepted, sniffed by extension. Generic over the
+/// target so a build reads only `[library]` while a search reads the whole
+/// thing; see [`BuildConfig`].
+pub(crate) fn parse_config_file<T: serde::de::DeserializeOwned>(
+    config_path: &std::path::Path,
+) -> Result<T, errors::CliError> {
+    let text = std::fs::read_to_string(config_path).map_err(|e| errors::CliError::Io {
+        source: e.to_string(),
+        path: Some(config_path.to_string_lossy().to_string()),
+    })?;
+    let is_toml = config_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("toml"))
+        .unwrap_or(false);
+    let parsed: Result<T, String> = if is_toml {
+        toml::from_str(&text).map_err(|e| e.to_string())
+    } else {
+        serde_json::from_str(&text).map_err(|e| e.to_string())
+    };
+    parsed.map_err(|e| errors::CliError::ParseError {
+        msg: format!(
+            "Failed to parse config file {}: {e}\n\n\
+             Run `timsseek --print-default-config` for a reference template, \
+             or `--write-default-config <path>` to drop one to disk.\n\n\
+             Reference default:\n```toml\n{}```\n",
+            config_path.display(),
+            DEFAULT_CONFIG_TOML,
+        ),
+    })
 }
 
 #[cfg(test)]
