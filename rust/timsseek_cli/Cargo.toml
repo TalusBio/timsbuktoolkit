@@ -21,6 +21,8 @@ msspeculator-inference = { git = "https://github.com/TalusBio/msspeculator", rev
 msspeculator-core = { git = "https://github.com/TalusBio/msspeculator", rev = "34618131c4454b253fc16cb17376d913584e9f90" }
 calib_dash = { path = "../calib_dash", optional = true }
 
+# The error type of msspeculator's `LibrarySink`, which this crate implements.
+anyhow = "1"
 regex = "1.11.1"
 chrono = { version = "0.4", default-features = false, features = ["clock"] }
 # tracing-profile = { version="0.10.11",features=["perfetto"] }

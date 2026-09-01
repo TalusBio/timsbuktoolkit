@@ -7045,6 +7045,7 @@ name = "timsseek_cli"
 version = "0.34.0"
 dependencies = [
  "alloc_track",
+ "anyhow",
  "calib_dash",
  "chrono",
  "clap",
