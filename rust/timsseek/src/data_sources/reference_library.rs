@@ -86,7 +86,12 @@ impl ReferenceLibrary {
     ///   TSV/parquet bridge output. Scoring is intensity-driven, so a lib with
     ///   no reference intensities is unusable; the `.speclib` reader (the
     ///   workload) always populates `Some`.
-    pub fn from_arena(arena: TargetTable) -> Result<Self, TargetReadingError> {
+    ///
+    /// Narrowing only, and crate-internal for that reason: none of the load-time
+    /// finalize runs, so `caps.sequence_features` keeps the reader's optimistic
+    /// default and sequence-derived features get claimed for rows that will not
+    /// parse. [`Self::from_sealed_arena`] is the way in from an arena.
+    pub(crate) fn from_arena(arena: TargetTable) -> Result<Self, TargetReadingError> {
         match arena {
             TargetTable::Mzpaf { geom, frag_intens } => {
                 let frag_intens =
@@ -103,11 +108,13 @@ impl ReferenceLibrary {
     }
 }
 
+/// The conversion spelling of [`ReferenceLibrary::from_sealed_arena`], finalize
+/// included, so no `.try_into()` yields a library whose parse gate never ran.
 impl TryFrom<TargetTable> for ReferenceLibrary {
     type Error = TargetReadingError;
 
     fn try_from(arena: TargetTable) -> Result<Self, Self::Error> {
-        Self::from_arena(arena)
+        Self::from_sealed_arena(arena)
     }
 }
 
@@ -286,12 +293,28 @@ fn retired_format(path: &Path) -> Option<&'static str> {
 
 /// Loading: the one path from a path on disk to a scored-against arena.
 impl ReferenceLibrary {
+    /// Narrow a sealed [`TargetTable`] and finish it: decoy reporting, the
+    /// whole-library parse gate, the averagine tally.
+    ///
+    /// The one definition of a finished library. `TargetTable`'s variants and
+    /// fields are public, so a caller outside timsseek can assemble an arena
+    /// itself, and routing it here is what keeps its `caps.sequence_features`
+    /// from standing at the reader's optimistic default -- claiming
+    /// sequence-derived features for rows that will not parse. Every route in,
+    /// [`Self::from_file`] included, ends here.
+    pub fn from_sealed_arena(arena: TargetTable) -> Result<Self, TargetReadingError> {
+        let mut lib = Self::from_arena(arena)?;
+        lib.report_decoys();
+        lib.gate_sequence_features();
+        lib.log_entry_stats();
+        Ok(lib)
+    }
+
     /// Read a library of any supported format.
     ///
-    /// Every load ends here. The arena arrives from timsquery already sealed,
-    /// with its decoy policy resolved against the rows the file turned out to
-    /// ship, so this adds only what timsseek needs on top: the whole-library
-    /// parse gate and the averagine tally.
+    /// Every load from disk ends here. The arena arrives from timsquery already
+    /// sealed, with its decoy policy resolved against the rows the file turned
+    /// out to ship, so what is left is the finalize every arena goes through.
     pub fn from_file(
         path: &Path,
         decoy_policy: crate::models::DecoyPolicy,
@@ -315,11 +338,7 @@ impl ReferenceLibrary {
             path.display()
         );
         let arena = read_timsquery_library(path, decoy_policy)?;
-        let mut lib = Self::try_from(arena)?;
-        lib.report_decoys();
-        lib.gate_sequence_features();
-        lib.log_entry_stats();
-        Ok(lib)
+        Self::from_sealed_arena(arena)
     }
 
     /// Whether every sequence in the library parsed (gates sequence-derived
@@ -871,18 +890,12 @@ mod load_tests {
         );
     }
 
-    /// The OFF branch of the library-scale parse gate, and the only test of it.
+    /// An arena assembled by hand, one row per sequence, two fragments each.
     ///
-    /// One row parses (`PEPTIDEK`) and one does not (`GARBAGE!!!`, which both
-    /// the byte-walk parser and the mzcore fallback reject). Feature
-    /// availability is library-scale on purpose, so the one bad row has to
-    /// disable sequence features for the good one too: targets and decoys
-    /// scored with different features make FDR meaningless.
-    ///
-    /// Written against the gate itself rather than a file, since it is a
-    /// property of the load path and not of any format.
-    #[test]
-    fn one_unparsable_sequence_disables_sequence_features_library_wide() {
+    /// This is the shape a caller outside timsseek can build for itself --
+    /// `TargetTable`'s variants and fields are public -- so it is what the seam
+    /// has to finalize.
+    fn hand_assembled_arena(sequences: &[&str]) -> TargetTable {
         use timsquery::models::{
             Row,
             TargetCapabilities,
@@ -893,9 +906,9 @@ mod load_tests {
             (IonAnnot::try_from("y2").unwrap(), 400.0),
         ];
         let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
-        for (mz, sequence) in [(500.0, "PEPTIDEK"), (600.0, "GARBAGE!!!")] {
+        for (i, sequence) in sequences.iter().enumerate() {
             geom.push_row(Row {
-                precursor_mz: mz,
+                precursor_mz: 500.0 + 100.0 * i as f64,
                 charge: 2,
                 rt_seconds: 120.0,
                 mobility: 0.75,
@@ -909,21 +922,64 @@ mod load_tests {
         let geom = geom
             .seal(crate::models::DecoyPolicy::default())
             .expect("fixture ids are usable");
-        let mut library = ReferenceLibrary {
+        TargetTable::Mzpaf {
             geom,
-            frag_intens: vec![0.8, 0.3, 0.7, 0.4],
-        };
-        assert!(
-            library.parsable_sequences(),
-            "the arena starts with the reader's optimistic default, so the \
-             assertion below is the gate's doing and not the default's"
-        );
+            frag_intens: Some(vec![0.8; frags.len() * sequences.len()]),
+        }
+    }
 
-        library.gate_sequence_features();
+    /// The OFF branch of the library-scale parse gate, and the only test of it.
+    ///
+    /// One row parses (`PEPTIDEK`) and one does not (`GARBAGE!!!`, which both
+    /// the byte-walk parser and the mzcore fallback reject). Feature
+    /// availability is library-scale on purpose, so the one bad row has to
+    /// disable sequence features for the good one too: targets and decoys
+    /// scored with different features make FDR meaningless.
+    ///
+    /// Driven through the public seam rather than a file, since the gate is a
+    /// property of the load path and not of any format, and the seam is the only
+    /// way an out-of-crate caller reaches it.
+    #[test]
+    fn one_unparsable_sequence_disables_sequence_features_library_wide() {
+        let library =
+            ReferenceLibrary::from_sealed_arena(hand_assembled_arena(&["PEPTIDEK", "GARBAGE!!!"]))
+                .expect("an mzpaf arena carrying intensities narrows");
 
         assert!(
             !library.parsable_sequences(),
             "one unparsable row turns the gate off for the whole library"
+        );
+    }
+
+    /// The ON branch, so the assertion above pins the gate's reading of the rows
+    /// and not a constant the seam always writes.
+    #[test]
+    fn an_arena_whose_sequences_all_parse_keeps_sequence_features_on() {
+        let library =
+            ReferenceLibrary::from_sealed_arena(hand_assembled_arena(&["PEPTIDEK", "PEPTIDER"]))
+                .expect("an mzpaf arena carrying intensities narrows");
+
+        assert!(
+            library.parsable_sequences(),
+            "every sequence parses, so the whole library keeps its features"
+        );
+    }
+
+    /// Narrowing alone runs no gate: the arena keeps the reader's optimistic
+    /// default, unparsable rows and all.
+    ///
+    /// The difference between the two constructors, stated where it can fail
+    /// rather than only in a doc comment. Also why the narrowing one is
+    /// crate-internal.
+    #[test]
+    fn narrowing_an_arena_leaves_sequence_features_at_the_readers_default() {
+        let library =
+            ReferenceLibrary::from_arena(hand_assembled_arena(&["PEPTIDEK", "GARBAGE!!!"]))
+                .expect("an mzpaf arena carrying intensities narrows");
+
+        assert!(
+            library.parsable_sequences(),
+            "the optimistic default stands until the gate reads the rows"
         );
     }
 
