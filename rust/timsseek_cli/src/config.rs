@@ -28,6 +28,8 @@ pub struct Config {
     pub staging: Option<StagingConfig>,
     #[serde(default)]
     pub library: Option<LibraryConfig>,
+    #[serde(default)]
+    pub sequences: Option<SequencesConfig>,
 }
 
 /// The slice of a configuration file `build-library` reads.
@@ -78,6 +80,19 @@ pub struct LibraryConfig {
     pub max_fragments: Option<usize>,
     #[serde(default)]
     pub decoys: Option<bool>,
+}
+
+/// The sequence database a run was given.
+///
+/// Its own section rather than a field of [`LibraryConfig`], which says how to
+/// predict a library: a run that predicts nothing still wants the sequences, and
+/// a library is not a substitute for the database it was digested from.
+///
+/// A path rather than a URI, because nothing stages a FASTA from a remote store.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SequencesConfig {
+    pub fasta: std::path::PathBuf,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -314,6 +329,7 @@ rt = "Unrestricted"
         assert!(c.output.is_none(), "[output] must be commented out");
         assert!(c.staging.is_none(), "[staging] must be commented out");
         assert!(c.library.is_none(), "[library] must be commented out");
+        assert!(c.sequences.is_none(), "[sequences] must be commented out");
         assert!(c.analysis.raw_inputs.is_none());
 
         assert_eq!(

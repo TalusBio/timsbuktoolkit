@@ -81,6 +81,14 @@ min_rt_tolerance_minutes = 0.5
 calibration_query_rt_window_minutes = 0.083333336   # 5 seconds (5 / 60)
 
 
+## Sequence database this run belongs to (optional -- `--fasta` overrides this).
+## Separate from `[library]` below, which says how to predict a library: the
+## sequences are wanted on runs that predict nothing, and a library does not
+## stand in for the database it was digested from. Local paths only.
+# [sequences]
+# fasta = "path/to/proteome.fasta"
+
+
 ## Output directory (optional -- `--output-uri` overrides this).
 # [output]
 # uri = "./results"

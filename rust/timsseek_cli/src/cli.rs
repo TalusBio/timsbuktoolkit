@@ -206,6 +206,15 @@ pub struct SearchArgs {
     #[arg(long, value_name = "URI")]
     pub calib_lib: Option<String>,
 
+    /// Sequence database for this run, overriding `[sequences]` in the
+    /// configuration file. Local paths only.
+    ///
+    /// Independent of `--speclib-uri`: a library can be predicted from a FASTA
+    /// and neither input stands in for the other, so naming one says nothing
+    /// about the other.
+    #[arg(long, value_name = "PATH")]
+    pub fasta: Option<PathBuf>,
+
     /// Path to the output directory
     #[arg(long = "output-uri", short = 'o', alias = "output-dir")]
     pub output_uri: Option<String>,

@@ -1,21 +1,26 @@
 //! Where a run's inputs come from.
 //!
-//! A run names its raw files, its library and its output directory either on
-//! the command line or in a configuration file. The command line wins, and the
-//! merge happens once, before anything reads a value, so there is one resolved
-//! value per input rather than two sources consulted at different points.
+//! A run names its raw files, its library, its sequence database and its output
+//! directory either on the command line or in a configuration file. The command
+//! line wins, and the merge happens once, before anything reads a value, so
+//! there is one resolved value per input rather than two sources consulted at
+//! different points.
 
 use crate::cli::SearchArgs;
 use crate::config::{
     Config,
     InputConfig,
     OutputConfig,
+    SequencesConfig,
 };
 use crate::errors::CliError;
 use tims_stage::expand_local_uri;
 
 /// A run's inputs after the merge, with `~` expanded so validation, staging and
 /// existence probes all see the same spelling.
+///
+/// Holds what the pipeline opens. An input a run records without opening is read
+/// from the merged [`Config`], which is what `config_used.json` is written from.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ResolvedInputs {
     pub raw_inputs: Vec<String>,
@@ -71,6 +76,14 @@ fn merge_cli_into_config(config: &mut Config, args: &SearchArgs) {
             // `read_inputs`, which reports the missing one by flag name.
             None => {}
         }
+    }
+    // The sequence database is merged independently of the library, because
+    // `[sequences]` and `[input]` describe two inputs that are given together as
+    // readily as they are given apart.
+    if let Some(fasta) = &args.fasta {
+        config.sequences = Some(SequencesConfig {
+            fasta: fasta.clone(),
+        });
     }
     if let Some(uri) = &args.output_uri {
         config.output = Some(OutputConfig { uri: uri.clone() });
@@ -128,6 +141,7 @@ mod tests {
     use super::*;
     use crate::cli::Cli;
     use clap::Parser;
+    use std::path::PathBuf;
     use timsseek::DecoyPolicy;
 
     /// The search arguments a command line resolves to, whether they were
@@ -349,6 +363,69 @@ uri = "config_results"
         );
     }
 
+    /// A sequence database and a spectral library are independent inputs: one
+    /// can be predicted from the other, and neither replaces it, so naming both
+    /// is an ordinary invocation rather than a conflict.
+    #[test]
+    fn a_fasta_and_a_library_are_accepted_together() {
+        let (merged, resolved) = resolve_pair(
+            &[
+                "--speclib-uri",
+                "lib.mzspeclib.txt",
+                "--fasta",
+                "proteome.fasta",
+                "--output-uri",
+                "out",
+                "--raw-inputs",
+                "a.d",
+            ],
+            config_with(""),
+        );
+        assert_eq!(resolved.speclib_uri, "lib.mzspeclib.txt");
+        assert_eq!(
+            merged.sequences.map(|sequences| sequences.fasta),
+            Some(PathBuf::from("proteome.fasta"))
+        );
+    }
+
+    /// `[sequences]` is a home for the FASTA that does not go through
+    /// `[library]`, so a run that predicts nothing can still name one.
+    #[test]
+    fn a_configured_sequences_section_supplies_the_fasta() {
+        let (merged, _) = resolve_pair(
+            &["--output-uri", "out", "--raw-inputs", "a.d"],
+            config_with(
+                "[input]\ntype = \"speclib\"\nuri = \"lib.mzspeclib.txt\"\n\
+                 [sequences]\nfasta = \"config.fasta\"\n",
+            ),
+        );
+        assert_eq!(
+            merged.sequences.map(|sequences| sequences.fasta),
+            Some(PathBuf::from("config.fasta"))
+        );
+    }
+
+    #[test]
+    fn the_fasta_flag_beats_the_configured_sequences_section() {
+        let (merged, _) = resolve_pair(
+            &[
+                "--output-uri",
+                "out",
+                "--raw-inputs",
+                "a.d",
+                "--speclib-uri",
+                "lib.mzspeclib.txt",
+                "--fasta",
+                "flag.fasta",
+            ],
+            config_with("[sequences]\nfasta = \"config.fasta\"\n"),
+        );
+        assert_eq!(
+            merged.sequences.map(|sequences| sequences.fasta),
+            Some(PathBuf::from("flag.fasta"))
+        );
+    }
+
     /// `config_used.json` is the artifact a run is reproduced from, and it is
     /// serialized `Config`. So every input has to survive a round trip through
     /// it -- which is what a command-line-only `--calib-lib` could not do.
@@ -363,6 +440,8 @@ uri = "config_results"
             "a.d",
             "--calib-lib",
             "calib.mzspeclib.txt",
+            "--fasta",
+            "proteome.fasta",
         ];
         let (config, first) = resolve_pair(&argv, config_with(""));
 
@@ -371,8 +450,13 @@ uri = "config_results"
 
         // Re-resolved with no flags at all: whatever the artifact holds is all
         // there is to go on the second time.
-        let (_, second) = resolve_pair(&["--raw-inputs", "a.d"], reread);
+        let (rebuilt, second) = resolve_pair(&["--raw-inputs", "a.d"], reread);
         assert_eq!(first, second);
+        assert_eq!(rebuilt.sequences, config.sequences);
+        assert!(
+            rebuilt.sequences.is_some(),
+            "the FASTA reached the artifact"
+        );
     }
 
     /// Nothing is swallowed. Every argument is a flag, so no positional can
