@@ -43,6 +43,8 @@ use mzannotate::mzdata::prelude::PeakCollection;
 use mzannotate::mzspeclib::{
     AnalyteTarget,
     AttributeValue,
+    EntryType,
+    LibraryHeader,
     MzSpecLibTextParser,
 };
 use mzannotate::spectrum::AnnotatedSpectrum;
@@ -84,7 +86,7 @@ type Annotation = Fragment<mzcore::chemistry::OutputMolecularFormula>;
 //
 //   - `is_ms_term`, for values mzannotate flattened into an mzdata `Param`,
 //     which splits the CURIE into a number and a namespace.
-//   - the `MS:` prefix check in `origin_types`, for a term arriving as text.
+//   - the `MS:` prefix check in `ms_accession`, for a term arriving as text.
 //
 // It matters because PSI-MS and the Unit Ontology both allocate 7-digit
 // accessions in overlapping ranges: UO already reaches 1010060, above every
@@ -96,6 +98,8 @@ type Annotation = Fragment<mzcore::chemistry::OutputMolecularFormula>;
 
 /// `MS:1003072|spectrum origin type`.
 const SPECTRUM_ORIGIN_TYPE: u32 = 1_003_072;
+/// `MS:1003065|spectrum aggregation type`, the term's other parent.
+const SPECTRUM_AGGREGATION_TYPE: u32 = 1_003_065;
 /// `MS:1002815|inverse reduced ion mobility`, the timsTOF mobility axis.
 const INVERSE_REDUCED_MOBILITY: u32 = 1_002_815;
 /// `MS:1002476|ion mobility drift time`, the drift-tube spelling.
@@ -183,6 +187,17 @@ pub fn read_mzspeclib_library_file(
     path: &Path,
     decoys: DecoyPolicy,
 ) -> Result<TargetTable, TargetReadingError> {
+    read_counting_degradation(path, decoys).map(|(table, _)| table)
+}
+
+/// The read itself, with the counts still in hand.
+///
+/// Split out so a test can assert on them: a count that is only ever warned
+/// about is a count nothing checks.
+fn read_counting_degradation(
+    path: &Path,
+    decoys: DecoyPolicy,
+) -> Result<(TargetTable, Degradation), TargetReadingError> {
     let reader = open_reader(path)?;
     let parser = MzSpecLibTextParser::open(reader, Some(path.to_path_buf()), ontologies())
         .map_err(|e| TargetReadingError::SpeclibParse(format!("mzSpecLib header: {e}")))?;
@@ -190,12 +205,16 @@ pub fn read_mzspeclib_library_file(
     let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
     let mut frag_intens: Vec<f32> = Vec::new();
     let mut degradation = Degradation::default();
+    // Read off the header before the iterator takes the parser, which is also
+    // the only place it can be read: it is what an entry declaring nothing about
+    // its mass provenance falls back to.
+    let library_theoretical_mz = library_declares_theoretical_mz(parser.header());
 
     for (index, spectrum) in parser.enumerate() {
         let spectrum = spectrum.map_err(|e| {
             TargetReadingError::SpeclibParse(format!("mzSpecLib spectrum {}: {e}", index + 1))
         })?;
-        let row = SpectrumRow::extract(&spectrum, &mut degradation)?;
+        let row = SpectrumRow::extract(&spectrum, library_theoretical_mz, &mut degradation)?;
         // Dropped here, so the decoy's peaks are never pushed and its group
         // never interns.
         if !decoys.accepts(row.is_decoy) {
@@ -232,10 +251,13 @@ pub fn read_mzspeclib_library_file(
     let geom = geom.seal(decoys)?;
     degradation.report(geom.n_rows());
 
-    Ok(TargetTable::Mzpaf {
-        geom,
-        frag_intens: Some(frag_intens),
-    })
+    Ok((
+        TargetTable::Mzpaf {
+            geom,
+            frag_intens: Some(frag_intens),
+        },
+        degradation,
+    ))
 }
 
 /// What a library lost on the way into the arena, counted rather than logged
@@ -248,6 +270,7 @@ struct Degradation {
     unrepresentable_labels: usize,
     peaks_without_theoretical_mz: usize,
     rows_without_sequence: usize,
+    rows_without_fragments: usize,
     // No count of entries missing a retention time. Zero is an ordinary value
     // on a normalized scale rather than an absence -- it is an anchor point, and
     // it is what msspeculator's own libraries write -- so there is nothing to
@@ -284,6 +307,12 @@ impl Degradation {
                 self.rows_without_sequence
             );
         }
+        if self.rows_without_fragments > 0 {
+            warn!(
+                "mzSpecLib: {} of {rows} entries declare peaks none of which could be read; they score against nothing",
+                self.rows_without_fragments
+            );
+        }
         for accession in &self.unrecognised_origin_types {
             warn!(
                 "mzSpecLib: spectrum origin type MS:{accession} is outside this build's copy of \
@@ -318,6 +347,7 @@ struct SpectrumRow {
 impl SpectrumRow {
     fn extract(
         spectrum: &Spectrum,
+        library_declares_theoretical_mz: bool,
         degradation: &mut Degradation,
     ) -> Result<Self, TargetReadingError> {
         reject_unresolved_attribute_sets(spectrum)?;
@@ -336,7 +366,8 @@ impl SpectrumRow {
             }
         };
 
-        let peak_mz_is_theoretical = origin_types(spectrum).any(declares_theoretical_mz);
+        let peak_mz_is_theoretical =
+            peak_mz_is_theoretical(spectrum, library_declares_theoretical_mz);
         let mut counter = UnknownIonCounter::default();
         let mut frags = Vec::with_capacity(spectrum.peaks.len());
         let mut intensities = Vec::with_capacity(spectrum.peaks.len());
@@ -373,6 +404,13 @@ impl SpectrumRow {
                 // exists, so there is nothing honest to store.
                 _ => degradation.ambiguous_peaks += 1,
             }
+        }
+        // An entry the file gave peaks for and the arena got none of is scored
+        // against nothing, which the per-peak counts above do not say on their
+        // own: they cannot distinguish a library losing a peak here and there
+        // from one losing whole entries.
+        if frags.is_empty() && !spectrum.peaks.is_empty() {
+            degradation.rows_without_fragments += 1;
         }
 
         Ok(Self {
@@ -553,23 +591,79 @@ fn is_decoy(spectrum: &Spectrum, degradation: &mut Degradation) -> bool {
 /// The `spectrum origin type` accessions on this entry.
 ///
 /// The term is not repeatable, so more than one is a malformed file rather than
-/// a case to reconcile; the callers take the first one they can resolve.
-///
-/// The value arrives as the stringified term, `MS:1003195|name`, so only the
-/// CURIE half is parsed. A value in another namespace yields nothing rather than
-/// a bare number: this is one of the two namespace boundaries described at the
-/// top of this file.
+/// a case to reconcile.
 fn origin_types(spectrum: &Spectrum) -> impl Iterator<Item = u32> + '_ {
+    terms_valued_by(spectrum, SPECTRUM_ORIGIN_TYPE)
+}
+
+/// The PSI-MS accessions this entry gives as the value of `accession`.
+fn terms_valued_by(spectrum: &Spectrum, accession: u32) -> impl Iterator<Item = u32> + '_ {
     spectrum
         .description
         .params
         .iter()
-        .filter(|param| is_ms_term(param, SPECTRUM_ORIGIN_TYPE))
-        .filter_map(|param| {
-            let value = param.value.to_string();
-            let (curie, _name) = value.split_once('|')?;
-            curie.strip_prefix("MS:")?.parse().ok()
+        .filter(move |param| is_ms_term(param, accession))
+        .filter_map(|param| ms_accession(&param.value.to_string()))
+}
+
+/// The accession in a stringified term, `MS:1003195|name`, so only the CURIE
+/// half is parsed.
+///
+/// A value in another namespace yields nothing rather than a bare number: this
+/// is one of the two namespace boundaries described at the top of this file.
+fn ms_accession(value: &str) -> Option<u32> {
+    let (curie, _name) = value.split_once('|')?;
+    curie.strip_prefix("MS:")?.parse().ok()
+}
+
+/// Whether this entry's peak m/z values are calculated rather than measured.
+///
+/// `MS:1003074|predicted spectrum` is `is_a` both `MS:1003072|spectrum origin
+/// type` and `MS:1003065|spectrum aggregation type`, so both axes are consulted:
+/// reading one of a term's two parents and not the other would be arbitrary.
+///
+/// The origin-type slot carries two orthogonal facts, how the masses were
+/// produced and whether the analyte is a decoy, because the vocabulary has no
+/// analyte-level decoy term for a writer to use instead. A decoy declaration
+/// therefore says nothing about mass provenance, and an entry whose own origin
+/// types are all decoy subtypes -- or that declares none -- has left the
+/// question to the library's `Spectrum=all` set. mzSpecLib v1.0 §4.1.4 and
+/// §4.1.11 resolve attribute sets per accession with the later set replacing the
+/// earlier, and §4.1.12 Example 1 shows exactly this override, so the entry is
+/// not contradicting the library when it names a decoy subtype.
+///
+/// Anything else on the origin-type axis is an override meant as one:
+/// `MS:1003073|observed spectrum` on an entry of a predicted library is that
+/// entry saying its masses were measured, and it is believed.
+fn peak_mz_is_theoretical(spectrum: &Spectrum, library_declares_theoretical_mz: bool) -> bool {
+    if origin_types(spectrum).any(declares_theoretical_mz)
+        || terms_valued_by(spectrum, SPECTRUM_AGGREGATION_TYPE).any(declares_theoretical_mz)
+    {
+        return true;
+    }
+    origin_types(spectrum).all(|accession| subsumes_decoy(accession) == Some(true))
+        && library_declares_theoretical_mz
+}
+
+/// Whether the library's `Spectrum=all` set declares its entries' m/z values
+/// calculated, on either axis that can carry the claim.
+///
+/// The header is parsed by `MzSpecLibTextParser::open`, so this is answerable
+/// before the first entry is yielded.
+fn library_declares_theoretical_mz(header: &LibraryHeader) -> bool {
+    header
+        .attribute_classes
+        .get(&EntryType::Spectrum)
+        .into_iter()
+        .flatten()
+        .filter(|set| set.id == "all")
+        .flat_map(|set| set.attributes.iter().flatten())
+        .filter(|attribute| {
+            attribute.name.accession == mzcv::curie!(MS:1003072)
+                || attribute.name.accession == mzcv::curie!(MS:1003065)
         })
+        .filter_map(|attribute| ms_accession(&attribute.value.to_string()))
+        .any(declares_theoretical_mz)
 }
 
 /// Whether an mzdata param is the named PSI-MS term.
@@ -866,6 +960,77 @@ mod tests {
         );
     }
 
+    /// Two predicted entries, alike but for the second claiming the `Decoy` set.
+    /// A decoy declaration replaces the origin type without saying anything
+    /// about how the masses were produced, so the decoy has to keep the peaks
+    /// its target keeps.
+    #[test]
+    fn a_decoy_declaration_costs_an_entry_none_of_its_fragments() {
+        let geom = arena("minimal_predicted_decoy.mzspeclib.txt");
+        assert_eq!(geom.n_rows(), 2);
+        let (target, decoy) = (geom.rows().next().unwrap(), geom.rows().nth(1).unwrap());
+        assert!(!geom.is_decoy(target) && geom.is_decoy(decoy));
+
+        let labels = |row| {
+            geom.frag_labels(row)
+                .iter()
+                .map(ToString::to_string)
+                .collect::<Vec<_>>()
+        };
+        assert_eq!(labels(decoy).len(), 2, "both peaks, as the file declares");
+        assert_eq!(labels(decoy), labels(target));
+    }
+
+    /// The `Spectrum=all` fallback is the library's claim, not an override of the
+    /// entry's own: an entry naming `MS:1003073|observed spectrum` has said its
+    /// m/z values are measured and its unresolvable peaks are dropped, while the
+    /// decoy beside it -- which said nothing about mass provenance -- keeps its.
+    #[test]
+    fn an_entry_declaring_its_masses_observed_is_taken_at_its_word() {
+        let geom = arena("entry_overrides_library_origin_type.mzspeclib.txt");
+        assert_eq!(geom.n_rows(), 3);
+        let row = |name: &str| {
+            geom.rows()
+                .find(|r| geom.output_id(*r).to_string() == name)
+                .expect("fixture names every entry")
+        };
+        assert_eq!(geom.frag_labels(row("PEPTIDEK/2")).len(), 2, "predicted");
+        assert_eq!(geom.frag_labels(row("PDITPEEK/2")).len(), 2, "the decoy");
+        assert_eq!(
+            geom.frag_labels(row("SAMPLERK/2")).len(),
+            0,
+            "an observed spectrum offers no theoretical m/z to store"
+        );
+    }
+
+    /// A whole entry lost is not the same shape of loss as a peak lost here and
+    /// there, so it gets its own count. Both entries in this library declare two
+    /// peaks and neither peak can be given a theoretical m/z.
+    #[test]
+    fn an_entry_whose_every_peak_was_dropped_is_counted() {
+        let (table, degradation) = read_counting_degradation(
+            &fixture("observed_without_annotation_masses.mzspeclib.txt"),
+            DecoyPolicy::Never,
+        )
+        .expect("fixture loads");
+        let TargetTable::Mzpaf { geom, .. } = table else {
+            panic!("mzSpecLib carries ion chemistry");
+        };
+        assert_eq!(geom.n_rows(), 2);
+        assert_eq!(geom.n_fragments(), 0, "nothing reached the arena");
+        assert_eq!(degradation.rows_without_fragments, 2);
+        assert_eq!(degradation.peaks_without_theoretical_mz, 4);
+
+        // An entry that declares peaks and keeps them is not counted, and
+        // neither is one that declares none.
+        let (_, degradation) = read_counting_degradation(
+            &fixture("minimal_predicted_decoy.mzspeclib.txt"),
+            DecoyPolicy::Never,
+        )
+        .expect("fixture loads");
+        assert_eq!(degradation.rows_without_fragments, 0);
+    }
+
     /// The format this project writes, read back by the reader that has to read
     /// it. It exercises every term msspeculator actually emits rather than the
     /// terms a vendor happens to use: `MS:1002815|inverse reduced ion mobility`
@@ -893,6 +1058,19 @@ mod tests {
             2,
             "`decoy_pair_id` puts each decoy in its target's group"
         );
+
+        // Four peaks per entry, decoys included: the writer's `Decoy` set
+        // replaces the origin type and leaves the aggregation type alone, and a
+        // decoy with no fragments would be an FDR estimated against nothing.
+        assert_eq!(geom.n_fragments(), 16);
+        for row in geom.rows() {
+            assert_eq!(
+                geom.frag_labels(row).len(),
+                4,
+                "{} carries the four peaks it declares",
+                geom.output_id(row),
+            );
+        }
 
         let first = geom.rows().next().unwrap();
         assert_eq!(geom.output_id(first).to_string(), "VLSAAKPEDR/2");

@@ -898,24 +898,17 @@ mod tests {
         }
     }
 
-    /// A decoy is the one row the two routes do not agree on, and it loses
-    /// everything a scorer would match it by.
+    /// A shipped decoy is the row where the two routes are most easily made to
+    /// disagree, and it agrees on everything a scorer reads.
     ///
     /// msspeculator's writer claims `MS:1003195|unnatural peptidoform decoy
     /// spectrum` for a decoy, which replaces the `MS:1003074|predicted spectrum`
-    /// its `Spectrum=all` set gives everything else. Only the latter is in the
-    /// closure of origin types that declare their peak m/z calculated, so the
-    /// reader stops treating a decoy's stated m/z as theoretical, finds neither a
-    /// composition nor a mass-error suffix to recover one from, and drops every
-    /// peak. The same thing happens to the committed
-    /// `msspeculator_built.mzspeclib.txt`, whose two decoys load with no
-    /// fragments at all.
-    ///
-    /// Asserted rather than left as a surprise so that the sink is not read as
-    /// matching the file route on a shipped decoy: on this it is the file route
-    /// that is wrong, and a fix there should fail this test.
+    /// its `Spectrum=all` set gives everything else. Only the latter says the
+    /// peak m/z values are calculated, and a decoy with no fragments is an FDR
+    /// estimated against nothing, so the decoy declaration must cost the entry
+    /// none of its peaks.
     #[test]
-    fn a_shipped_decoy_keeps_its_fragments_through_this_sink_and_loses_them_through_a_file() {
+    fn a_shipped_decoy_keeps_its_fragments_through_this_sink_and_through_a_file() {
         let target = Fixture::new("PEPTIDEK", "PEPTIDEK");
         let decoy = Fixture::new("PDITPEEK", "PDITPEEK");
         let rows = [
@@ -931,22 +924,30 @@ mod tests {
         let file_decoy = row_named(&from_file, "PDITPEEK/2");
         assert!(sunk.is_decoy(sunk_decoy) && from_file.is_decoy(file_decoy));
 
-        // Everything but the peaks still agrees, so the divergence is the origin
-        // type's effect on the peak list and nothing wider.
         assert_eq!(
             sunk.decoy_group(sunk_decoy).to_string(),
             from_file.decoy_group(file_decoy).to_string(),
         );
         assert_eq!(sunk.charge(sunk_decoy), from_file.charge(file_decoy));
 
-        assert_eq!(fragments(sunk, sunk_decoy).len(), 4);
-        assert_eq!(
-            fragments(&from_file, file_decoy).len(),
-            0,
-            "the file route drops a decoy's peaks; see this test's doc comment",
+        let (sunk_frags, file_frags) = (
+            fragments(sunk, sunk_decoy),
+            fragments(&from_file, file_decoy),
         );
-        // The target alongside it keeps its own, so this is the decoy's origin
-        // type and not the file.
+        assert_eq!(sunk_frags.len(), 4);
+        assert_eq!(
+            sunk_frags.keys().collect::<Vec<_>>(),
+            file_frags.keys().collect::<Vec<_>>(),
+        );
+        for (label, mz) in &sunk_frags {
+            assert!(
+                (mz - file_frags[label]).abs() < 1e-5,
+                "m/z of {label} on the decoy: {mz} against {}",
+                file_frags[label],
+            );
+        }
+        // The target alongside it keeps its own count, so the decoy's peaks were
+        // not read off the wrong entry.
         assert_eq!(
             fragments(&from_file, row_named(&from_file, "PEPTIDEK/2")).len(),
             3,
