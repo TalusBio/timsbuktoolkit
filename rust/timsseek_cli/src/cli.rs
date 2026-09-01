@@ -72,9 +72,19 @@ pub enum Command {
 }
 
 /// Subcommand spelling put on a clock, warned about by
-/// [`warn_deprecated_spellings`].
+/// [`warn_deprecated_spellings`], paired with the instruction that replaces it.
 pub const DEPRECATED_SUBCOMMANDS: &[(&str, &str)] =
     &[("search", "run timsseek with no subcommand")];
+
+/// Flag spellings put on a clock, paired with the flag that replaces each.
+///
+/// Keyed with the leading `--` because these are matched against raw arguments,
+/// where `dotd-files` on its own is a value rather than a flag.
+pub const DEPRECATED_FLAGS: &[(&str, &str)] = &[
+    ("--dotd-files", "--raw-inputs"),
+    ("--speclib-file", "--speclib-uri"),
+    ("--output-dir", "--output-uri"),
+];
 
 /// The date the deprecated spellings stop being accepted, in the first release
 /// after it. Filed as its own issue so the removal is scheduled work rather
@@ -97,11 +107,6 @@ impl Cli {
 
 /// Warn once per deprecated spelling actually typed.
 ///
-/// clap resolves an alias to its canonical name and does not report which
-/// spelling produced it, so the raw arguments are what has to be scanned. That
-/// covers `--flag value` and `--flag=value` alike, and a subcommand name, which
-/// clap likewise reports only as the variant it selected.
-///
 /// Called before the subscriber is installed, so this writes to stderr rather
 /// than going through `tracing`.
 pub fn warn_deprecated_spellings<I, S>(argv: I)
@@ -109,27 +114,63 @@ where
     I: IntoIterator<Item = S>,
     S: AsRef<str>,
 {
+    for warning in deprecation_warnings(argv) {
+        eprintln!("{warning}");
+    }
+}
+
+/// One warning per distinct deprecated spelling in `argv`, in the order typed.
+///
+/// clap resolves an alias to its canonical name and does not report which
+/// spelling produced it, so the raw arguments are what has to be scanned. That
+/// covers `--flag value` and `--flag=value` alike, and a subcommand name, which
+/// clap likewise reports only as the variant it selected.
+///
+/// Separate from the printing so the wording is reachable from a test without
+/// capturing stderr.
+pub fn deprecation_warnings<I, S>(argv: I) -> Vec<String>
+where
+    I: IntoIterator<Item = S>,
+    S: AsRef<str>,
+{
     let mut seen: Vec<&str> = Vec::new();
+    let mut warnings = Vec::new();
     for arg in argv {
         // `--flag=value` and `--flag value` both have to match, so compare the
         // part left of any `=`.
         let arg = arg.as_ref();
-        let spelling = arg.split('=').next().unwrap_or(arg);
-        let Some((spelling, replacement)) = DEPRECATED_SUBCOMMANDS
-            .iter()
-            .find(|(deprecated, _)| *deprecated == spelling)
+        let Some((spelling, advice)) = replacement_advice(arg.split('=').next().unwrap_or(arg))
         else {
             continue;
         };
-        if seen.contains(spelling) {
+        if seen.contains(&spelling) {
             continue;
         }
         seen.push(spelling);
-        eprintln!(
+        warnings.push(format!(
             "warning: `{spelling}` is deprecated and will be removed after \
-             {DEPRECATION_REMOVAL_DATE}; {replacement} instead"
-        );
+             {DEPRECATION_REMOVAL_DATE}; {advice}"
+        ));
     }
+    warnings
+}
+
+/// What to tell someone who typed `spelling`, or `None` if it is not deprecated.
+///
+/// The two tables are looked up alike but do not read alike: a subcommand is
+/// replaced by a way of invoking timsseek, a flag by another flag.
+fn replacement_advice(spelling: &str) -> Option<(&'static str, String)> {
+    let found = |table: &'static [(&'static str, &'static str)]| {
+        table
+            .iter()
+            .find(|(deprecated, _)| *deprecated == spelling)
+            .copied()
+    };
+    if let Some((spelling, instruction)) = found(DEPRECATED_SUBCOMMANDS) {
+        return Some((spelling, format!("{instruction} instead")));
+    }
+    let (spelling, flag) = found(DEPRECATED_FLAGS)?;
+    Some((spelling, format!("use `{flag}` instead")))
 }
 
 #[derive(clap::Args, Debug)]
@@ -322,5 +363,109 @@ impl BuildLibraryArgs {
             return Some(Vec::new());
         }
         self.fixed_mods.clone()
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Every deprecated flag names its replacement and the day it stops
+    /// working, in whichever of the two spellings a script happens to use.
+    #[test]
+    fn a_deprecated_flag_warns_and_names_its_replacement() {
+        for (deprecated, replacement) in DEPRECATED_FLAGS {
+            for argv in [
+                vec![deprecated.to_string(), "value".to_string()],
+                vec![format!("{deprecated}=value")],
+            ] {
+                let warnings = deprecation_warnings(&argv);
+                assert_eq!(warnings.len(), 1, "{argv:?}");
+                let warning = &warnings[0];
+                assert!(warning.contains(deprecated), "{warning}");
+                assert!(warning.contains(replacement), "{warning}");
+                assert!(warning.contains(DEPRECATION_REMOVAL_DATE), "{warning}");
+            }
+        }
+    }
+
+    /// Nobody using the current spellings should be told to change anything.
+    #[test]
+    fn the_canonical_spellings_warn_about_nothing() {
+        let argv = [
+            "--raw-inputs",
+            "my_data.d",
+            "--speclib-uri=lib.ndjson",
+            "--output-uri",
+            "out",
+        ];
+        assert!(deprecation_warnings(argv).is_empty());
+    }
+
+    /// `--dotd-files` is repeatable, and a warning per `.d` file would bury the
+    /// one line that matters.
+    #[test]
+    fn a_repeated_deprecated_flag_warns_once() {
+        let argv = ["--dotd-files", "a.d", "--dotd-files", "b.d"];
+        assert_eq!(deprecation_warnings(argv).len(), 1);
+    }
+
+    /// A value that happens to spell a deprecated flag without the dashes is a
+    /// path, not a flag.
+    #[test]
+    fn a_positional_value_spelled_like_a_flag_warns_about_nothing() {
+        assert!(deprecation_warnings(["--raw-inputs", "dotd-files"]).is_empty());
+    }
+
+    /// The subcommand's replacement is a way of invoking timsseek, so its
+    /// warning must not read as if `search` were a flag with a flag to swap in.
+    #[test]
+    fn the_deprecated_subcommand_warns_as_a_subcommand() {
+        let warnings = deprecation_warnings(["search", "--speclib-uri", "lib.ndjson"]);
+        assert_eq!(warnings.len(), 1);
+        let warning = &warnings[0];
+        assert!(
+            warning.contains("run timsseek with no subcommand"),
+            "{warning}"
+        );
+        assert!(warning.contains(DEPRECATION_REMOVAL_DATE), "{warning}");
+        assert!(!warning.contains("use `--"), "{warning}");
+    }
+
+    /// Deprecated, not removed: each alias still has to land in the field its
+    /// replacement fills, which is what a later cleanup of the aliases would
+    /// break.
+    #[test]
+    fn the_deprecated_flags_still_parse_to_their_canonical_fields() {
+        let parse = |argv: [&str; 3]| {
+            Cli::try_parse_from(argv)
+                .expect("a deprecated spelling is still accepted")
+                .search
+        };
+        assert_eq!(
+            parse(["timsseek", "--dotd-files", "my_data.d"]).raw_inputs,
+            Some(vec!["my_data.d".to_string()])
+        );
+        assert_eq!(
+            parse(["timsseek", "--speclib-file", "lib.ndjson"]).speclib_uri,
+            Some("lib.ndjson".to_string())
+        );
+        assert_eq!(
+            parse(["timsseek", "--output-dir", "out"]).output_uri,
+            Some("out".to_string())
+        );
+    }
+
+    /// The tables are what the warnings are keyed on, so a flag listed there
+    /// without a matching `alias` in clap would warn about a spelling that does
+    /// not parse.
+    #[test]
+    fn every_deprecated_flag_is_a_clap_alias() {
+        for (deprecated, _) in DEPRECATED_FLAGS {
+            assert!(
+                Cli::try_parse_from(["timsseek", deprecated, "value"]).is_ok(),
+                "{deprecated} is warned about but not accepted"
+            );
+        }
     }
 }
