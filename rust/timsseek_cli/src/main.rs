@@ -1,3 +1,4 @@
+mod artifacts;
 mod build_library;
 mod build_progress;
 mod cli;

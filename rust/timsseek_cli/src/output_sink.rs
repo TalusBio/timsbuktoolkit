@@ -49,7 +49,7 @@ impl OutputSink {
         Ok(Self { dest })
     }
 
-    fn sample_dir(&self, sample: &str) -> std::path::PathBuf {
+    pub(crate) fn sample_dir(&self, sample: &str) -> std::path::PathBuf {
         self.root().join(sample)
     }
 
@@ -75,6 +75,23 @@ impl OutputSink {
     /// so local and remote spellings cannot drift apart.
     pub(crate) fn dest_uri_for(&self, rel: &str) -> String {
         join_output_uri(&self.dest_root(), rel)
+    }
+
+    /// Remove whatever an earlier run left in a sample's directory, so fresh
+    /// results are never mixed with older ones.
+    pub(crate) fn clear_existing(&self, sample: &str) -> Result<(), errors::CliError> {
+        let dir = self.sample_dir(sample);
+        for artifact in crate::artifacts::per_sample_artifacts(true) {
+            let path = dir.join(artifact);
+            if !path.exists() {
+                continue;
+            }
+            std::fs::remove_file(&path).map_err(|e| errors::CliError::Io {
+                source: format!("Failed to remove existing {artifact}: {e}"),
+                path: Some(path.to_string_lossy().to_string()),
+            })?;
+        }
+        Ok(())
     }
 
     /// Upload and remove a per-sample subdir after the sample has finished
@@ -232,6 +249,29 @@ mod destination_tests {
             sink.root().is_dir() && !sink.root().starts_with("s3:"),
             "a remote run stages locally first: {:?}",
             sink.root()
+        );
+    }
+}
+
+#[cfg(test)]
+mod cleanup_tests {
+    use super::OutputSink;
+    use crate::artifacts::FEATURE_STATS_TSV;
+
+    #[test]
+    fn clearing_a_sample_removes_a_sidecar_this_run_would_not_have_written() {
+        let dir = tempfile::tempdir().unwrap();
+        let sink = OutputSink::new(dir.path().to_str().unwrap()).unwrap();
+        let sample_dir = sink.sample_dir("run");
+        std::fs::create_dir_all(&sample_dir).unwrap();
+        let sidecar = sample_dir.join(FEATURE_STATS_TSV);
+        std::fs::write(&sidecar, "name\tmean\n").unwrap();
+
+        sink.clear_existing("run").unwrap();
+
+        assert!(
+            !sidecar.exists(),
+            "a stale sidecar next to fresh results reads as though it described them"
         );
     }
 }

@@ -1,4 +1,10 @@
 use super::config::OutputConfig;
+use crate::artifacts::{
+    FEATURE_IMPORTANCE_TSV,
+    FEATURE_STATS_TSV,
+    PERFORMANCE_REPORT,
+    RESULTS_PARQUET,
+};
 use indicatif::ProgressIterator;
 use timsquery::models::tolerance::{
     MobilityTolerance,
@@ -314,9 +320,6 @@ fn check_rt_scale_compatibility(main_lib: &ReferenceLibrary, calib_lib: &Referen
     }
 }
 
-pub const FEATURE_STATS_FILENAME: &str = "results.feature_stats.tsv";
-pub const FEATURE_IMPORTANCE_FILENAME: &str = "results.feature_importance.tsv";
-
 fn write_tsv(
     path: &std::path::Path,
     header: &str,
@@ -340,7 +343,7 @@ fn write_feature_stats_sidecar(
     use std::fmt::Write as _;
 
     write_tsv(
-        &parquet_path.with_file_name(FEATURE_STATS_FILENAME),
+        &parquet_path.with_file_name(FEATURE_STATS_TSV),
         "name\tmean\tmissing\tfold",
         |buf| {
             for fold in stats.iter() {
@@ -358,7 +361,7 @@ fn write_feature_stats_sidecar(
     )?;
 
     write_tsv(
-        &parquet_path.with_file_name(FEATURE_IMPORTANCE_FILENAME),
+        &parquet_path.with_file_name(FEATURE_IMPORTANCE_TSV),
         "name\tgain\tfold",
         |buf| {
             for fold in stats.iter() {
@@ -597,8 +600,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
 
     // === PHASE 6: Write Parquet output ===
     let step = TimedStep::begin("Phase 6: Write output");
-    // ARTIFACT-LIST (per-sample): keep in sync with validate_inputs in main.rs.
-    let out_path_pq = std::path::Path::new(&out_path.uri).join("results.parquet");
+    let out_path_pq = std::path::Path::new(&out_path.uri).join(RESULTS_PARQUET);
     let mut pq_writer = timsseek::scoring::parquet_writer::ResultParquetWriter::new(
         &out_path_pq,
         20_000,
@@ -1140,8 +1142,7 @@ pub fn run_pipeline(
     no_feature_stats: bool,
     rescore_model: RescoreModel,
 ) -> std::result::Result<PipelineReport, TimsSeekError> {
-    // ARTIFACT-LIST (per-sample): keep in sync with validate_inputs in main.rs.
-    let performance_report_path = std::path::Path::new(&output.uri).join("performance_report.json");
+    let performance_report_path = std::path::Path::new(&output.uri).join(PERFORMANCE_REPORT);
 
     let mut timings = execute_pipeline(
         speclib,

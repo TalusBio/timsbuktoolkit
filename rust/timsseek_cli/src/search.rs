@@ -26,8 +26,6 @@ use crate::config::{
 use crate::logging::init_tracing;
 use crate::output_sink::{
     OutputSink,
-    join_output_uri,
-    probe_uri_exists,
     sample_name_from_uri,
 };
 use crate::run_inputs::{
@@ -35,6 +33,7 @@ use crate::run_inputs::{
     resolve_run_inputs,
 };
 use crate::{
+    artifacts,
     errors,
     processing,
 };
@@ -42,7 +41,13 @@ use crate::{
 /// Probe the filesystem for everything the run is about to touch, so a missing
 /// input or a colliding artifact fails before the heavy analysis rather than
 /// after it. Every value it reads was resolved by [`resolve_run_inputs`].
-fn validate_inputs(resolved: &ResolvedInputs) -> std::result::Result<(), errors::CliError> {
+///
+/// `feature_stats` decides whether the feature sidecars are among the artifacts
+/// this run would write, and so whether an existing one is a collision.
+fn validate_inputs(
+    resolved: &ResolvedInputs,
+    feature_stats: bool,
+) -> std::result::Result<(), errors::CliError> {
     info!("Validating inputs and outputs before processing...");
 
     let ResolvedInputs {
@@ -117,33 +122,8 @@ fn validate_inputs(resolved: &ResolvedInputs) -> std::result::Result<(), errors:
 
     // Probe every artifact up-front so a collision fails before the heavy
     // analysis rather than after it.
-    //
-    // IMPORTANT -- the two artifact lists below must stay in sync with the
-    // writer sites (search for `ARTIFACT-LIST`):
-    //   per-sample: processing.rs, main.rs overwrite-cleanup block
-    //   run-level:  main.rs run report, OutputSink::finalize_run call site
     if !overwrite {
-        let mut collisions: Vec<String> = Vec::new();
-        for raw_uri in raw_inputs {
-            let sample = sample_name_from_uri(raw_uri).ok_or_else(|| errors::CliError::Io {
-                source: "Unable to extract file stem".to_string(),
-                path: Some(raw_uri.clone()),
-            })?;
-            // ARTIFACT-LIST (per-sample)
-            for artifact in ["results.parquet", "performance_report.json"] {
-                let uri = join_output_uri(output_uri, &format!("{sample}/{artifact}"));
-                if probe_uri_exists(&uri)? {
-                    collisions.push(uri);
-                }
-            }
-        }
-        // ARTIFACT-LIST (run-level)
-        for artifact in ["run_report.json", "config_used.json"] {
-            let uri = join_output_uri(output_uri, artifact);
-            if probe_uri_exists(&uri)? {
-                collisions.push(uri);
-            }
-        }
+        let collisions = artifacts::probe_collisions(output_uri, raw_inputs, feature_stats)?;
         if !collisions.is_empty() {
             let list = collisions
                 .iter()
@@ -195,7 +175,7 @@ fn process_single_file(
     speclib: &timsseek::data_sources::reference_library::ReferenceLibrary,
     calib_lib: Option<&timsseek::data_sources::reference_library::ReferenceLibrary>,
     config: &Config,
-    base_output_dir: &std::path::Path,
+    sink: &OutputSink,
     overwrite: bool,
     max_qvalue: f32,
     no_feature_stats: bool,
@@ -250,30 +230,15 @@ fn process_single_file(
         source: "Unable to derive sample name from URI".to_string(),
         path: Some(raw_uri.to_string()),
     })?;
-    let file_output_dir = base_output_dir.join(&file_stem);
+    let file_output_dir = sink.sample_dir(&file_stem);
 
     std::fs::create_dir_all(&file_output_dir).map_err(|e| errors::CliError::Io {
         source: format!("Failed to create output subdirectory: {}", e),
         path: Some(file_output_dir.to_string_lossy().to_string()),
     })?;
 
-    // ARTIFACT-LIST (per-sample): keep in sync with validate_inputs.
     if overwrite {
-        let results_file = file_output_dir.join("results.parquet");
-        if results_file.exists() {
-            std::fs::remove_file(&results_file).map_err(|e| errors::CliError::Io {
-                source: format!("Failed to remove existing results file: {}", e),
-                path: Some(results_file.to_string_lossy().to_string()),
-            })?;
-        }
-
-        let perf_report_file = file_output_dir.join("performance_report.json");
-        if perf_report_file.exists() {
-            std::fs::remove_file(&perf_report_file).map_err(|e| errors::CliError::Io {
-                source: format!("Failed to remove existing performance report: {}", e),
-                path: Some(perf_report_file.to_string_lossy().to_string()),
-            })?;
-        }
+        sink.clear_existing(&file_stem)?;
     }
 
     let file_output_config = OutputConfig {
@@ -379,7 +344,7 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
     info!("Parsed configuration: {:#?}", config.clone());
     alloc_track::snap!("start");
 
-    validate_inputs(&validated)?;
+    validate_inputs(&validated, !args.no_feature_stats)?;
 
     // The stale-tempdir sweep runs inside `PerRunTempdir::new`.
     let staging_cfg = config.staging.clone().unwrap_or_default();
@@ -396,8 +361,7 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
 
     let sink = OutputSink::new(&validated.output_uri)?;
 
-    // ARTIFACT-LIST (run-level): keep in sync with validate_inputs.
-    let config_output_path = sink.root().join("config_used.json");
+    let config_output_path = sink.root().join(artifacts::CONFIG_USED);
 
     // Local-only; a remote destination just overwrites on upload.
     if validated.overwrite && config_output_path.exists() {
@@ -505,7 +469,7 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
             &speclib,
             calib_lib.as_ref(),
             &config,
-            sink.root(),
+            &sink,
             validated.overwrite,
             args.max_qvalue,
             args.no_feature_stats,
@@ -536,15 +500,12 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
                     file_start.elapsed()
                 );
                 successful_files.push(raw_uri.clone());
-                let mut outputs = vec![format!("{sample_dest}/results.parquet")];
+                let mut outputs = vec![format!("{sample_dest}/{}", artifacts::RESULTS_PARQUET)];
                 if !args.no_feature_stats {
+                    outputs.push(format!("{sample_dest}/{}", artifacts::FEATURE_STATS_TSV));
                     outputs.push(format!(
                         "{sample_dest}/{}",
-                        processing::FEATURE_STATS_FILENAME
-                    ));
-                    outputs.push(format!(
-                        "{sample_dest}/{}",
-                        processing::FEATURE_IMPORTANCE_FILENAME
+                        artifacts::FEATURE_IMPORTANCE_TSV
                     ));
                 }
                 run_report.files.push(timsseek::scoring::FileReport {
@@ -577,23 +538,21 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
         }
     }
 
-    // ARTIFACT-LIST (run-level): keep in sync with validate_inputs.
     let finalize_step = TimedStep::begin("Finalize run");
     // Must happen before serialization so the report self-describes where to
     // fetch everything.
     let dest_root = sink.dest_root();
-    run_report.artifacts = vec![
-        format!("{dest_root}/run_report.json"),
-        format!("{dest_root}/config_used.json"),
-    ];
-    let run_report_path = sink.root().join("run_report.json");
+    run_report.artifacts = artifacts::RUN_ARTIFACTS
+        .iter()
+        .map(|artifact| format!("{dest_root}/{artifact}"))
+        .collect();
+    let run_report_path = sink.root().join(artifacts::RUN_REPORT);
     if let Ok(json) = serde_json::to_string_pretty(&run_report) {
         let _ = std::fs::write(&run_report_path, json);
         info!("Wrote run report to {:?}", run_report_path);
     }
 
-    // ARTIFACT-LIST (run-level): keep in sync with validate_inputs.
-    sink.finalize_run(&["run_report.json", "config_used.json"])?;
+    sink.finalize_run(artifacts::RUN_ARTIFACTS)?;
     finalize_step.finish();
 
     info!("Successfully processed {} file(s)", successful_files.len());
