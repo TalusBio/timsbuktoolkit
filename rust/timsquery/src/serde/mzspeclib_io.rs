@@ -42,6 +42,7 @@ use mzannotate::mzdata::params::{
 use mzannotate::mzdata::prelude::PeakCollection;
 use mzannotate::mzspeclib::{
     AnalyteTarget,
+    Attribute,
     AttributeValue,
     EntryType,
     LibraryHeader,
@@ -219,6 +220,15 @@ fn read_counting_degradation(
         // never interns.
         if !decoys.accepts(row.is_decoy) {
             continue;
+        }
+        // Counted past that filter rather than inside the extract, because the
+        // warning divides by the sealed row count and a dropped decoy is in
+        // neither set. An entry the file gave peaks for and the arena got none
+        // of is scored against nothing, which the per-peak counts do not say on
+        // their own: they cannot distinguish a library losing a peak here and
+        // there from one losing whole entries.
+        if row.frags.is_empty() && !spectrum.peaks.is_empty() {
+            degradation.rows_without_fragments += 1;
         }
 
         // Both halves of a pair have to land in one namespace. A decoy names its
@@ -405,13 +415,6 @@ impl SpectrumRow {
                 _ => degradation.ambiguous_peaks += 1,
             }
         }
-        // An entry the file gave peaks for and the arena got none of is scored
-        // against nothing, which the per-peak counts above do not say on their
-        // own: they cannot distinguish a library losing a peak here and there
-        // from one losing whole entries.
-        if frags.is_empty() && !spectrum.peaks.is_empty() {
-            degradation.rows_without_fragments += 1;
-        }
 
         Ok(Self {
             key: spectrum.key,
@@ -576,34 +579,61 @@ fn mobility(spectrum: &Spectrum) -> f32 {
 /// SpectraST's old spelling of shuffle-and-reposition or the current
 /// unnatural-peptidoform one, because membership comes from the `is_a` closure
 /// rather than from the term's name.
+///
+/// One decoy subtype anywhere among the entry's origin types is enough, for the
+/// reason [`origin_types`] gives: a further origin type naming how the masses
+/// were produced does not withdraw the decoy claim.
 fn is_decoy(spectrum: &Spectrum, degradation: &mut Degradation) -> bool {
+    let mut decoy = false;
     for accession in origin_types(spectrum) {
         match subsumes_decoy(accession) {
-            Some(decoy) => return decoy,
+            Some(subsumes) => decoy |= subsumes,
             None => {
                 degradation.unrecognised_origin_types.insert(accession);
             }
         }
     }
-    false
+    decoy
 }
 
 /// The `spectrum origin type` accessions on this entry.
 ///
-/// The term is not repeatable, so more than one is a malformed file rather than
-/// a case to reconcile.
+/// Several of them are several assertions rather than a contradiction to
+/// resolve. mzSpecLib v1.0 §4.1.11 gives the last instance precedence only where
+/// the values differ *and cannot be reconciled*, and it permits an attribute to
+/// be repeated deliberately to encode multiple values. Here they reconcile:
+/// predicted-ness and decoy-ness are orthogonal facts, so an entry naming both
+/// `MS:1003074|predicted spectrum` and `MS:1003195` is asserting both and
+/// neither instance displaces the other. Both callers read the whole set
+/// accordingly -- a decoy subtype anywhere in it makes the entry a decoy, a
+/// calculated-m/z term anywhere in it makes the peak m/z theoretical.
 fn origin_types(spectrum: &Spectrum) -> impl Iterator<Item = u32> + '_ {
     terms_valued_by(spectrum, SPECTRUM_ORIGIN_TYPE)
 }
 
 /// The PSI-MS accessions this entry gives as the value of `accession`.
+///
+/// Both containers a declaration can land in. mzannotate flattens an ungrouped
+/// attribute it recognises into `description.params` but leaves a grouped one it
+/// does not special-case in `attributes`, and mzSpecLib v1.0 §4.1.6 writes the
+/// aggregation type grouped with its replicate counts. Reading one container
+/// would resolve a term for one of its two legal spellings.
 fn terms_valued_by(spectrum: &Spectrum, accession: u32) -> impl Iterator<Item = u32> + '_ {
-    spectrum
+    let ungrouped = spectrum
         .description
         .params
         .iter()
         .filter(move |param| is_ms_term(param, accession))
-        .filter_map(|param| ms_accession(&param.value.to_string()))
+        .map(|param| param.value.to_string());
+    let grouped = spectrum
+        .attributes
+        .iter()
+        .flatten()
+        .filter(move |attribute| is_ms_attribute(attribute, accession))
+        .map(|attribute| attribute.value.to_string());
+    ungrouped
+        .chain(grouped)
+        .filter_map(|value| ms_accession(&value))
 }
 
 /// The accession in a stringified term, `MS:1003195|name`, so only the CURIE
@@ -623,14 +653,20 @@ fn ms_accession(value: &str) -> Option<u32> {
 /// reading one of a term's two parents and not the other would be arbitrary.
 ///
 /// The origin-type slot carries two orthogonal facts, how the masses were
-/// produced and whether the analyte is a decoy, because the vocabulary has no
-/// analyte-level decoy term for a writer to use instead. A decoy declaration
-/// therefore says nothing about mass provenance, and an entry whose own origin
-/// types are all decoy subtypes -- or that declares none -- has left the
-/// question to the library's `Spectrum=all` set. mzSpecLib v1.0 §4.1.4 and
-/// §4.1.11 resolve attribute sets per accession with the later set replacing the
-/// earlier, and §4.1.12 Example 1 shows exactly this override, so the entry is
-/// not contradicting the library when it names a decoy subtype.
+/// produced and whether the analyte is a decoy, because the decoy subtree the
+/// format's own examples use hangs off the spectrum's origin type and
+/// `MS:1002217|decoy peptide` is a peptide-identification attribute rather than
+/// a library-entry one. Mass provenance is not read off that subtree, which does
+/// not determine one: `MS:1003195` is defined as "a decoy spectrum that is
+/// either a real spectrum of an unnatural peptidoform (e.g. a synthetic peptide
+/// that cannot be found in nature), or an artificial spectrum predicted for such
+/// unnatural peptidoform", so the vocabulary itself has the term spanning
+/// measured and predicted. An entry whose own origin types are all decoy
+/// subtypes -- or that declares none, the empty case the `all` below accepts --
+/// has left the question to the library's `Spectrum=all` set. mzSpecLib v1.0
+/// §4.1.4 and §4.1.11 resolve attribute sets per accession with the later set
+/// replacing the earlier, and §4.1.12 Example 1 shows exactly this override, so
+/// the entry is not contradicting the library when it names a decoy subtype.
 ///
 /// Anything else on the origin-type axis is an override meant as one:
 /// `MS:1003073|observed spectrum` on an entry of a predicted library is that
@@ -674,6 +710,19 @@ fn library_declares_theoretical_mz(header: &LibraryHeader) -> bool {
 fn is_ms_term(param: &mzannotate::mzdata::params::Param, accession: u32) -> bool {
     param.controlled_vocabulary == Some(ControlledVocabulary::MS)
         && param.accession == Some(accession)
+}
+
+/// Whether an mzSpecLib attribute is the named PSI-MS term.
+///
+/// An attribute mzannotate left grouped still carries its whole `Curie`, so the
+/// namespace and the accession are compared in one go rather than separately as
+/// [`is_ms_term`] has to.
+fn is_ms_attribute(attribute: &Attribute, accession: u32) -> bool {
+    attribute.name.accession
+        == mzcv::Curie {
+            cv: mzcv::ControlledVocabulary::MS,
+            accession: mzcv::AccessionCode::Numeric(accession),
+        }
 }
 
 /// Which entries compete. msspeculator's project-defined pair id first, then
@@ -1029,6 +1078,86 @@ mod tests {
         )
         .expect("fixture loads");
         assert_eq!(degradation.rows_without_fragments, 0);
+    }
+
+    /// mzSpecLib v1.0 §4.1.6 writes `MS:1003065|spectrum aggregation type`
+    /// grouped with its replicate count, and mzannotate keeps a group it does
+    /// not special-case out of the flattened params. Nothing else in this
+    /// library says how the masses were produced -- there is no `MS:1003072`
+    /// anywhere in it, so no library fallback either -- which leaves the grouped
+    /// declaration as the only thing that can give a bare `b2` a theoretical
+    /// m/z.
+    #[test]
+    fn a_grouped_aggregation_type_declares_an_entry_predicted() {
+        let geom = arena("grouped_predicted_aggregation_type.mzspeclib.txt");
+        assert_eq!(geom.n_rows(), 2);
+        let (target, decoy) = (geom.rows().next().unwrap(), geom.rows().nth(1).unwrap());
+        assert!(!geom.is_decoy(target) && geom.is_decoy(decoy));
+        assert_eq!(geom.frag_labels(target).len(), 2, "the target's two peaks");
+        assert_eq!(geom.frag_labels(decoy).len(), 2, "and the decoy's");
+    }
+
+    /// An entry naming a decoy subtype and `MS:1003074|predicted spectrum` is
+    /// asserting both, which mzSpecLib v1.0 §4.1.11 leaves room for: repeated
+    /// instances whose values reconcile are not a case for last-wins. So it is a
+    /// decoy, and its m/z values are calculated -- not whichever of the two the
+    /// file happened to write first.
+    #[test]
+    fn an_entry_naming_two_origin_types_asserts_both_of_them() {
+        let geom = arena("entry_declares_predicted_and_decoy.mzspeclib.txt");
+        assert_eq!(geom.n_rows(), 2);
+        let (target, both) = (geom.rows().next().unwrap(), geom.rows().nth(1).unwrap());
+        assert!(!geom.is_decoy(target));
+        assert!(
+            geom.is_decoy(both),
+            "a second origin type does not withdraw the decoy claim"
+        );
+        assert_eq!(
+            geom.frag_labels(both).len(),
+            2,
+            "and the decoy claim does not withdraw the predicted one"
+        );
+    }
+
+    /// A shipped decoy that `--decoy-strategy force` drops is not an entry
+    /// scoring against nothing, because it does not score. The count and the row
+    /// total it is reported against have to measure the same entries, or the
+    /// warning asserts a consequence for rows that are not in the arena and can
+    /// exceed its own denominator.
+    ///
+    /// This also pins the library fallback on the library: the `Spectrum=all`
+    /// set here declares its entries observed, so the decoy that overrode the
+    /// origin type with `MS:1003195` has nothing to fall back to and its bare
+    /// annotations reach no theoretical m/z.
+    #[test]
+    fn a_dropped_decoy_is_not_reported_as_scoring_against_nothing() {
+        let path = fixture("shipped_decoy_without_readable_peaks.mzspeclib.txt");
+
+        let (table, degradation) =
+            read_counting_degradation(&path, DecoyPolicy::Never).expect("fixture loads");
+        let TargetTable::Mzpaf { geom, .. } = table else {
+            panic!("mzSpecLib carries ion chemistry");
+        };
+        assert_eq!(geom.n_rows(), 2, "the target and its shipped decoy");
+        assert_eq!(geom.rows().filter(|r| geom.is_decoy(*r)).count(), 1);
+        assert_eq!(
+            geom.n_fragments(),
+            0,
+            "an observed library offers neither entry a theoretical m/z"
+        );
+        assert_eq!(degradation.rows_without_fragments, 2);
+
+        let (table, degradation) =
+            read_counting_degradation(&path, DecoyPolicy::Force).expect("fixture loads");
+        let TargetTable::Mzpaf { geom, .. } = table else {
+            panic!("mzSpecLib carries ion chemistry");
+        };
+        assert_eq!(geom.n_rows(), 1, "the decoy never reached the arena");
+        assert_eq!(
+            degradation.rows_without_fragments, 1,
+            "the target lost its peaks; the dropped decoy lost nothing"
+        );
+        assert!(degradation.rows_without_fragments <= geom.n_rows());
     }
 
     /// The format this project writes, read back by the reader that has to read
