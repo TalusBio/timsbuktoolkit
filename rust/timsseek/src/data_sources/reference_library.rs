@@ -129,6 +129,25 @@ impl<'a> RefQuery<'a> {
     pub fn geom(&self) -> &Query<&'a TargetColumns<IonAnnot>, IonAnnot> {
         &self.geom
     }
+
+    /// Which of the three kinds of row this is.
+    ///
+    /// Both halves matter and neither implies the other. A stored decoy sits in
+    /// the variant-0 slot exactly as a target does, so reading the variant alone
+    /// marks every one of them a target and leaves the FDR estimated from
+    /// nothing. A mass-shift decoy is a derived variant of a row that is itself
+    /// a target, so reading the column alone marks every one of them a target
+    /// too. The two questions are asked here, once, because every caller that
+    /// asks only one of them gets the same answer wrong.
+    fn decoy_marking(&self) -> DecoyMarking {
+        if self.geom.variant() != 0 {
+            DecoyMarking::MassShiftedDecoy
+        } else if self.lib.geom.is_decoy(self.geom.row()) {
+            DecoyMarking::ReversedDecoy
+        } else {
+            DecoyMarking::Target
+        }
+    }
 }
 
 impl<'a> ExpectedIntensity for RefQuery<'a> {
@@ -241,26 +260,17 @@ impl<'a> ScoredIdentity for RefQuery<'a> {
     }
 
     fn is_target(&self) -> bool {
-        // Honor stored decoys uniformly (correct under `Stored`): a row is a
-        // target only when it is not a stored decoy AND is the variant-0 slot.
-        let tgt = self.geom().row();
-        !self.lib.geom.is_decoy(tgt) && self.geom().variant() == 0
+        self.decoy_marking().is_target()
     }
 
     /// `raw` is the modified-sequence blob slice; parsing is deferred to
     /// `Peptide::parse` and gated on the whole-library parse check. The modified
-    /// (not stripped) form is what the `n_mods` feature reads. Lazy decoys are
-    /// mass-shift decoys, so any non-target variant is `MassShiftedDecoy`.
+    /// (not stripped) form is what the `n_mods` feature reads.
     fn materialize_peptide(&self) -> Peptide {
-        let tgt = self.geom.row();
         let coll = &self.lib.geom;
         Peptide {
-            raw: coll.seq_mod(tgt).into(),
-            decoy: if self.geom.variant() == 0 {
-                DecoyMarking::Target
-            } else {
-                DecoyMarking::MassShiftedDecoy
-            },
+            raw: coll.seq_mod(self.geom.row()).into(),
+            decoy: self.decoy_marking(),
             sequence_features: coll.caps.sequence_features == SeqFeatureState::Available,
         }
     }
@@ -926,6 +936,76 @@ mod load_tests {
             geom,
             frag_intens: Some(vec![0.8; frags.len() * sequences.len()]),
         }
+    }
+
+    /// A target and the decoy the library shipped for it, sharing a competition
+    /// group. Sealing with a stored decoy present keeps the arena 1:1, so every
+    /// row is its own variant-0 slot.
+    fn arena_with_a_shipped_decoy() -> TargetTable {
+        use timsquery::models::{
+            Row,
+            TargetCapabilities,
+        };
+
+        let frags = [
+            (IonAnnot::try_from("y1").unwrap(), 300.0),
+            (IonAnnot::try_from("y2").unwrap(), 400.0),
+        ];
+        let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
+        for (sequence, is_decoy) in [("PEPTIDEK", false), ("KEDITPEP", true)] {
+            geom.push_row(Row {
+                precursor_mz: 500.0,
+                charge: 2,
+                rt_seconds: 120.0,
+                mobility: 0.75,
+                frags: &frags,
+                seq_strip: sequence,
+                seq_mod: sequence,
+                is_decoy,
+                decoy_group: Some("pair-1".to_string().into()),
+                ..Default::default()
+            });
+        }
+
+        let geom = geom
+            .seal(crate::models::DecoyPolicy::IfMissing)
+            .expect("fixture ids are usable");
+        TargetTable::Mzpaf {
+            geom,
+            frag_intens: Some(vec![0.8; frags.len() * 2]),
+        }
+    }
+
+    /// The marking scoring reads has to come from the arena's decoy column, not
+    /// from the mass-shift variant index. A library that ships its own decoys is
+    /// 1:1, so every row sits in variant 0 -- reading the variant alone calls all
+    /// of them targets, and an FDR with no decoys to estimate from reports every
+    /// candidate as passing.
+    #[test]
+    fn a_shipped_decoy_reaches_scoring_marked_as_one() {
+        let lib = ReferenceLibrary::from_sealed_arena(arena_with_a_shipped_decoy())
+            .expect("fixture narrows");
+        assert_eq!(lib.geom.expanded_len(), 2, "no mass-shift variants");
+
+        let marks: Vec<_> = lib
+            .geom
+            .flats()
+            .map(|flat| {
+                let query = RefQuery::new(&lib, flat);
+                (
+                    query.materialize_peptide().decoy,
+                    ScoredIdentity::is_target(&query),
+                )
+            })
+            .collect();
+
+        assert_eq!(
+            marks,
+            vec![
+                (DecoyMarking::Target, true),
+                (DecoyMarking::ReversedDecoy, false),
+            ]
+        );
     }
 
     /// The OFF branch of the library-scale parse gate, and the only test of it.
