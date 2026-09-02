@@ -15,10 +15,15 @@ use std::path::{
 
 use msspeculator_inference::{
     BuiltinModel,
+    Difference,
+    LibraryCheck,
     LibraryOptions,
+    LibraryProvenance,
     ModelSource,
     ProgressFn,
     StreamOptions,
+    check_against,
+    check_library,
     stream_library,
     write_library,
 };
@@ -308,6 +313,66 @@ fn stream_options<'a>(
     }
 }
 
+fn differences_text(differences: &[Difference]) -> String {
+    differences
+        .iter()
+        .map(|difference| format!("\n  {difference}"))
+        .collect::<Vec<_>>()
+        .join("")
+}
+
+/// Compare a file-backed search library with the prediction settings supplied
+/// alongside it. Advisory: a difference is visible, but never prevents search.
+fn search_library_check(
+    library: &Path,
+    prediction: &ResolvedPrediction,
+) -> Result<LibraryCheck, CliError> {
+    let model = parse_model_source(&prediction.model)?;
+    let no_progress = |_progress| {};
+    let options = stream_options(prediction, model, &no_progress);
+    check_library(library, None, &options).map_err(|error| CliError::Config {
+        source: format!("checking how {} was built: {error:#}", library.display()),
+    })
+}
+
+pub(crate) fn check_search_library(
+    library: &Path,
+    display_name: &str,
+    prediction: &ResolvedPrediction,
+) -> Result<(), CliError> {
+    match search_library_check(library, prediction)? {
+        LibraryCheck::Same => {
+            info!("Library {display_name} was built with the supplied prediction settings")
+        }
+        LibraryCheck::Different(differences) => tracing::warn!(
+            "Library {display_name} was built with different prediction settings:{}",
+            differences_text(&differences),
+        ),
+        LibraryCheck::Unknown => {
+            info!("Library {display_name} carries no comparable msspeculator provenance")
+        }
+    }
+    Ok(())
+}
+
+fn report_rebuild_check(library: &Path, sidecar: Option<&Path>, provenance: &LibraryProvenance) {
+    match check_against(library, sidecar, &provenance.settings) {
+        LibraryCheck::Same => info!(
+            "Rebuilding {}; it was built with these settings",
+            library.display()
+        ),
+        LibraryCheck::Different(differences) => tracing::warn!(
+            "Overwriting {}, which was built with different settings:{}",
+            library.display(),
+            differences_text(&differences),
+        ),
+        LibraryCheck::Unknown => tracing::warn!(
+            "Overwriting {}, which carries no comparable msspeculator provenance",
+            library.display()
+        ),
+    }
+}
+
 /// Predict a library straight into the arena a search scores, writing nothing.
 ///
 /// The same settings, the same [`StreamOptions`] and the same progress rendering
@@ -368,10 +433,21 @@ pub fn run(resolved: &ResolvedBuild) -> Result<(), CliError> {
             .chain(pending_config.iter().cloned())
             .collect(),
     );
+    let report_rebuild = |provenance: &LibraryProvenance| {
+        if resolved.out.exists()
+            || resolved
+                .config_out
+                .as_ref()
+                .is_some_and(|path| path.exists())
+        {
+            report_rebuild_check(&resolved.out, resolved.config_out.as_deref(), provenance);
+        }
+    };
     let stats = write_library(&LibraryOptions {
         out: &pending_out,
         config_out: pending_config.as_deref(),
         stream: stream_options(&resolved.prediction, model, &report),
+        before_writing: Some(&report_rebuild),
     })
     .map_err(|e| CliError::LibraryBuild {
         source: format!("{}: {e:#}", resolved.out.display()),
@@ -616,6 +692,36 @@ mod tests {
             .expect("builtin model predicts directly into the arena");
         assert!(!predicted.library.is_empty());
         assert!(predicted.provenance.is_object());
+
+        let dir = tempfile::tempdir().unwrap();
+        let library = dir.path().join("library.tsv");
+        std::fs::write(&library, "PrecursorMz\tProductMz\n100.0\t200.0\n").unwrap();
+        std::fs::write(
+            default_sidecar(&library),
+            serde_json::to_vec(&predicted.provenance).unwrap(),
+        )
+        .unwrap();
+        assert_eq!(
+            search_library_check(&library, &prediction).unwrap(),
+            LibraryCheck::Same
+        );
+
+        let changed = ResolvedPrediction {
+            max_fragments: Some(3),
+            ..prediction
+        };
+        let LibraryCheck::Different(differences) =
+            search_library_check(&library, &changed).unwrap()
+        else {
+            panic!("changed prediction settings must be reported");
+        };
+        assert_eq!(
+            differences
+                .iter()
+                .map(|difference| difference.key.as_str())
+                .collect::<Vec<_>>(),
+            ["fragments.max_fragments"]
+        );
     }
 
     /// A flag has to be able to turn a configured setting *off*, which a bare

@@ -212,9 +212,9 @@ pub struct SearchArgs {
     /// Sequence database for this run, overriding `[sequences]` in the
     /// configuration file. Local paths only.
     ///
-    /// Independent of `--speclib-uri`: a library can be predicted from a FASTA
-    /// and neither input stands in for the other, so naming one says nothing
-    /// about the other.
+    /// Independent of `--speclib-uri`: without a library this predicts one;
+    /// with a library it compares the recorded build provenance against the
+    /// requested prediction settings and warns on differences.
     #[arg(long, value_name = "PATH")]
     pub fasta: Option<PathBuf>,
 

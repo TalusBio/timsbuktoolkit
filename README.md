@@ -92,7 +92,11 @@ cargo run --release --bin timsseek -- \
 The `[library]` section of the configuration file supplies the prediction
 settings, exactly as it does for `build-library`, and the model and FASTA digests
 land in `config_used.json` so a run with no library file is still traceable.
-Naming both a library and a FASTA loads the library.
+Naming both a library and a FASTA loads the library and compares its recorded
+build settings with the requested prediction settings. Differences are warned
+about but do not prevent the search. Remote libraries stage their conventional
+`.config.json` sidecar for this comparison when the format has no provenance
+header.
 
 To predict the library on the first run and read it on every run after, add
 `--build-if-missing`. It writes the library to the path `--speclib-uri` names
@@ -116,6 +120,9 @@ is not there is an error rather than a prediction: a mistyped path should not
 cost minutes of prediction. Libraries are written through the filesystem, so a
 remote `--speclib-uri` or output directory that would have to be built into is
 rejected by name.
+
+An overwrite compares the existing library's provenance with the settings about
+to replace it and reports whether they match before publishing the new artifact.
 
 ## S3 inputs
 
@@ -174,5 +181,4 @@ Some of the forms of contributing to the current state of the project could be:
 - Code
     - We welcome pull requests! We would really appreciate if an issue is open
       to discuss potential changes before they are merged.
-
 

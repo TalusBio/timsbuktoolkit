@@ -1,7 +1,10 @@
 //! The search command: validate, stage, and drive the pipeline once per raw
 //! input, writing one subdirectory per sample plus the run-level artifacts.
 
-use tims_stage::is_remote_uri;
+use tims_stage::{
+    expand_local_uri,
+    is_remote_uri,
+};
 use timsquery::utils::TupleRange;
 use timsquery::{
     IndexedTimstofPeaks,
@@ -335,16 +338,17 @@ impl SearchRun<'_> {
 /// Remote URIs are streamed (not buffered -- speclibs can be multi-GB) to a
 /// tempfile keeping the original basename, because `ReferenceLibrary::from_file`
 /// sniffs the format by extension.
+struct LoadedSpeclib {
+    library: timsseek::data_sources::reference_library::ReferenceLibrary,
+    local_path: std::path::PathBuf,
+    tempdir: Option<tempfile::TempDir>,
+}
+
 fn speclib_from_uri(
     uri: &str,
     policy: timsseek::LoadPolicy,
-) -> Result<
-    (
-        timsseek::data_sources::reference_library::ReferenceLibrary,
-        Option<tempfile::TempDir>,
-    ),
-    errors::CliError,
-> {
+    stage_provenance: bool,
+) -> Result<LoadedSpeclib, errors::CliError> {
     if !is_remote_uri(uri) {
         let path = std::path::Path::new(uri);
         let lib =
@@ -352,7 +356,11 @@ fn speclib_from_uri(
                 .map_err(|e| errors::CliError::Config {
                     source: format!("Failed to load speclib {uri}: {:?}", e),
                 })?;
-        return Ok((lib, None));
+        return Ok(LoadedSpeclib {
+            library: lib,
+            local_path: path.to_path_buf(),
+            tempdir: None,
+        });
     }
 
     let trimmed = uri.trim_end_matches('/');
@@ -373,12 +381,28 @@ fn speclib_from_uri(
         source: format!("download speclib {uri}: {e}"),
         path: Some(uri.to_string()),
     })?;
+    if stage_provenance {
+        let sidecar_uri = format!("{uri}.config.json");
+        if crate::output_sink::probe_uri_exists(&sidecar_uri)? {
+            let local_sidecar = build_library::default_sidecar(&local);
+            tims_stage::download_to_file(&sidecar_uri, &local_sidecar).map_err(|e| {
+                errors::CliError::Io {
+                    source: format!("download library provenance {sidecar_uri}: {e}"),
+                    path: Some(sidecar_uri),
+                }
+            })?;
+        }
+    }
     let lib =
         timsseek::data_sources::reference_library::ReferenceLibrary::from_file(&local, policy)
             .map_err(|e| errors::CliError::Config {
                 source: format!("Failed to load speclib {uri}: {:?}", e),
             })?;
-    Ok((lib, Some(td)))
+    Ok(LoadedSpeclib {
+        library: lib,
+        local_path: local,
+        tempdir: Some(td),
+    })
 }
 
 pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliError> {
@@ -464,8 +488,15 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
     let (speclib, _speclib_td, provenance) = match &validated.library {
         LibrarySource::File(uri) => {
             info!("Building database from speclib URI {uri}");
-            let (lib, td) = speclib_from_uri(uri, load_policy)?;
-            (lib, td, None)
+            let loaded = speclib_from_uri(uri, load_policy, config.sequences.is_some())?;
+            if let Some(sequences) = config.sequences.as_ref() {
+                let fasta =
+                    std::path::PathBuf::from(expand_local_uri(&sequences.fasta.to_string_lossy()));
+                let prediction =
+                    build_library::resolve_search_prediction(fasta, config.library.as_ref());
+                build_library::check_search_library(&loaded.local_path, uri, &prediction)?;
+            }
+            (loaded.library, loaded.tempdir, None)
         }
         LibrarySource::Fasta(fasta) => {
             let prediction =
@@ -483,8 +514,8 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
                 config.library.as_ref(),
                 validated.overwrite,
             ))?;
-            let (lib, td) = speclib_from_uri(&out.to_string_lossy(), load_policy)?;
-            (lib, td, None)
+            let loaded = speclib_from_uri(&out.to_string_lossy(), load_policy, false)?;
+            (loaded.library, loaded.tempdir, None)
         }
     };
     let load_speclib_ms = step
@@ -500,16 +531,16 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
         Some(uri) => {
             let step = TimedStep::begin("Loading calib lib");
             info!("Loading calibration library from {}", uri);
-            let (lib, td) = speclib_from_uri(uri, load_policy)?;
+            let loaded = speclib_from_uri(uri, load_policy, false)?;
             let ms = step
                 .finish_with(format_args!(
                     "{} entries, {:.1} frags/entry",
-                    lib.len(),
-                    lib.avg_fragments()
+                    loaded.library.len(),
+                    loaded.library.avg_fragments()
                 ))
                 .as_millis() as u64;
             alloc_track::snap!("Loading calib lib");
-            (Some(lib), td, ms)
+            (Some(loaded.library), loaded.tempdir, ms)
         }
         None => (None, None, 0),
     };

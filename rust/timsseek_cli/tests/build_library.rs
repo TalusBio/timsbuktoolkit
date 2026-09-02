@@ -38,4 +38,24 @@ fn build_library_writes_a_readable_library_and_sidecar() {
         timsquery::serde::TargetTable::Str { geom } => geom.n_rows(),
     };
     assert!(rows > 0);
+
+    let rebuilt = Command::new(env!("CARGO_BIN_EXE_timsseek"))
+        .args([
+            "build-library",
+            "--fasta",
+            fasta.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+            "--no-decoys",
+            "--no-fixed-mods",
+            "--max-fragments",
+            "3",
+            "--overwrite",
+        ])
+        .output()
+        .unwrap();
+    assert!(rebuilt.status.success());
+    let stderr = String::from_utf8_lossy(&rebuilt.stderr);
+    assert!(stderr.contains("built with different settings"), "{stderr}");
+    assert!(stderr.contains("fragments.max_fragments"), "{stderr}");
 }
