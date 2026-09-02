@@ -9,9 +9,16 @@
 //! Peaks split three ways. A peak whose annotation resolves to one representable
 //! ion is stored at its theoretical m/z; a peak that resolves but cannot be
 //! spelled as an [`IonAnnot`] gets an unknown label at the same theoretical m/z;
-//! a peak that is unannotated, or annotated several ways at once, is skipped.
-//! The third case is skipped rather than stored at its observed m/z, because an
-//! arena mixing observed and theoretical masses is invisible downstream.
+//! a peak annotated several ways at once is skipped, having no one theoretical
+//! mass to be stored at.
+//!
+//! An unannotated peak is the case the caller decides, through
+//! [`UnannotatedPeaks`]: an arena mixing observed and theoretical masses is
+//! invisible downstream, so storing one at its observed m/z is a decision stated
+//! before the read rather than a fallback taken during it. The decision is only
+//! ever reached for a library that annotates nothing, because mzPAF's `?` -- the
+//! writer marking a peak noise -- arrives as the same empty annotation list a
+//! file with no annotation column produces. See [`AnnotationCensus`].
 //!
 //! Finding that theoretical m/z is itself a ladder, because the exports differ
 //! again: the composition when the annotation carries one, the mzPAF mass-error
@@ -64,7 +71,10 @@ use super::library_file::{
 };
 use super::psims_origin_type;
 use crate::chemistry::ontologies;
-use crate::models::capabilities::LoadPolicy;
+use crate::models::capabilities::{
+    LoadPolicy,
+    UnannotatedPeaks,
+};
 use crate::models::{
     Row,
     TargetCapabilities,
@@ -210,12 +220,19 @@ fn read_counting_degradation(
     // the only place it can be read: it is what an entry declaring nothing about
     // its mass provenance falls back to.
     let library_theoretical_mz = library_declares_theoretical_mz(parser.header());
+    let mut census = AnnotationCensus::new(policy.unannotated);
 
     for (index, spectrum) in parser.enumerate() {
         let spectrum = spectrum.map_err(|e| {
             TargetReadingError::SpeclibParse(format!("mzSpecLib spectrum {}: {e}", index + 1))
         })?;
-        let row = SpectrumRow::extract(&spectrum, library_theoretical_mz, &mut degradation)?;
+        let unannotated = census.plan_for(&spectrum)?;
+        let row = SpectrumRow::extract(
+            &spectrum,
+            library_theoretical_mz,
+            unannotated,
+            &mut degradation,
+        )?;
         // Dropped here, so the decoy's peaks are never pushed and its group
         // never interns.
         if !policy.decoys.accepts(row.is_decoy) {
@@ -270,15 +287,87 @@ fn read_counting_degradation(
     ))
 }
 
+/// Whether this library annotates its peaks at all, decided from the first
+/// entry that has any.
+///
+/// The decision is the library's rather than the peak's because the peak cannot
+/// carry it: mzannotate collapses mzPAF's `?` onto the same empty annotation
+/// list a bare peak list produces, so a noise-marked peak and an unannotated one
+/// are one shape here. An entry that annotates something has marked the rest of
+/// its peaks noise; a library that annotates nothing is the library the caller's
+/// [`UnannotatedPeaks`] was stated for.
+///
+/// A leading entry with no peaks decides nothing, or a library whose first entry
+/// happens to declare none would have that entry answer for all the rest.
+struct AnnotationCensus {
+    /// The caller's decision, reached only once the library turns out to
+    /// annotate nothing.
+    policy: UnannotatedPeaks,
+    annotates: Option<bool>,
+}
+
+impl AnnotationCensus {
+    fn new(policy: UnannotatedPeaks) -> Self {
+        Self {
+            policy,
+            annotates: None,
+        }
+    }
+
+    /// What this entry's unannotated peaks get.
+    ///
+    /// [`UnannotatedPeaks::KeepAll`] discards the annotations an entry does
+    /// carry, so it never asks the question and the census stays undecided
+    /// under it.
+    fn plan_for(&mut self, spectrum: &Spectrum) -> Result<UnannotatedPeaks, TargetReadingError> {
+        if self.policy == UnannotatedPeaks::KeepAll {
+            return Ok(UnannotatedPeaks::KeepAll);
+        }
+        let annotates = spectrum
+            .peaks
+            .iter()
+            .any(|peak| !peak.annotations.is_empty());
+        match self.annotates {
+            // Nothing in the corpus does this. It is refused rather than
+            // resolved because the two answers are not reconcilable: the
+            // earlier entries' unannotated peaks were read as the only peaks
+            // the library has, and this entry says they were noise.
+            Some(false) if annotates => {
+                return Err(TargetReadingError::SpeclibParse(format!(
+                    "spectrum {} ({}) carries an annotated peak, in a library whose earlier \
+                     entries annotate none; its unannotated peaks have already been read as \
+                     the only peaks it has",
+                    spectrum.key,
+                    source_id(spectrum),
+                )));
+            }
+            None if !spectrum.peaks.is_empty() => self.annotates = Some(annotates),
+            _ => {}
+        }
+        if self.annotates == Some(true) {
+            // An annotated peak anywhere in the library makes an unannotated
+            // one mzPAF's `?`, which is the writer calling it noise.
+            return Ok(UnannotatedPeaks::Skip);
+        }
+        Ok(self.policy)
+    }
+}
+
 /// What a library lost on the way into the arena, counted rather than logged
 /// per row: a library with a million unannotated peaks should produce one line,
 /// not a million.
 #[derive(Default)]
 struct Degradation {
+    /// Every peak the file declared, so the peak-level counts below have a
+    /// denominator the way the row-level ones have the sealed row count.
+    total_peaks: usize,
     unannotated_peaks: usize,
     ambiguous_peaks: usize,
     unrepresentable_labels: usize,
     peaks_without_theoretical_mz: usize,
+    /// Peaks stored under a placeholder label at the m/z the file measured,
+    /// which is the one way an observed mass reaches the arena.
+    peaks_kept_at_observed_mz: usize,
     rows_without_sequence: usize,
     rows_without_fragments: usize,
     // No count of entries missing a retention time. Zero is an ordinary value
@@ -309,6 +398,26 @@ impl Degradation {
             warn!(
                 "mzSpecLib: {} peak(s) have neither a composition nor a mass-error suffix and were skipped",
                 self.peaks_without_theoretical_mz
+            );
+        }
+        // Both reasons land on a `?N` label and are indistinguishable
+        // downstream, so the split is stated here or nowhere: one is a peak at
+        // its theoretical m/z whose ion this build cannot spell, the other a
+        // peak at the m/z the file measured.
+        let unknown_labels = self.unrepresentable_labels + self.peaks_kept_at_observed_mz;
+        if unknown_labels > 0 {
+            warn!(
+                "mzSpecLib: {unknown_labels} of {} peak(s) reached the arena under an unknown \
+                 (`?N`) label -- {} unannotated, {} carrying an ion this build cannot spell",
+                self.total_peaks, self.peaks_kept_at_observed_mz, self.unrepresentable_labels,
+            );
+        }
+        if self.peaks_kept_at_observed_mz > 0 {
+            warn!(
+                "mzSpecLib: {} of {} peak(s) are stored at the m/z the file measured rather than \
+                 a theoretical one; calibration fits its m/z offsets assuming a library mass is \
+                 theoretical, so for these it fits the library's own error along with the run's",
+                self.peaks_kept_at_observed_mz, self.total_peaks,
             );
         }
         if self.rows_without_sequence > 0 {
@@ -358,6 +467,7 @@ impl SpectrumRow {
     fn extract(
         spectrum: &Spectrum,
         library_declares_theoretical_mz: bool,
+        unannotated: UnannotatedPeaks,
         degradation: &mut Degradation,
     ) -> Result<Self, TargetReadingError> {
         reject_unresolved_attribute_sets(spectrum)?;
@@ -381,13 +491,37 @@ impl SpectrumRow {
         let mut counter = UnknownIonCounter::default();
         let mut frags = Vec::with_capacity(spectrum.peaks.len());
         let mut intensities = Vec::with_capacity(spectrum.peaks.len());
+        degradation.total_peaks += spectrum.peaks.len();
         for peak in spectrum.peaks.iter() {
             let observed = peak.mz.value;
-            match peak.annotations.as_slice() {
-                [] => {
-                    degradation.unannotated_peaks += 1;
-                    continue;
-                }
+            // `KeepAll` is uniform by construction: it drops the annotations an
+            // entry does carry rather than storing some of its peaks at a
+            // theoretical m/z and the rest at a measured one.
+            let annotations: &[Annotation] = if unannotated == UnannotatedPeaks::KeepAll {
+                &[]
+            } else {
+                peak.annotations.as_slice()
+            };
+            match annotations {
+                [] => match unannotated {
+                    UnannotatedPeaks::Skip => degradation.unannotated_peaks += 1,
+                    UnannotatedPeaks::Fail => {
+                        return Err(TargetReadingError::SpeclibParse(format!(
+                            "spectrum {} ({}) has an unannotated peak at m/z {observed} and this \
+                             library annotates none, so nothing in it can be given a theoretical \
+                             mass",
+                            spectrum.key,
+                            source_id(spectrum),
+                        )));
+                    }
+                    UnannotatedPeaks::Keep | UnannotatedPeaks::KeepAll => {
+                        degradation.peaks_kept_at_observed_mz += 1;
+                        // Charge 1: the charge would have come from the
+                        // annotation, and this peak has none to read it off.
+                        frags.push((mint_unknown(&mut counter, 1)?, observed));
+                        intensities.push(peak.intensity);
+                    }
+                },
                 [annotation] => {
                     let Some(mz) = theoretical_mz(annotation, observed, peak_mz_is_theoretical)
                     else {
@@ -398,20 +532,14 @@ impl SpectrumRow {
                         Some(label) => label,
                         None => {
                             degradation.unrepresentable_labels += 1;
-                            counter
-                                .next_unknown(annotation.charge.value.max(1) as i8)
-                                .map_err(|e| {
-                                    TargetReadingError::SpeclibParse(format!(
-                                        "ran out of unknown-ion labels: {e}"
-                                    ))
-                                })?
+                            mint_unknown(&mut counter, annotation.charge.value.max(1) as i8)?
                         }
                     };
                     frags.push((label, mz));
                     intensities.push(peak.intensity);
                 }
                 // Several identities for one peak: no single theoretical mass
-                // exists, so there is nothing honest to store.
+                // exists, so there is nothing to store.
                 _ => degradation.ambiguous_peaks += 1,
             }
         }
@@ -776,6 +904,19 @@ fn theoretical_mz(
     peak_mz_is_theoretical.then_some(observed)
 }
 
+/// The next `?N` label for this entry.
+///
+/// One counter per entry, so `N` numbers the unknowns within a spectrum rather
+/// than within the library, and there are 255 of them.
+fn mint_unknown(
+    counter: &mut UnknownIonCounter,
+    charge: i8,
+) -> Result<IonAnnot, TargetReadingError> {
+    counter.next_unknown(charge).map_err(|e| {
+        TargetReadingError::SpeclibParse(format!("ran out of unknown-ion labels: {e}"))
+    })
+}
+
 /// Map an annotation onto the packed label, or `None` when this build cannot
 /// spell it.
 ///
@@ -866,6 +1007,14 @@ mod tests {
         }
     }
 
+    /// The other half of the policy, alone.
+    fn deciding_unannotated(unannotated: UnannotatedPeaks) -> LoadPolicy {
+        LoadPolicy {
+            unannotated,
+            ..Default::default()
+        }
+    }
+
     /// Read through the public funnel, so anything `seal` drops fails here the
     /// way it would for a caller.
     fn arena(name: &str) -> TargetColumns<IonAnnot> {
@@ -875,29 +1024,150 @@ mod tests {
         }
     }
 
-    /// Five targets and five decoys, where the only thing marking a decoy is
-    /// `MS:1003212|library attribute set name=DECOY` pointing at a header set
-    /// that carries the origin type. Before the upstream attribute-set fix this
-    /// file read as ten targets, so the count is the assertion that matters.
     /// A library of small molecules is still a library to this reader: the rows
     /// arrive, and everything peptide-shaped about them is absent rather than
-    /// wrong. Unannotated peaks are skipped, so the row keeps no fragments, and
-    /// an analyte identified by `MS:1000866|molecular formula` yields no
-    /// sequence. Whether that is searchable is not the reader's call to make --
-    /// `ReferenceLibrary` is what refuses it.
+    /// wrong. No peak in it carries an annotation, so under the default every
+    /// one is kept at the m/z the file measured under a `?N` label, and an
+    /// analyte identified by `MS:1000866|molecular formula` yields no sequence.
+    ///
+    /// The five m/z values, labels and intensities are the fixture's own,
+    /// unaltered: an observed m/z reaching the arena unchanged is the whole
+    /// point of keeping the peak.
     #[test]
-    fn a_library_with_no_annotated_peaks_loads_with_no_fragments() {
+    fn a_library_that_annotates_nothing_keeps_its_peaks_at_the_observed_mz() {
         let geom = arena("small_molecule.mzspeclib.txt");
         assert_eq!(geom.n_rows(), 1);
-        assert_eq!(geom.n_fragments(), 0, "no peak carried an annotation");
 
         let row = geom.rows().next().expect("one row");
         assert_eq!(geom.output_id(row).to_string(), "JWH-250-5OH");
         assert_eq!(geom.seq_strip(row), "");
         assert_eq!(geom.seq_mod(row), "");
         assert!(!geom.is_decoy(row), "no origin type is not a decoy claim");
+
+        let labels: Vec<String> = geom
+            .frag_labels(row)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(labels, ["?1", "?2", "?3", "?4", "?5"]);
+        for label in geom.frag_labels(row) {
+            assert_eq!(
+                label.get_charge(),
+                1,
+                "an unannotated peak has no charge to read off"
+            );
+        }
+        assert_eq!(
+            geom.frag_mzs(row),
+            [51.0236, 52.3338, 63.9969, 65.0390, 121.0649]
+        );
+
+        let TargetTable::Mzpaf { frag_intens, .. } = read_mzspeclib_library_file(
+            &fixture("small_molecule.mzspeclib.txt"),
+            LoadPolicy::default(),
+        )
+        .expect("fixture loads") else {
+            panic!("mzSpecLib carries ion chemistry");
+        };
+        // The sidecar is `f32`, so the fixture's own digits are narrowed rather
+        // than rewritten to what an `f32` happens to hold.
+        let declared: [f64; 5] = [41921.14, 18399.55, 22028.22, 263790.31, 80814008.00];
+        assert_eq!(
+            frag_intens.expect("mzSpecLib fills the sidecar"),
+            declared.map(|i| i as f32)
+        );
     }
 
+    /// `Skip` is the caller saying an arena of observed masses is not what they
+    /// want, and it leaves this library with nothing in it. timsseek's
+    /// `a_library_with_no_annotated_fragments_is_refused` is what turns that
+    /// into a refusal; here it is only the count.
+    #[test]
+    fn skipping_unannotated_peaks_leaves_that_library_no_fragments() {
+        let TargetTable::Mzpaf { geom, .. } = read_mzspeclib_library_file(
+            &fixture("small_molecule.mzspeclib.txt"),
+            deciding_unannotated(UnannotatedPeaks::Skip),
+        )
+        .expect("fixture loads") else {
+            panic!("mzSpecLib carries ion chemistry");
+        };
+        assert_eq!(geom.n_rows(), 1, "the row arrives either way");
+        assert_eq!(geom.n_fragments(), 0);
+    }
+
+    /// `Fail` is for a caller who would rather hear about it than search a
+    /// library of observed masses, so the refusal has to say which entry it
+    /// found one in.
+    #[test]
+    fn failing_on_an_unannotated_peak_names_the_entry_it_was_in() {
+        let Err(err) = read_mzspeclib_library_file(
+            &fixture("small_molecule.mzspeclib.txt"),
+            deciding_unannotated(UnannotatedPeaks::Fail),
+        ) else {
+            panic!("a library of unannotated peaks must not load under Fail");
+        };
+        let msg = format!("{err:?}");
+        assert!(msg.contains("JWH-250-5OH"), "names the entry: {msg}");
+    }
+
+    /// The mixed library the specification itself ships: 820 of its 1242 peaks
+    /// are annotated and the other 422 are mzPAF `?`. Mixing is what a
+    /// consensus library looks like, so the policy must not reach it -- the
+    /// annotated peaks have already said the `?` ones are noise, and every
+    /// policy but `KeepAll` has to leave the arena exactly as `Skip` does.
+    #[test]
+    fn a_library_that_annotates_anything_reads_the_same_under_every_policy() {
+        let read = |unannotated| {
+            let TargetTable::Mzpaf { geom, .. } = read_mzspeclib_library_file(
+                &fixture("target_decoy_attribute_set.mzspeclib.txt"),
+                deciding_unannotated(unannotated),
+            )
+            .expect("fixture loads") else {
+                panic!("mzSpecLib carries ion chemistry");
+            };
+            (geom.n_rows(), geom.n_fragments())
+        };
+        for unannotated in [
+            UnannotatedPeaks::Skip,
+            UnannotatedPeaks::Fail,
+            UnannotatedPeaks::Keep,
+        ] {
+            assert_eq!(read(unannotated), (10, 736), "under {unannotated:?}");
+        }
+    }
+
+    /// The library-level decision waits for an entry that has peaks. This
+    /// library's first entry declares none, and its second annotates both of
+    /// its own: an entry with nothing to say deciding for the library would
+    /// make the second entry a contradiction and refuse the file.
+    #[test]
+    fn an_entry_with_no_peaks_decides_nothing_about_the_library() {
+        let geom = arena("first_entry_declares_no_peaks.mzspeclib.txt");
+        assert_eq!(geom.n_rows(), 2);
+        let (empty, annotated) = (geom.rows().next().unwrap(), geom.rows().nth(1).unwrap());
+        assert_eq!(geom.frag_labels(empty).len(), 0, "it declared no peaks");
+        assert_eq!(geom.frag_labels(annotated).len(), 2);
+    }
+
+    /// Nothing in the corpus mixes the two entry-wise, and the reader would
+    /// have read one library two ways if it did: the first entry's peaks stored
+    /// as the only peaks it has, the second's marked noise and dropped.
+    #[test]
+    fn an_annotated_entry_after_an_unannotated_one_is_refused() {
+        let Err(err) = read_mzspeclib_library_file(
+            &fixture("entry_annotates_after_one_that_does_not.mzspeclib.txt"),
+            LoadPolicy::default(),
+        ) else {
+            panic!("a library that annotates only some of its entries must not load");
+        };
+        let msg = format!("{err:?}");
+        assert!(msg.contains("SAMPLERK/2"), "names the entry: {msg}");
+    }
+
+    /// Five targets and five decoys, where the only thing marking a decoy is
+    /// `MS:1003212|library attribute set name=DECOY` pointing at a header set
+    /// that carries the origin type. Before the upstream attribute-set fix this
+    /// file read as ten targets, so the count is the assertion that matters.
     #[test]
     fn decoys_declared_only_through_an_attribute_set_are_decoys() {
         let geom = arena("target_decoy_attribute_set.mzspeclib.txt");

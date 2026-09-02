@@ -135,15 +135,25 @@ impl std::str::FromStr for DecoyPolicy {
 /// at the m/z its annotation implies. Nothing downstream can tell the two apart
 /// once they are in the arena, so which of them a library is made of is the
 /// caller's decision rather than a fallback the reader picks.
+///
+/// Asked only of a library that annotates nothing at all, with
+/// [`KeepAll`](Self::KeepAll) the exception that asks nothing. mzPAF spells
+/// "this peak is noise" as `?`, and a `?` peak reaches this reader as the same
+/// empty annotation list a file with no annotation column produces, so the two
+/// cannot be told apart peak by peak. A library that annotates anything has
+/// therefore already said what its unannotated peaks are, and there is nothing
+/// left for a caller to decide about them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum UnannotatedPeaks {
     /// Drop it.
-    #[default]
     Skip,
     /// Refuse the library at the first one.
     Fail,
-    /// Keep it, under a placeholder label at its observed m/z.
+    /// Keep it, under a placeholder label at its observed m/z. The default,
+    /// because [`Skip`](Self::Skip) reduces a library that annotates nothing to
+    /// rows with no fragments, which score against nothing.
+    #[default]
     Keep,
     /// Keep every peak that way, whether or not it could be annotated.
     KeepAll,

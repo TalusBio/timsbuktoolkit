@@ -151,6 +151,14 @@ Proceeding with a capability absent rather than failing -- skipping FDR when the
 are no decoys, skipping sequence-dependent scores when sequences are unavailable.
 The gate is per-score, not per-run; only some scores need sequences.
 
+Degrading is not the same as substituting. A capability that is absent can be
+skipped; a number that is absent cannot be replaced by a different number
+silently. An unannotated peak has no theoretical m/z, and storing it at the m/z
+the file measured makes an arena nothing downstream can tell from a theoretical
+one -- calibration in particular fits its m/z offsets assuming a library mass is
+theoretical. So that one is the caller's decision (`LoadPolicy.unannotated`),
+stated before the read, rather than a fallback a reader picks.
+
 ### External contracts
 
 **Contract**:

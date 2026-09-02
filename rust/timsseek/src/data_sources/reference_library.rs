@@ -103,8 +103,8 @@ impl ReferenceLibrary {
                 // intensity, so it would extract nothing for every row and
                 // report zero results without ever failing. The likely cause is
                 // a file whose peaks carry no annotations at all -- a
-                // small-molecule library, say -- since a peak this reader cannot
-                // annotate is skipped rather than stored at its observed m/z.
+                // small-molecule library, say -- read under
+                // `UnannotatedPeaks::Skip`, which drops every one of them.
                 if geom.n_rows() > 0 && geom.n_fragments() == 0 {
                     return Err(TargetReadingError::UnsupportedFormat {
                         message: format!(
@@ -1359,7 +1359,11 @@ mod load_tests {
     /// A library nothing can be scored against is refused at load rather than
     /// searched to zero results. The mzSpecLib specification's own small-molecule
     /// example is the shape that gets here: its peaks carry no annotations, so
-    /// every one is skipped and the rows arrive with no fragments at all.
+    /// `UnannotatedPeaks::Skip` drops every one and the rows arrive with no
+    /// fragments at all.
+    ///
+    /// `Skip` is stated rather than left to the default, because it is the only
+    /// policy that produces this arena; see the sibling below.
     ///
     /// Distinct from the missing-sidecar rejection below, which is a library that
     /// has fragments and no intensities for them.
@@ -1367,7 +1371,10 @@ mod load_tests {
     fn a_library_with_no_annotated_fragments_is_refused() {
         let err = ReferenceLibrary::from_file(
             &timsquery_fixture("mzspeclib_files/small_molecule.mzspeclib.txt"),
-            deciding_decoys(crate::models::DecoyPolicy::IfMissing),
+            crate::models::LoadPolicy {
+                decoys: crate::models::DecoyPolicy::IfMissing,
+                unannotated: crate::models::UnannotatedPeaks::Skip,
+            },
         )
         .expect_err("a library with nothing to score against is not searchable");
 
@@ -1377,6 +1384,29 @@ mod load_tests {
         assert!(
             message.contains("not one annotated fragment"),
             "the refusal has to say what is missing: {message}"
+        );
+    }
+
+    /// The same library under the default policy, which keeps an unannotated
+    /// peak at the m/z the file measured: the arena has fragments, so the guard
+    /// above has nothing to refuse and the library is searchable.
+    ///
+    /// Five peaks, one row, and no sequence -- a small molecule has none, so the
+    /// parse gate closes over the sequence-derived scores and leaves the rest.
+    #[test]
+    fn the_default_policy_makes_that_same_library_searchable() {
+        let lib = ReferenceLibrary::from_file(
+            &timsquery_fixture("mzspeclib_files/small_molecule.mzspeclib.txt"),
+            crate::models::LoadPolicy::default(),
+        )
+        .expect("a library whose peaks were kept has something to score against");
+
+        assert_eq!(lib.geom.n_rows(), 1);
+        assert_eq!(lib.geom.n_fragments(), 5);
+        assert_eq!(lib.frag_intens.len(), 5, "the sidecar stays parallel");
+        assert!(
+            !lib.parsable_sequences(),
+            "a small molecule has no sequence"
         );
     }
 
