@@ -902,12 +902,55 @@ mod load_tests {
         );
     }
 
-    /// An arena assembled by hand, one row per sequence, two fragments each.
+    /// One row of a hand-built arena, in the terms a test states it: a sequence,
+    /// whether the library shipped it as a decoy, and which competition group it
+    /// declares.
+    ///
+    /// Written as `RowSpec::target(..)` / `RowSpec::decoy(..)` so the decoy side
+    /// of a fixture is legible at the call site rather than being a positional
+    /// `true`.
+    #[derive(Clone, Copy)]
+    struct RowSpec {
+        sequence: &'static str,
+        is_decoy: bool,
+        /// `None` leaves the row undeclared, which `decoy_group_code` reads as a
+        /// group of one.
+        group: Option<&'static str>,
+    }
+
+    impl RowSpec {
+        fn target(sequence: &'static str) -> Self {
+            Self {
+                sequence,
+                is_decoy: false,
+                group: None,
+            }
+        }
+
+        fn decoy(sequence: &'static str) -> Self {
+            Self {
+                is_decoy: true,
+                ..Self::target(sequence)
+            }
+        }
+
+        fn in_group(self, group: &'static str) -> Self {
+            Self {
+                group: Some(group),
+                ..self
+            }
+        }
+    }
+
+    /// An arena assembled by hand, one row per spec, two fragments each, sealed
+    /// under `policy`.
     ///
     /// This is the shape a caller outside timsseek can build for itself --
     /// `TargetTable`'s variants and fields are public -- so it is what the seam
-    /// has to finalize.
-    fn hand_assembled_arena(sequences: &[&str]) -> TargetTable {
+    /// has to finalize. The policy is a parameter because seal resolves it
+    /// against the rows: the same specs under two policies are two different
+    /// libraries, which is most of what there is to test here.
+    fn hand_assembled_arena(policy: crate::models::DecoyPolicy, rows: &[RowSpec]) -> TargetTable {
         use timsquery::models::{
             Row,
             TargetCapabilities,
@@ -918,95 +961,307 @@ mod load_tests {
             (IonAnnot::try_from("y2").unwrap(), 400.0),
         ];
         let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
-        for (i, sequence) in sequences.iter().enumerate() {
+        for (i, spec) in rows.iter().enumerate() {
             geom.push_row(Row {
                 precursor_mz: 500.0 + 100.0 * i as f64,
                 charge: 2,
                 rt_seconds: 120.0,
                 mobility: 0.75,
                 frags: &frags,
-                seq_strip: sequence,
-                seq_mod: sequence,
+                seq_strip: spec.sequence,
+                seq_mod: spec.sequence,
+                is_decoy: spec.is_decoy,
+                decoy_group: spec.group.map(Into::into),
                 ..Default::default()
             });
         }
 
-        let geom = geom
-            .seal(crate::models::DecoyPolicy::default())
-            .expect("fixture ids are usable");
+        let geom = geom.seal(policy).expect("fixture ids are usable");
         TargetTable::Mzpaf {
             geom,
-            frag_intens: Some(vec![0.8; frags.len() * sequences.len()]),
+            frag_intens: Some(vec![0.8; frags.len() * rows.len()]),
         }
     }
 
-    /// A target and the decoy the library shipped for it, sharing a competition
-    /// group. Sealing with a stored decoy present keeps the arena 1:1, so every
-    /// row is its own variant-0 slot.
-    fn arena_with_a_shipped_decoy() -> TargetTable {
-        use timsquery::models::{
-            Row,
-            TargetCapabilities,
+    /// A target and the decoy the library shipped for it, competing.
+    fn a_shipped_pair() -> [RowSpec; 2] {
+        [
+            RowSpec::target("PEPTIDEK").in_group("pair-1"),
+            RowSpec::decoy("KEDITPEP").in_group("pair-1"),
+        ]
+    }
+
+    /// Two targets and nothing else, so a policy that derives decoys has
+    /// something to derive them from.
+    fn two_targets() -> [RowSpec; 2] {
+        [RowSpec::target("PEPTIDEK"), RowSpec::target("PEPTIDER")]
+    }
+
+    /// What scoring reads off every slot: the mark and the target flag, which
+    /// derive from one another and so must never disagree.
+    fn marks_of(lib: &ReferenceLibrary) -> Vec<DecoyMarking> {
+        lib.iter()
+            .map(|query| {
+                let mark = query.materialize_peptide().decoy;
+                assert_eq!(
+                    ScoredIdentity::is_target(&query),
+                    mark.is_target(),
+                    "is_target disagrees with the mark it derives from"
+                );
+                mark
+            })
+            .collect()
+    }
+
+    /// Every decoy state a hand-built arena can reach, and what scoring sees in
+    /// it.
+    ///
+    /// The whole point of the table is that the two inputs are independent:
+    /// neither the policy nor the rows the file shipped decides this alone. A
+    /// marking rule that reads only the mass-shift variant index calls every
+    /// shipped decoy a target; one that reads only the decoy column calls every
+    /// derived decoy a target. Both leave the FDR estimated from nothing while
+    /// every row still looks plausible, so the marks are spelled out per slot
+    /// rather than counted.
+    ///
+    /// `Force` over rows that ship decoys is the one state missing here: the
+    /// drop is `DecoyPolicy::accepts` applied by a reader at push time, not by
+    /// `seal`, so it is only reachable through a file --
+    /// `forcing_mass_shift_decoys_replaces_the_ones_a_library_shipped` below.
+    #[test]
+    fn what_scoring_sees_is_the_policy_and_the_shipped_rows_together() {
+        use crate::models::DecoyPolicy;
+        use DecoyMarking::{
+            MassShiftedDecoy as Shifted,
+            ReversedDecoy as Shipped,
+            Target,
         };
 
-        let frags = [
-            (IonAnnot::try_from("y1").unwrap(), 300.0),
-            (IonAnnot::try_from("y2").unwrap(), 400.0),
-        ];
-        let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
-        for (sequence, is_decoy) in [("PEPTIDEK", false), ("KEDITPEP", true)] {
-            geom.push_row(Row {
-                precursor_mz: 500.0,
-                charge: 2,
-                rt_seconds: 120.0,
-                mobility: 0.75,
-                frags: &frags,
-                seq_strip: sequence,
-                seq_mod: sequence,
-                is_decoy,
-                decoy_group: Some("pair-1".to_string().into()),
-                ..Default::default()
-            });
+        struct Case {
+            what: &'static str,
+            rows: [RowSpec; 2],
+            policy: DecoyPolicy,
+            variants_per_row: usize,
+            stored_decoys: usize,
+            marks: Vec<DecoyMarking>,
         }
 
-        let geom = geom
-            .seal(crate::models::DecoyPolicy::IfMissing)
-            .expect("fixture ids are usable");
-        TargetTable::Mzpaf {
-            geom,
-            frag_intens: Some(vec![0.8; frags.len() * 2]),
+        // Measured, not predicted.
+        let cases = [
+            Case {
+                what: "no shipped decoys, derive if missing",
+                rows: two_targets(),
+                policy: DecoyPolicy::IfMissing,
+                variants_per_row: 3,
+                stored_decoys: 0,
+                marks: vec![Target, Shifted, Shifted, Target, Shifted, Shifted],
+            },
+            Case {
+                what: "no shipped decoys, derive regardless",
+                rows: two_targets(),
+                policy: DecoyPolicy::Force,
+                variants_per_row: 3,
+                stored_decoys: 0,
+                marks: vec![Target, Shifted, Shifted, Target, Shifted, Shifted],
+            },
+            // The state `report_decoys` warns about: nothing shipped, nothing
+            // derived, so the FDR has nothing to estimate itself from. Pinned
+            // here so a later change has to be a deliberate one -- the failure
+            // mode of "fixing" it quietly is q-values computed off an empty
+            // decoy side, which look like results.
+            Case {
+                what: "no shipped decoys, derive nothing",
+                rows: two_targets(),
+                policy: DecoyPolicy::Never,
+                variants_per_row: 1,
+                stored_decoys: 0,
+                marks: vec![Target, Target],
+            },
+            Case {
+                what: "shipped decoys, derive if missing",
+                rows: a_shipped_pair(),
+                policy: DecoyPolicy::IfMissing,
+                variants_per_row: 1,
+                stored_decoys: 1,
+                marks: vec![Target, Shipped],
+            },
+            Case {
+                what: "shipped decoys, derive nothing",
+                rows: a_shipped_pair(),
+                policy: DecoyPolicy::Never,
+                variants_per_row: 1,
+                stored_decoys: 1,
+                marks: vec![Target, Shipped],
+            },
+        ];
+
+        for case in cases {
+            let lib =
+                ReferenceLibrary::from_sealed_arena(hand_assembled_arena(case.policy, &case.rows))
+                    .expect("an mzpaf arena carrying intensities narrows");
+
+            let what = case.what;
+            assert_eq!(lib.geom.n_rows(), 2, "{what}: stored rows");
+            assert_eq!(
+                lib.geom.variants_per_row(),
+                case.variants_per_row,
+                "{what}: variants per row"
+            );
+            assert_eq!(
+                lib.geom.n_stored_decoys(),
+                case.stored_decoys,
+                "{what}: shipped decoys"
+            );
+            assert_eq!(marks_of(&lib), case.marks, "{what}: what scoring sees");
         }
     }
 
-    /// The marking scoring reads has to come from the arena's decoy column, not
-    /// from the mass-shift variant index. A library that ships its own decoys is
-    /// 1:1, so every row sits in variant 0 -- reading the variant alone calls all
-    /// of them targets, and an FDR with no decoys to estimate from reports every
-    /// candidate as passing.
+    /// A shipped decoy that never competes fails exactly like a shipped decoy
+    /// that reached scoring as a target: the group is what pairs it with its
+    /// target, and a decoy alone in its group is a decoy the FDR cannot use.
     #[test]
-    fn a_shipped_decoy_reaches_scoring_marked_as_one() {
-        let lib = ReferenceLibrary::from_sealed_arena(arena_with_a_shipped_decoy())
-            .expect("fixture narrows");
-        assert_eq!(lib.geom.expanded_len(), 2, "no mass-shift variants");
+    fn a_shipped_decoy_competes_in_the_group_of_the_target_it_was_built_from() {
+        let lib = ReferenceLibrary::from_sealed_arena(hand_assembled_arena(
+            crate::models::DecoyPolicy::IfMissing,
+            &[
+                RowSpec::target("PEPTIDEK").in_group("pair-1"),
+                RowSpec::decoy("KEDITPEP").in_group("pair-1"),
+                RowSpec::target("SAMPLERK").in_group("pair-2"),
+                RowSpec::decoy("KRELPMAS").in_group("pair-2"),
+            ],
+        ))
+        .expect("an mzpaf arena carrying intensities narrows");
 
-        let marks: Vec<_> = lib
-            .geom
-            .flats()
-            .map(|flat| {
-                let query = RefQuery::new(&lib, flat);
-                (
-                    query.materialize_peptide().decoy,
-                    ScoredIdentity::is_target(&query),
-                )
-            })
-            .collect();
+        let groups: Vec<GroupCode> = lib.iter().map(|q| q.handles().group).collect();
+        assert_eq!(groups.len(), 4, "1:1 with a library that ships its decoys");
+        assert_eq!(groups[0], groups[1], "a pair competes");
+        assert_eq!(groups[2], groups[3], "a pair competes");
+        assert_ne!(groups[0], groups[2], "separate pairs do not");
+    }
+
+    /// A derived decoy has to compete with the row it was derived from, or the
+    /// mass shift buys nothing: the group comes from the row, so every variant
+    /// of a row shares it.
+    #[test]
+    fn a_mass_shift_decoy_competes_in_the_group_of_the_row_it_came_from() {
+        let lib = ReferenceLibrary::from_sealed_arena(hand_assembled_arena(
+            crate::models::DecoyPolicy::IfMissing,
+            &two_targets(),
+        ))
+        .expect("an mzpaf arena carrying intensities narrows");
+
+        let groups: Vec<GroupCode> = lib.iter().map(|q| q.handles().group).collect();
+        assert_eq!(groups.len(), 6, "two rows, three variants each");
+        assert!(
+            groups[..3].iter().all(|g| *g == groups[0]),
+            "a row's variants compete"
+        );
+        assert!(
+            groups[3..].iter().all(|g| *g == groups[3]),
+            "a row's variants compete"
+        );
+        assert_ne!(groups[0], groups[3], "separate rows do not");
+    }
+
+    /// `Force` over a library that ships its own decoys, the one state a
+    /// hand-built arena cannot reach.
+    ///
+    /// The drop is `DecoyPolicy::accepts`, applied by the reader as it pushes
+    /// rows, so `seal` never sees the decoys at all; a fixture that dropped them
+    /// itself would be asserting on the test's own arithmetic. Read through
+    /// `from_file` for that reason. timsquery's
+    /// `skipping_shipped_decoys_leaves_only_targets` covers the arena side of
+    /// the same load; this is what scoring then reads off it.
+    #[test]
+    fn forcing_mass_shift_decoys_replaces_the_ones_a_library_shipped() {
+        let path = timsquery_fixture("mzspeclib_files/target_decoy_attribute_set.mzspeclib.txt");
+        let lib = ReferenceLibrary::from_file(&path, crate::models::DecoyPolicy::Force)
+            .expect("the fixture loads");
 
         assert_eq!(
-            marks,
+            lib.geom.n_rows(),
+            5,
+            "the five targets, without their decoys"
+        );
+        assert_eq!(lib.geom.n_stored_decoys(), 0, "the shipped decoys are gone");
+        assert_eq!(lib.geom.variants_per_row(), 3);
+
+        let marks = marks_of(&lib);
+        assert_eq!(marks.len(), 15, "five rows, three variants each");
+        assert!(
+            marks.chunks(3).all(|row| row
+                == [
+                    DecoyMarking::Target,
+                    DecoyMarking::MassShiftedDecoy,
+                    DecoyMarking::MassShiftedDecoy
+                ]),
+            "every row is a target with two derived decoys, got {marks:?}"
+        );
+    }
+
+    /// The exclusion `decoy_marking` reads as "variant 0 and not a target means
+    /// the library shipped it": a library never has both stored decoys and
+    /// mass-shift variants, so no shipped decoy is ever also a derived one.
+    ///
+    /// Asserted over files rather than hand-built arenas because that is where
+    /// the exclusion is actually established -- see
+    /// `seal_alone_keeps_shipped_decoys_under_force` below.
+    #[test]
+    fn a_library_read_from_a_file_never_has_both_stored_decoys_and_derived_ones() {
+        use crate::models::DecoyPolicy;
+
+        for fixture in [
+            "mzspeclib_files/target_decoy_attribute_set.mzspeclib.txt",
+            "mzspeclib_files/diann_export.mzspeclib.txt",
+        ] {
+            for policy in [
+                DecoyPolicy::IfMissing,
+                DecoyPolicy::Force,
+                DecoyPolicy::Never,
+            ] {
+                let lib = ReferenceLibrary::from_file(&timsquery_fixture(fixture), policy)
+                    .unwrap_or_else(|e| panic!("{fixture} under {policy}: {e:?}"));
+                if lib.geom.variants_per_row() > 1 {
+                    assert_eq!(
+                        lib.geom.n_stored_decoys(),
+                        0,
+                        "{fixture} under {policy}: derived decoys over a shipped decoy"
+                    );
+                }
+            }
+        }
+    }
+
+    /// Where the exclusion above is enforced, stated where it can fail.
+    ///
+    /// `seal` resolves `Force` to `MassShift` off the rows it was handed and
+    /// drops nothing, so an arena assembled outside a reader keeps its shipped
+    /// decoys and derives variants over them as well. Every route from a file
+    /// goes through a reader, which applies `DecoyPolicy::accepts` per row, so
+    /// nothing in the workload reaches this state -- but the contract lives in
+    /// each reader rather than in the seal, and a reader that forgets it lands
+    /// here.
+    #[test]
+    fn seal_alone_keeps_shipped_decoys_under_force() {
+        let lib = ReferenceLibrary::from_sealed_arena(hand_assembled_arena(
+            crate::models::DecoyPolicy::Force,
+            &a_shipped_pair(),
+        ))
+        .expect("an mzpaf arena carrying intensities narrows");
+
+        assert_eq!(lib.geom.n_stored_decoys(), 1);
+        assert_eq!(lib.geom.variants_per_row(), 3);
+        assert_eq!(
+            marks_of(&lib),
             vec![
-                (DecoyMarking::Target, true),
-                (DecoyMarking::ReversedDecoy, false),
-            ]
+                DecoyMarking::Target,
+                DecoyMarking::MassShiftedDecoy,
+                DecoyMarking::MassShiftedDecoy,
+                DecoyMarking::ReversedDecoy,
+                DecoyMarking::MassShiftedDecoy,
+                DecoyMarking::MassShiftedDecoy,
+            ],
+            "the shifted variants of a shipped decoy are marked as derived"
         );
     }
 
@@ -1023,9 +1278,11 @@ mod load_tests {
     /// way an out-of-crate caller reaches it.
     #[test]
     fn one_unparsable_sequence_disables_sequence_features_library_wide() {
-        let library =
-            ReferenceLibrary::from_sealed_arena(hand_assembled_arena(&["PEPTIDEK", "GARBAGE!!!"]))
-                .expect("an mzpaf arena carrying intensities narrows");
+        let library = ReferenceLibrary::from_sealed_arena(hand_assembled_arena(
+            crate::models::DecoyPolicy::default(),
+            &[RowSpec::target("PEPTIDEK"), RowSpec::target("GARBAGE!!!")],
+        ))
+        .expect("an mzpaf arena carrying intensities narrows");
 
         assert!(
             !library.parsable_sequences(),
@@ -1037,9 +1294,11 @@ mod load_tests {
     /// and not a constant the seam always writes.
     #[test]
     fn an_arena_whose_sequences_all_parse_keeps_sequence_features_on() {
-        let library =
-            ReferenceLibrary::from_sealed_arena(hand_assembled_arena(&["PEPTIDEK", "PEPTIDER"]))
-                .expect("an mzpaf arena carrying intensities narrows");
+        let library = ReferenceLibrary::from_sealed_arena(hand_assembled_arena(
+            crate::models::DecoyPolicy::default(),
+            &two_targets(),
+        ))
+        .expect("an mzpaf arena carrying intensities narrows");
 
         assert!(
             library.parsable_sequences(),
@@ -1055,9 +1314,11 @@ mod load_tests {
     /// crate-internal.
     #[test]
     fn narrowing_an_arena_leaves_sequence_features_at_the_readers_default() {
-        let library =
-            ReferenceLibrary::from_arena(hand_assembled_arena(&["PEPTIDEK", "GARBAGE!!!"]))
-                .expect("an mzpaf arena carrying intensities narrows");
+        let library = ReferenceLibrary::from_arena(hand_assembled_arena(
+            crate::models::DecoyPolicy::default(),
+            &[RowSpec::target("PEPTIDEK"), RowSpec::target("GARBAGE!!!")],
+        ))
+        .expect("an mzpaf arena carrying intensities narrows");
 
         assert!(
             library.parsable_sequences(),
