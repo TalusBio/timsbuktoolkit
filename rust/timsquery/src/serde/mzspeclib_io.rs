@@ -64,7 +64,7 @@ use super::library_file::{
 };
 use super::psims_origin_type;
 use crate::chemistry::ontologies;
-use crate::models::capabilities::DecoyPolicy;
+use crate::models::capabilities::LoadPolicy;
 use crate::models::{
     Row,
     TargetCapabilities,
@@ -186,9 +186,9 @@ fn open_reader(path: &Path) -> Result<Box<dyn BufRead>, TargetReadingError> {
 /// because the decoy groups a library declares have no representation there.
 pub fn read_mzspeclib_library_file(
     path: &Path,
-    decoys: DecoyPolicy,
+    policy: LoadPolicy,
 ) -> Result<TargetTable, TargetReadingError> {
-    read_counting_degradation(path, decoys).map(|(table, _)| table)
+    read_counting_degradation(path, policy).map(|(table, _)| table)
 }
 
 /// The read itself, with the counts still in hand.
@@ -197,7 +197,7 @@ pub fn read_mzspeclib_library_file(
 /// about is a count nothing checks.
 fn read_counting_degradation(
     path: &Path,
-    decoys: DecoyPolicy,
+    policy: LoadPolicy,
 ) -> Result<(TargetTable, Degradation), TargetReadingError> {
     let reader = open_reader(path)?;
     let parser = MzSpecLibTextParser::open(reader, Some(path.to_path_buf()), ontologies())
@@ -218,7 +218,7 @@ fn read_counting_degradation(
         let row = SpectrumRow::extract(&spectrum, library_theoretical_mz, &mut degradation)?;
         // Dropped here, so the decoy's peaks are never pushed and its group
         // never interns.
-        if !decoys.accepts(row.is_decoy) {
+        if !policy.decoys.accepts(row.is_decoy) {
             continue;
         }
         // Counted past that filter rather than inside the extract, because the
@@ -258,7 +258,7 @@ fn read_counting_degradation(
         });
     }
 
-    let geom = geom.seal(decoys)?;
+    let geom = geom.seal(policy.decoys)?;
     degradation.report(geom.n_rows());
 
     Ok((
@@ -849,12 +849,21 @@ fn isotope_of(annotation: &Annotation) -> Option<i8> {
 mod tests {
     use super::*;
     use crate::models::TargetColumns;
+    use crate::models::capabilities::DecoyPolicy;
     use std::path::PathBuf;
 
     fn fixture(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/mzspeclib_files")
             .join(name)
+    }
+
+    /// A load that decides only about decoys, leaving everything else default.
+    fn deciding_decoys(decoys: DecoyPolicy) -> LoadPolicy {
+        LoadPolicy {
+            decoys,
+            ..Default::default()
+        }
     }
 
     /// Read through the public funnel, so anything `seal` drops fails here the
@@ -906,7 +915,8 @@ mod tests {
     fn skipping_shipped_decoys_leaves_only_targets() {
         let path = fixture("target_decoy_attribute_set.mzspeclib.txt");
         let TargetTable::Mzpaf { geom, .. } =
-            read_mzspeclib_library_file(&path, DecoyPolicy::Force).expect("fixture loads")
+            read_mzspeclib_library_file(&path, deciding_decoys(DecoyPolicy::Force))
+                .expect("fixture loads")
         else {
             panic!("mzSpecLib carries ion chemistry");
         };
@@ -916,7 +926,8 @@ mod tests {
         // The intensity sidecar has to shrink with the rows, or it stops being
         // parallel to the fragment arena.
         let TargetTable::Mzpaf { frag_intens, .. } =
-            read_mzspeclib_library_file(&path, DecoyPolicy::Force).expect("fixture loads")
+            read_mzspeclib_library_file(&path, deciding_decoys(DecoyPolicy::Force))
+                .expect("fixture loads")
         else {
             unreachable!()
         };
@@ -1078,7 +1089,7 @@ mod tests {
     fn an_entry_whose_every_peak_was_dropped_is_counted() {
         let (table, degradation) = read_counting_degradation(
             &fixture("observed_without_annotation_masses.mzspeclib.txt"),
-            DecoyPolicy::Never,
+            deciding_decoys(DecoyPolicy::Never),
         )
         .expect("fixture loads");
         let TargetTable::Mzpaf { geom, .. } = table else {
@@ -1093,7 +1104,7 @@ mod tests {
         // neither is one that declares none.
         let (_, degradation) = read_counting_degradation(
             &fixture("minimal_predicted_decoy.mzspeclib.txt"),
-            DecoyPolicy::Never,
+            deciding_decoys(DecoyPolicy::Never),
         )
         .expect("fixture loads");
         assert_eq!(degradation.rows_without_fragments, 0);
@@ -1153,7 +1164,8 @@ mod tests {
         let path = fixture("shipped_decoy_without_readable_peaks.mzspeclib.txt");
 
         let (table, degradation) =
-            read_counting_degradation(&path, DecoyPolicy::Never).expect("fixture loads");
+            read_counting_degradation(&path, deciding_decoys(DecoyPolicy::Never))
+                .expect("fixture loads");
         let TargetTable::Mzpaf { geom, .. } = table else {
             panic!("mzSpecLib carries ion chemistry");
         };
@@ -1167,7 +1179,8 @@ mod tests {
         assert_eq!(degradation.rows_without_fragments, 2);
 
         let (table, degradation) =
-            read_counting_degradation(&path, DecoyPolicy::Force).expect("fixture loads");
+            read_counting_degradation(&path, deciding_decoys(DecoyPolicy::Force))
+                .expect("fixture loads");
         let TargetTable::Mzpaf { geom, .. } = table else {
             panic!("mzSpecLib carries ion chemistry");
         };

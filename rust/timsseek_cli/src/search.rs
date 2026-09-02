@@ -328,7 +328,7 @@ fn process_single_file(
 /// sniffs the format by extension.
 fn speclib_from_uri(
     uri: &str,
-    decoy_strategy: timsseek::DecoyPolicy,
+    policy: timsseek::LoadPolicy,
 ) -> Result<
     (
         timsseek::data_sources::reference_library::ReferenceLibrary,
@@ -338,13 +338,11 @@ fn speclib_from_uri(
 > {
     if !is_remote_uri(uri) {
         let path = std::path::Path::new(uri);
-        let lib = timsseek::data_sources::reference_library::ReferenceLibrary::from_file(
-            path,
-            decoy_strategy,
-        )
-        .map_err(|e| errors::CliError::Config {
-            source: format!("Failed to load speclib {uri}: {:?}", e),
-        })?;
+        let lib =
+            timsseek::data_sources::reference_library::ReferenceLibrary::from_file(path, policy)
+                .map_err(|e| errors::CliError::Config {
+                    source: format!("Failed to load speclib {uri}: {:?}", e),
+                })?;
         return Ok((lib, None));
     }
 
@@ -366,13 +364,11 @@ fn speclib_from_uri(
         source: format!("download speclib {uri}: {e}"),
         path: Some(uri.to_string()),
     })?;
-    let lib = timsseek::data_sources::reference_library::ReferenceLibrary::from_file(
-        &local,
-        decoy_strategy,
-    )
-    .map_err(|e| errors::CliError::Config {
-        source: format!("Failed to load speclib {uri}: {:?}", e),
-    })?;
+    let lib =
+        timsseek::data_sources::reference_library::ReferenceLibrary::from_file(&local, policy)
+            .map_err(|e| errors::CliError::Config {
+                source: format!("Failed to load speclib {uri}: {:?}", e),
+            })?;
     Ok((lib, Some(td)))
 }
 
@@ -444,6 +440,10 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
         "Decoy generation strategy: {}",
         config.analysis.decoy_strategy
     );
+    let load_policy = timsseek::LoadPolicy {
+        decoys: config.analysis.decoy_strategy,
+        ..Default::default()
+    };
     // Predicting draws its own progress bars, and a bar cannot share a line with
     // an open `TimedStep` label, so those routes hold the label back to the end.
     let step = match &validated.library {
@@ -454,7 +454,7 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
     let (speclib, _speclib_td, provenance) = match &validated.library {
         LibrarySource::File(uri) => {
             info!("Building database from speclib URI {uri}");
-            let (lib, td) = speclib_from_uri(uri, config.analysis.decoy_strategy)?;
+            let (lib, td) = speclib_from_uri(uri, load_policy)?;
             (lib, td, None)
         }
         LibrarySource::Fasta(fasta) => {
@@ -473,8 +473,7 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
                 config.library.as_ref(),
                 validated.overwrite,
             ))?;
-            let (lib, td) =
-                speclib_from_uri(&out.to_string_lossy(), config.analysis.decoy_strategy)?;
+            let (lib, td) = speclib_from_uri(&out.to_string_lossy(), load_policy)?;
             (lib, td, None)
         }
     };
@@ -491,7 +490,7 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
         Some(uri) => {
             let step = TimedStep::begin("Loading calib lib");
             info!("Loading calibration library from {}", uri);
-            let (lib, td) = speclib_from_uri(uri, config.analysis.decoy_strategy)?;
+            let (lib, td) = speclib_from_uri(uri, load_policy)?;
             let ms = step
                 .finish_with(format_args!(
                     "{} entries, {:.1} frags/entry",

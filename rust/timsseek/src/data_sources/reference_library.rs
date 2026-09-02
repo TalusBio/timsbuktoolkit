@@ -342,11 +342,12 @@ impl ReferenceLibrary {
     /// Read a library of any supported format.
     ///
     /// Every load from disk ends here. The arena arrives from timsquery already
-    /// sealed, with its decoy policy resolved against the rows the file turned
-    /// out to ship, so what is left is the finalize every arena goes through.
+    /// sealed, with the policy's decoy half resolved against the rows the file
+    /// turned out to ship, so what is left is the finalize every arena goes
+    /// through.
     pub fn from_file(
         path: &Path,
-        decoy_policy: crate::models::DecoyPolicy,
+        policy: crate::models::LoadPolicy,
     ) -> Result<Self, TargetReadingError> {
         if let Some(format) = retired_format(path) {
             return Err(TargetReadingError::UnsupportedFormat {
@@ -366,7 +367,7 @@ impl ReferenceLibrary {
             "Loading library via timsquery format detection: {}",
             path.display()
         );
-        let arena = read_timsquery_library(path, decoy_policy)?;
+        let arena = read_timsquery_library(path, policy)?;
         Self::from_sealed_arena(arena)
     }
 
@@ -666,6 +667,14 @@ mod load_tests {
             .join(rel)
     }
 
+    /// A load that decides only about decoys, leaving everything else default.
+    fn deciding_decoys(decoys: crate::models::DecoyPolicy) -> crate::models::LoadPolicy {
+        crate::models::LoadPolicy {
+            decoys,
+            ..Default::default()
+        }
+    }
+
     #[test]
     fn a_retired_format_is_rejected_by_name() {
         for (name, expected) in [
@@ -682,7 +691,7 @@ mod load_tests {
             );
             let err = ReferenceLibrary::from_file(
                 std::path::Path::new(name),
-                crate::models::DecoyPolicy::default(),
+                crate::models::LoadPolicy::default(),
             )
             .expect_err("a format nothing writes must not be read");
             assert!(
@@ -783,7 +792,7 @@ mod load_tests {
         for case in cases {
             let path = timsquery_fixture(case.fixture);
             assert!(path.exists(), "missing fixture {}", case.fixture);
-            let lib = ReferenceLibrary::from_file(&path, crate::models::DecoyPolicy::default())
+            let lib = ReferenceLibrary::from_file(&path, crate::models::LoadPolicy::default())
                 .unwrap_or_else(|e| panic!("{} failed to load: {e:?}", case.fixture));
 
             let what = case.fixture;
@@ -839,9 +848,8 @@ mod load_tests {
             .join("diann_io_files")
             .join("sample_lib.txt");
 
-        let speclib =
-            ReferenceLibrary::from_file(&test_file, crate::models::DecoyPolicy::default())
-                .expect("Failed to load DIA-NN TSV library");
+        let speclib = ReferenceLibrary::from_file(&test_file, crate::models::LoadPolicy::default())
+            .expect("Failed to load DIA-NN TSV library");
 
         let lib = &speclib;
 
@@ -902,7 +910,7 @@ mod load_tests {
         ));
         assert!(path.exists(), "fixture should exist at {:?}", path);
 
-        let speclib = ReferenceLibrary::from_file(path, crate::models::DecoyPolicy::default())
+        let speclib = ReferenceLibrary::from_file(path, crate::models::LoadPolicy::default())
             .expect("from_file should load the .speclib fixture");
 
         let lib = &speclib;
@@ -1192,8 +1200,9 @@ mod load_tests {
     #[test]
     fn forcing_mass_shift_decoys_replaces_the_ones_a_library_shipped() {
         let path = timsquery_fixture("mzspeclib_files/target_decoy_attribute_set.mzspeclib.txt");
-        let lib = ReferenceLibrary::from_file(&path, crate::models::DecoyPolicy::Force)
-            .expect("the fixture loads");
+        let lib =
+            ReferenceLibrary::from_file(&path, deciding_decoys(crate::models::DecoyPolicy::Force))
+                .expect("the fixture loads");
 
         assert_eq!(
             lib.geom.n_rows(),
@@ -1236,8 +1245,11 @@ mod load_tests {
                 DecoyPolicy::Force,
                 DecoyPolicy::Never,
             ] {
-                let lib = ReferenceLibrary::from_file(&timsquery_fixture(fixture), policy)
-                    .unwrap_or_else(|e| panic!("{fixture} under {policy}: {e:?}"));
+                let lib = ReferenceLibrary::from_file(
+                    &timsquery_fixture(fixture),
+                    deciding_decoys(policy),
+                )
+                .unwrap_or_else(|e| panic!("{fixture} under {policy}: {e:?}"));
                 if lib.geom.variants_per_row() > 1 {
                     assert_eq!(
                         lib.geom.n_stored_decoys(),
@@ -1355,7 +1367,7 @@ mod load_tests {
     fn a_library_with_no_annotated_fragments_is_refused() {
         let err = ReferenceLibrary::from_file(
             &timsquery_fixture("mzspeclib_files/small_molecule.mzspeclib.txt"),
-            crate::models::DecoyPolicy::IfMissing,
+            deciding_decoys(crate::models::DecoyPolicy::IfMissing),
         )
         .expect_err("a library with nothing to score against is not searchable");
 

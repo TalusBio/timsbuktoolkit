@@ -27,7 +27,10 @@ use super::spectronaut_io::{
 };
 use crate::Target;
 use crate::ion::IonAnnot;
-use crate::models::capabilities::DecoyPolicy;
+use crate::models::capabilities::{
+    DecoyPolicy,
+    LoadPolicy,
+};
 use crate::models::{
     Row,
     SourceIdError,
@@ -349,7 +352,7 @@ pub trait LibraryReader: Send + Sync {
     /// Cheap probe: header bytes / extension / first data row. Must not read the
     /// whole file.
     fn sniff(&self, path: &Path) -> bool;
-    fn read(&self, path: &Path, decoys: DecoyPolicy) -> Result<TargetTable, TargetReadingError>;
+    fn read(&self, path: &Path, policy: LoadPolicy) -> Result<TargetTable, TargetReadingError>;
 }
 
 struct DiannParquetReader;
@@ -366,7 +369,7 @@ impl LibraryReader for DiannParquetReader {
         sniff_diann_parquet_library_file(path)
     }
 
-    fn read(&self, path: &Path, decoys: DecoyPolicy) -> Result<TargetTable, TargetReadingError> {
+    fn read(&self, path: &Path, policy: LoadPolicy) -> Result<TargetTable, TargetReadingError> {
         let egs = read_diann_parquet(path).map_err(|e| {
             warn!("Failed to read DIA-NN parquet library file: {:?}", e);
             TargetReadingError::UnableToParseElutionGroups
@@ -374,7 +377,7 @@ impl LibraryReader for DiannParquetReader {
         let (egs, extras): (Vec<_>, Vec<_>) = egs.into_iter().unzip();
         TargetTable::from_elution_groups(
             ElutionGroupCollection::MzpafLabels(egs, Some(extras)),
-            decoys,
+            policy.decoys,
         )
     }
 }
@@ -388,7 +391,7 @@ impl LibraryReader for DiannTsvReader {
         sniff_diann_library_file(path)
     }
 
-    fn read(&self, path: &Path, decoys: DecoyPolicy) -> Result<TargetTable, TargetReadingError> {
+    fn read(&self, path: &Path, policy: LoadPolicy) -> Result<TargetTable, TargetReadingError> {
         let egs = read_diann_tsv(path).map_err(|e| {
             warn!("Failed to read DIA-NN TSV library file: {:?}", e);
             TargetReadingError::UnableToParseElutionGroups
@@ -396,7 +399,7 @@ impl LibraryReader for DiannTsvReader {
         let (egs, extras): (Vec<_>, Vec<_>) = egs.into_iter().unzip();
         TargetTable::from_elution_groups(
             ElutionGroupCollection::MzpafLabels(egs, Some(extras)),
-            decoys,
+            policy.decoys,
         )
     }
 }
@@ -410,7 +413,7 @@ impl LibraryReader for SpectronautReader {
         sniff_spectronaut_library_file(path).is_ok()
     }
 
-    fn read(&self, path: &Path, decoys: DecoyPolicy) -> Result<TargetTable, TargetReadingError> {
+    fn read(&self, path: &Path, policy: LoadPolicy) -> Result<TargetTable, TargetReadingError> {
         let egs = read_spectronaut_tsv(path).map_err(|e| {
             warn!("Failed to read Spectronaut TSV library file: {:?}", e);
             TargetReadingError::UnableToParseElutionGroups
@@ -418,7 +421,7 @@ impl LibraryReader for SpectronautReader {
         let (egs, extras): (Vec<_>, Vec<_>) = egs.into_iter().unzip();
         TargetTable::from_elution_groups(
             ElutionGroupCollection::MzpafLabels(egs, Some(extras)),
-            decoys,
+            policy.decoys,
         )
     }
 }
@@ -432,7 +435,7 @@ impl LibraryReader for SkylineReader {
         sniff_skyline_library_file(path).is_ok()
     }
 
-    fn read(&self, path: &Path, decoys: DecoyPolicy) -> Result<TargetTable, TargetReadingError> {
+    fn read(&self, path: &Path, policy: LoadPolicy) -> Result<TargetTable, TargetReadingError> {
         let egs = read_skyline_csv(path).map_err(|e| {
             warn!("Failed to read Skyline transition list: {:?}", e);
             TargetReadingError::UnableToParseElutionGroups
@@ -440,7 +443,7 @@ impl LibraryReader for SkylineReader {
         let (egs, extras): (Vec<_>, Vec<_>) = egs.into_iter().unzip();
         TargetTable::from_elution_groups(
             ElutionGroupCollection::MzpafLabels(egs, Some(extras)),
-            decoys,
+            policy.decoys,
         )
     }
 }
@@ -457,13 +460,13 @@ impl LibraryReader for DiannSpeclibReader {
         sniff_diann_speclib_library_file(path)
     }
 
-    fn read(&self, path: &Path, decoys: DecoyPolicy) -> Result<TargetTable, TargetReadingError> {
+    fn read(&self, path: &Path, policy: LoadPolicy) -> Result<TargetTable, TargetReadingError> {
         // This reader discards the embedded decoys under every policy, not just
         // `Force`: a shipped decoy with no declared competition group lands in a
         // singleton group and always wins, silently breaking FDR. Keeping them
         // needs `Row` to carry a group first. The policy still decides what the
         // resulting all-targets arena derives, so it is passed through.
-        read_diann_speclib_library_file(path, decoys)
+        read_diann_speclib_library_file(path, policy.decoys)
     }
 }
 
@@ -476,8 +479,8 @@ impl LibraryReader for MzSpecLibReader {
         sniff_mzspeclib_library_file(path)
     }
 
-    fn read(&self, path: &Path, decoys: DecoyPolicy) -> Result<TargetTable, TargetReadingError> {
-        read_mzspeclib_library_file(path, decoys)
+    fn read(&self, path: &Path, policy: LoadPolicy) -> Result<TargetTable, TargetReadingError> {
+        read_mzspeclib_library_file(path, policy)
     }
 }
 
@@ -508,24 +511,30 @@ fn registry() -> &'static [&'static dyn LibraryReader] {
 /// The common case, and the one every caller wanted before decoy handling
 /// became a parameter. Use [`read_targets_with`] to drop them at read time.
 pub fn read_targets<T: AsRef<Path>>(path: T) -> Result<TargetTable, TargetReadingError> {
-    read_targets_with(path, DecoyPolicy::Never)
+    read_targets_with(
+        path,
+        LoadPolicy {
+            decoys: DecoyPolicy::Never,
+            ..Default::default()
+        },
+    )
 }
 
-/// Read a library, deciding up front what to do with the decoys it ships.
+/// Read a library, deciding up front what a load does with what the file ships.
 ///
-/// `Skip` drops them before they reach the arena, so a caller regenerating its
-/// own never pays to parse the file's and the arena never sees a shipped decoy
-/// to downgrade `MassShift` over.
+/// [`DecoyPolicy::Force`] drops shipped decoys before they reach the arena, so a
+/// caller regenerating its own never pays to parse the file's and the arena
+/// never sees a shipped decoy to downgrade `MassShift` over.
 pub fn read_targets_with<T: AsRef<Path>>(
     path: T,
-    decoys: DecoyPolicy,
+    policy: LoadPolicy,
 ) -> Result<TargetTable, TargetReadingError> {
     let path = path.as_ref();
     let mut last_err = None;
     for reader in registry() {
         if reader.sniff(path) {
             info!("Dispatching library read to {}", reader.name());
-            match reader.read(path, decoys) {
+            match reader.read(path, policy) {
                 Ok(arena) => return Ok(arena),
                 // A sniff can fire on a file the reader then fails to parse
                 // (overlapping sniffs). Fall through to the next candidate
@@ -545,7 +554,7 @@ pub fn read_targets_with<T: AsRef<Path>>(
     // got further, since a `.speclib` desync says more than "not valid JSON".
     info!("Dispatching library read to json (terminal)");
     match ElutionGroupCollection::try_read_json(path) {
-        Ok(egs) => TargetTable::from_elution_groups(egs, decoys),
+        Ok(egs) => TargetTable::from_elution_groups(egs, policy.decoys),
         Err(e) => Err(last_err.unwrap_or(e)),
     }
 }

@@ -129,6 +129,37 @@ impl std::str::FromStr for DecoyPolicy {
     }
 }
 
+/// What to do with a peak this reader cannot annotate.
+///
+/// A kept peak lands at the m/z the file measured, where an annotated one lands
+/// at the m/z its annotation implies. Nothing downstream can tell the two apart
+/// once they are in the arena, so which of them a library is made of is the
+/// caller's decision rather than a fallback the reader picks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum UnannotatedPeaks {
+    /// Drop it.
+    #[default]
+    Skip,
+    /// Refuse the library at the first one.
+    Fail,
+    /// Keep it, under a placeholder label at its observed m/z.
+    Keep,
+    /// Keep every peak that way, whether or not it could be annotated.
+    KeepAll,
+}
+
+/// Every decision a caller makes before a file is read.
+///
+/// One value through the reader registry, so a second knob is a second field
+/// rather than a second parameter on every `read`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Serialize, Deserialize)]
+#[serde(default, deny_unknown_fields)]
+pub struct LoadPolicy {
+    pub decoys: DecoyPolicy,
+    pub unannotated: UnannotatedPeaks,
+}
+
 /// The ±CH2 mass-shift offset (Da) for derived decoys. Every construction of
 /// [`DecoyStrategy::MassShift`] uses it, including the test profiles, so a
 /// change here reaches all of them.

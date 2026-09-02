@@ -48,7 +48,7 @@ use timsquery::traits::queriable_data::{
 use timsquery::utils::TupleRange;
 use timsseek::IonAnnot;
 use timsseek::data_sources::reference_library::ReferenceLibrary;
-use timsseek::models::DecoyPolicy;
+use timsseek::models::LoadPolicy;
 
 /// Counting peak sink -- single u32 increment per peak. One dependent
 /// scalar store (no fadd, no scatter, no memory fence) → cleanest
@@ -107,7 +107,7 @@ fn main() {
 
     eprintln!("Loading speclib from {speclib_path}...");
     let t0 = Instant::now();
-    let speclib = ReferenceLibrary::from_file(Path::new(&speclib_path), DecoyPolicy::default())
+    let speclib = ReferenceLibrary::from_file(Path::new(&speclib_path), LoadPolicy::default())
         .expect("load speclib");
     eprintln!(
         "  speclib ready in {:?} ({} entries)",

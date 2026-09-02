@@ -20,7 +20,9 @@ pub use data_sources::{
 pub use models::{
     DecoyPolicy,
     ExpectedIntensities,
+    LoadPolicy,
     ProteinSlice,
+    UnannotatedPeaks,
 };
 pub use scoring::{
     CompetedCandidate,

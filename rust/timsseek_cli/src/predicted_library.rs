@@ -786,10 +786,14 @@ mod tests {
             }
             writer.finish().expect("file finishes");
         }
-        let TargetTable::Mzpaf { geom, .. } =
-            timsquery::serde::read_targets_with(&path, DecoyPolicy::Never)
-                .expect("the file this project writes reads back")
-        else {
+        let TargetTable::Mzpaf { geom, .. } = timsquery::serde::read_targets_with(
+            &path,
+            timsseek::LoadPolicy {
+                decoys: DecoyPolicy::Never,
+                ..Default::default()
+            },
+        )
+        .expect("the file this project writes reads back") else {
             panic!("an mzSpecLib library is mzpaf-labelled");
         };
         geom
