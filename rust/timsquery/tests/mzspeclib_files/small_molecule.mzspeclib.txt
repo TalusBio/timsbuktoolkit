@@ -1,0 +1,25 @@
+<mzSpecLib>
+MS:1003186|library format version=1.0
+MS:1003188|library name=spice
+MS:1003190|library version=1.0
+MS:1001017|release date=7/7/2023 7:06:42 PM
+<AttributeSet Spectrum=all>
+MS:1000008|ionization type=MS:1000073|electrosprary ionization
+MS:1000465|scan polarity=MS:1000130|positive scan
+<Spectrum=1>
+MS:1003063|universal spectrum identifier=mzspec:USI000000:spice_ph/cal_10ng.raw:scan:795
+MS:1003061|library spectrum name=JWH-250-5OH
+MS:1000894|retention time=3.53813
+MS:1003208|experimental precursor monoisotopic m/z=352.19000
+[1]MS:1000045|collision energy=40.0
+[1]UO:0000000|unit=UO:0000266|electronvolt
+MS:1003059|number of peaks=5
+<Analyte=1>
+MS:1000041|charge state=1
+MS:1000866|molecular formula=C22H25NO2
+<Peaks>
+51.0236	41921.14
+52.3338	18399.55
+63.9969	22028.22
+65.0390	263790.31
+121.0649	80814008.00

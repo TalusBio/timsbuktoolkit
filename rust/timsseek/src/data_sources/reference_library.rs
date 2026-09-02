@@ -98,6 +98,23 @@ impl ReferenceLibrary {
                     frag_intens.ok_or_else(|| TargetReadingError::UnsupportedFormat {
                         message: "DIA-NN library has no fragment intensities".to_string(),
                     })?;
+                // An arena with rows but no fragments is a legitimate arena and
+                // an unusable library: every score is driven by fragment
+                // intensity, so it would extract nothing for every row and
+                // report zero results without ever failing. The likely cause is
+                // a file whose peaks carry no annotations at all -- a
+                // small-molecule library, say -- since a peak this reader cannot
+                // annotate is skipped rather than stored at its observed m/z.
+                if geom.n_rows() > 0 && geom.n_fragments() == 0 {
+                    return Err(TargetReadingError::UnsupportedFormat {
+                        message: format!(
+                            "library has {} entries and not one annotated fragment; timsseek \
+                             scores annotated peptide fragments, so there is nothing here to \
+                             score against",
+                            geom.n_rows()
+                        ),
+                    });
+                }
                 Ok(ReferenceLibrary { geom, frag_intens })
             }
             TargetTable::Str { .. } => Err(TargetReadingError::UnsupportedFormat {
@@ -1324,6 +1341,30 @@ mod load_tests {
         assert!(
             library.parsable_sequences(),
             "the optimistic default stands until the gate reads the rows"
+        );
+    }
+
+    /// A library nothing can be scored against is refused at load rather than
+    /// searched to zero results. The mzSpecLib specification's own small-molecule
+    /// example is the shape that gets here: its peaks carry no annotations, so
+    /// every one is skipped and the rows arrive with no fragments at all.
+    ///
+    /// Distinct from the missing-sidecar rejection below, which is a library that
+    /// has fragments and no intensities for them.
+    #[test]
+    fn a_library_with_no_annotated_fragments_is_refused() {
+        let err = ReferenceLibrary::from_file(
+            &timsquery_fixture("mzspeclib_files/small_molecule.mzspeclib.txt"),
+            crate::models::DecoyPolicy::IfMissing,
+        )
+        .expect_err("a library with nothing to score against is not searchable");
+
+        let TargetReadingError::UnsupportedFormat { message } = err else {
+            panic!("expected an unsupported-format refusal, got {err:?}");
+        };
+        assert!(
+            message.contains("not one annotated fragment"),
+            "the refusal has to say what is missing: {message}"
         );
     }
 

@@ -870,6 +870,25 @@ mod tests {
     /// `MS:1003212|library attribute set name=DECOY` pointing at a header set
     /// that carries the origin type. Before the upstream attribute-set fix this
     /// file read as ten targets, so the count is the assertion that matters.
+    /// A library of small molecules is still a library to this reader: the rows
+    /// arrive, and everything peptide-shaped about them is absent rather than
+    /// wrong. Unannotated peaks are skipped, so the row keeps no fragments, and
+    /// an analyte identified by `MS:1000866|molecular formula` yields no
+    /// sequence. Whether that is searchable is not the reader's call to make --
+    /// `ReferenceLibrary` is what refuses it.
+    #[test]
+    fn a_library_with_no_annotated_peaks_loads_with_no_fragments() {
+        let geom = arena("small_molecule.mzspeclib.txt");
+        assert_eq!(geom.n_rows(), 1);
+        assert_eq!(geom.n_fragments(), 0, "no peak carried an annotation");
+
+        let row = geom.rows().next().expect("one row");
+        assert_eq!(geom.output_id(row).to_string(), "JWH-250-5OH");
+        assert_eq!(geom.seq_strip(row), "");
+        assert_eq!(geom.seq_mod(row), "");
+        assert!(!geom.is_decoy(row), "no origin type is not a decoy claim");
+    }
+
     #[test]
     fn decoys_declared_only_through_an_attribute_set_are_decoys() {
         let geom = arena("target_decoy_attribute_set.mzspeclib.txt");
