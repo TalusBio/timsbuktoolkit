@@ -700,6 +700,17 @@ impl<L: KeyLike + DecoyShift> TargetColumns<L> {
     /// variant-0 (unshifted) slot.
     pub fn is_target(&self, flat: FlatIdx) -> bool {
         let (row, variant) = self.split_flat(flat);
+        self.is_target_slot(row, variant)
+    }
+
+    /// [`Self::is_target`] for a caller that already holds the pair.
+    ///
+    /// The flyweights split their [`FlatIdx`] once and keep `(row, variant)`, so
+    /// asking them to rebuild a flat index to get this answer would undo that.
+    /// Both halves are needed: a stored decoy sits in the variant-0 slot exactly
+    /// as a target does, and a mass-shift variant hangs off a row that is itself
+    /// a target.
+    pub fn is_target_slot(&self, row: RowIdx, variant: u8) -> bool {
         !self.is_decoy[row.get()] && variant == 0
     }
 }

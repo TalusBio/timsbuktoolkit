@@ -132,20 +132,22 @@ impl<'a> RefQuery<'a> {
 
     /// Which of the three kinds of row this is.
     ///
-    /// Both halves matter and neither implies the other. A stored decoy sits in
-    /// the variant-0 slot exactly as a target does, so reading the variant alone
-    /// marks every one of them a target and leaves the FDR estimated from
-    /// nothing. A mass-shift decoy is a derived variant of a row that is itself
-    /// a target, so reading the column alone marks every one of them a target
-    /// too. The two questions are asked here, once, because every caller that
-    /// asks only one of them gets the same answer wrong.
+    /// Target-or-not is the arena's question and is asked there
+    /// ([`TargetColumns::is_target_slot`]); every caller that answered it from
+    /// one of the two halves alone -- the decoy column or the variant index --
+    /// got it wrong for the other half's rows and left the FDR estimated from
+    /// nothing. What stays here is only *which kind* of decoy, which timsquery
+    /// has no vocabulary for: a non-target in the variant-0 slot is one the
+    /// library shipped, and anything else is a variant derived over a target
+    /// row.
     fn decoy_marking(&self) -> DecoyMarking {
-        if self.geom.variant() != 0 {
-            DecoyMarking::MassShiftedDecoy
-        } else if self.lib.geom.is_decoy(self.geom.row()) {
+        let (row, variant) = (self.geom.row(), self.geom.variant());
+        if self.lib.geom.is_target_slot(row, variant) {
+            DecoyMarking::Target
+        } else if variant == 0 {
             DecoyMarking::ReversedDecoy
         } else {
-            DecoyMarking::Target
+            DecoyMarking::MassShiftedDecoy
         }
     }
 }
