@@ -1044,6 +1044,32 @@ fn dedup_by_sequence(results: &mut Vec<ScoredCandidate>) {
     });
 }
 
+/// Targets discarded because another target won their competition, which is the
+/// search-side symptom of a library whose groups hold more than one target per
+/// charge.
+///
+/// A target beaten by a *decoy* is ordinary target/decoy competition and is not
+/// counted -- that is the mechanism working. Every target past the first in one
+/// `(group, charge)` is counted whichever member won, since one of the two is
+/// gone either way.
+///
+/// Reads the vec the competition sort left behind, so competitors are adjacent
+/// and this is one pass with no allocation. It has to run after
+/// `dedup_by_sequence`: the rows that removes are one precursor listed twice,
+/// which is a duplicate rather than a mis-declared group, and counting them here
+/// would report a defect the library does not have.
+fn targets_beaten_by_targets(sorted: &[ScoredCandidate]) -> usize {
+    sorted
+        .chunk_by(|a, b| a.scoring.identity.competes_with(&b.scoring.identity))
+        .map(|run| {
+            run.iter()
+                .filter(|c| c.scoring.identity.is_target)
+                .count()
+                .saturating_sub(1)
+        })
+        .sum()
+}
+
 fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandidate> {
     // TODO: re-implement so we dont drop results but instead just flag them as rejected (maybe
     // a slice where we push rejected results to the end and keep the trailing slice as the "active")
@@ -1107,6 +1133,14 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
         "Number of results after t/d competition: {}",
         group_lens.len()
     );
+    let outcompeted_targets = targets_beaten_by_targets(&results);
+    if outcompeted_targets > 0 {
+        warn!(
+            "{outcompeted_targets} targets were discarded because another target won their \
+             competition, which is a real identification thrown away to keep another: the \
+             library declares competition groups holding more than one target per charge."
+        );
+    }
 
     let mut members = results.into_iter();
     group_lens
@@ -1294,6 +1328,31 @@ mod tests {
         assert_eq!(competed.len(), 1);
         assert!(competed[0].delta_group_ln1p_diff.is_nan());
         assert!(competed[0].delta_group_ln1p_ratio.is_nan());
+    }
+
+    /// A target beaten by a decoy is what competition is for, so it counts as
+    /// nothing lost.
+    #[test]
+    fn a_target_losing_to_a_decoy_is_not_counted_as_an_outcompeted_target() {
+        let mut target = candidate("PEPTIDEK", 501.0, true, 7);
+        target.scoring.primary.main_score = 3.0;
+        let mut decoy = candidate("KEDITPEP", 502.0, false, 7);
+        decoy.scoring.primary.main_score = 8.0;
+
+        assert_eq!(targets_beaten_by_targets(&[decoy, target]), 0);
+    }
+
+    /// Two targets competing at one charge means one of them is discarded to
+    /// keep the other, which is the search-side symptom of a mis-declared
+    /// group and the number the log has to name.
+    #[test]
+    fn a_target_losing_to_another_target_is_counted() {
+        let mut winner = candidate("PEPTIDEK", 501.0, true, 7);
+        winner.scoring.primary.main_score = 8.0;
+        let mut loser = candidate("SAMPLERK", 502.0, true, 7);
+        loser.scoring.primary.main_score = 3.0;
+
+        assert_eq!(targets_beaten_by_targets(&[winner, loser]), 1);
     }
 
     /// Groups are found by walking runs of the sort order, so a result that

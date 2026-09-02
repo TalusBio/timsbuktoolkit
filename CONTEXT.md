@@ -107,6 +107,11 @@ check this for every format at once; the alternative is every reader getting it
 right on its own, which is the situation that produced the silent loss in the
 first place.
 
+Competition counts the same defect from the other end: it reports how many
+targets lost to another target, which is a count of identifications thrown away
+and is zero for any library the seal accepted. A target losing to a decoy is not
+counted -- that is the mechanism working.
+
 Only mzSpecLib declares them. It is the one format with a way to say that one
 entry is the counterpart of another (`related spectrum keys`); a DIA-NN,
 Spectronaut or Skyline `transition_group_id` names the row it sits on, not a
