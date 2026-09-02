@@ -368,6 +368,9 @@ struct Degradation {
     /// Peaks stored under a placeholder label at the m/z the file measured,
     /// which is the one way an observed mass reaches the arena.
     peaks_kept_at_observed_mz: usize,
+    /// Peaks past the unknown labels an entry has to number them with, dropped
+    /// quietest first. See [`loudest_within_the_label_ceiling`].
+    peaks_over_the_label_ceiling: usize,
     rows_without_sequence: usize,
     rows_without_fragments: usize,
     // No count of entries missing a retention time. Zero is an ordinary value
@@ -410,6 +413,13 @@ impl Degradation {
                 "mzSpecLib: {unknown_labels} of {} peak(s) reached the arena under an unknown \
                  (`?N`) label -- {} unannotated, {} carrying an ion this build cannot spell",
                 self.total_peaks, self.peaks_kept_at_observed_mz, self.unrepresentable_labels,
+            );
+        }
+        if self.peaks_over_the_label_ceiling > 0 {
+            warn!(
+                "mzSpecLib: {} of {} peak(s) are past the {UNKNOWN_LABELS_PER_ENTRY} unknown \
+                 labels one entry can carry and were dropped, quietest first",
+                self.peaks_over_the_label_ceiling, self.total_peaks,
             );
         }
         if self.peaks_kept_at_observed_mz > 0 {
@@ -492,7 +502,12 @@ impl SpectrumRow {
         let mut frags = Vec::with_capacity(spectrum.peaks.len());
         let mut intensities = Vec::with_capacity(spectrum.peaks.len());
         degradation.total_peaks += spectrum.peaks.len();
-        for peak in spectrum.peaks.iter() {
+        let under_ceiling = loudest_within_the_label_ceiling(spectrum, unannotated);
+        for (index, peak) in spectrum.peaks.iter().enumerate() {
+            if under_ceiling.as_ref().is_some_and(|keep| !keep[index]) {
+                degradation.peaks_over_the_label_ceiling += 1;
+                continue;
+            }
             let observed = peak.mz.value;
             // `KeepAll` is uniform by construction: it drops the annotations an
             // entry does carry rather than storing some of its peaks at a
@@ -904,6 +919,45 @@ fn theoretical_mz(
     peak_mz_is_theoretical.then_some(observed)
 }
 
+/// Unknown labels one entry can carry. `UnknownIonCounter` numbers them in a
+/// `u8` from 1, so the 256th mint is an error rather than a dropped peak.
+const UNKNOWN_LABELS_PER_ENTRY: usize = u8::MAX as usize;
+
+/// Which of this entry's peaks fit under [`UNKNOWN_LABELS_PER_ENTRY`], or `None`
+/// when every one of them does.
+///
+/// Only a plan that mints a label per peak can reach the ceiling, and only on a
+/// spectrum with more peaks than there are labels -- nothing in the corpus comes
+/// within a hundred of it, but a DDA consensus spectrum read under
+/// [`UnannotatedPeaks::KeepAll`] runs to thousands. Which peaks survive is not
+/// arbitrary: every score is driven by fragment intensity, so the loudest are
+/// the ones worth the labels.
+///
+/// Sorted rather than kept in a bounded heap. An entry carries peaks in the tens
+/// to hundreds, where an `O(k log k)` sort per row costs nothing and a heap is
+/// more code to be wrong in.
+fn loudest_within_the_label_ceiling(
+    spectrum: &Spectrum,
+    unannotated: UnannotatedPeaks,
+) -> Option<Vec<bool>> {
+    let mints_a_label_per_peak = matches!(
+        unannotated,
+        UnannotatedPeaks::Keep | UnannotatedPeaks::KeepAll
+    );
+    if !mints_a_label_per_peak || spectrum.peaks.len() <= UNKNOWN_LABELS_PER_ENTRY {
+        return None;
+    }
+    let intensity = |index: usize| spectrum.peaks[index].intensity;
+    let mut by_intensity: Vec<usize> = (0..spectrum.peaks.len()).collect();
+    by_intensity.sort_unstable_by(|a, b| intensity(*b).total_cmp(&intensity(*a)));
+
+    let mut keep = vec![false; spectrum.peaks.len()];
+    for index in by_intensity.into_iter().take(UNKNOWN_LABELS_PER_ENTRY) {
+        keep[index] = true;
+    }
+    Some(keep)
+}
+
 /// The next `?N` label for this entry.
 ///
 /// One counter per entry, so `N` numbers the unknowns within a spectrum rather
@@ -1133,6 +1187,112 @@ mod tests {
             UnannotatedPeaks::Keep,
         ] {
             assert_eq!(read(unannotated), (10, 736), "under {unannotated:?}");
+        }
+    }
+
+    /// `KeepAll` is the one policy that asks the library nothing: it discards
+    /// the annotations every peak has, so the arena it produces is uniform
+    /// whatever the file annotated. The mixed library is 1242 peaks and 1242
+    /// fragments under it, against the 736 every other policy comes back with.
+    #[test]
+    fn keep_all_stores_every_peak_and_discards_the_annotations() {
+        let TargetTable::Mzpaf { geom, frag_intens } = read_mzspeclib_library_file(
+            &fixture("target_decoy_attribute_set.mzspeclib.txt"),
+            deciding_unannotated(UnannotatedPeaks::KeepAll),
+        )
+        .expect("fixture loads") else {
+            panic!("mzSpecLib carries ion chemistry");
+        };
+        assert_eq!(geom.n_rows(), 10);
+        assert_eq!(geom.n_fragments(), 1242, "every peak the file declares");
+        assert_eq!(
+            frag_intens.expect("mzSpecLib fills the sidecar").len(),
+            1242
+        );
+        for row in geom.rows() {
+            for label in geom.frag_labels(row) {
+                assert_eq!(
+                    label.to_string().chars().next(),
+                    Some('?'),
+                    "an annotation this policy discarded left a label behind"
+                );
+            }
+        }
+
+        // Nothing consults the library's own annotations under this policy, so
+        // the entry-wise contradiction the other policies refuse is not one
+        // here: there is no decision left for an entry to contradict.
+        let TargetTable::Mzpaf { geom, .. } = read_mzspeclib_library_file(
+            &fixture("entry_annotates_after_one_that_does_not.mzspeclib.txt"),
+            deciding_unannotated(UnannotatedPeaks::KeepAll),
+        )
+        .expect("the mixture is not a contradiction under KeepAll") else {
+            panic!("mzSpecLib carries ion chemistry");
+        };
+        assert_eq!(geom.n_fragments(), 4, "both peaks of both entries");
+    }
+
+    /// An entry with more peaks than it has unknown labels to number them with.
+    /// A DDA consensus spectrum is that shape; no committed fixture is, because
+    /// 300 peak lines is not a file anyone reads in a review, so this one is
+    /// written here instead.
+    ///
+    /// Intensity rises with m/z, which makes the 255 survivors the top 255 by
+    /// m/z as well and the count assertion a claim about which peaks were kept.
+    #[test]
+    fn an_entry_over_the_label_ceiling_keeps_only_its_loudest_peaks() {
+        const PEAKS: usize = 300;
+        let mut library = String::from(
+            "<mzSpecLib>\n\
+             MS:1003186|library format version=1.0\n\
+             MS:1003188|library name=over_the_label_ceiling\n\
+             <Spectrum=1>\n\
+             MS:1003061|library spectrum name=CONSENSUS\n\
+             MS:1000744|selected ion m/z=700.0\n",
+        );
+        library.push_str(&format!("MS:1003059|number of peaks={PEAKS}\n"));
+        library.push_str("<Analyte=1>\nMS:1000041|charge state=1\n<Peaks>\n");
+        for peak in 0..PEAKS {
+            library.push_str(&format!("{}\t{}.0\n", 100.0 + peak as f64, peak + 1));
+        }
+        let dir = tempfile::tempdir().expect("a temp dir");
+        let path = dir.path().join("over_the_label_ceiling.mzspeclib.txt");
+        std::fs::write(&path, library).expect("the generated library is written");
+
+        // The ceiling belongs to the label, not to the policy: `Keep` mints one
+        // label per peak for a library that annotates nothing, so a fully
+        // unannotated entry reaches it exactly as `KeepAll` does.
+        for unannotated in [UnannotatedPeaks::Keep, UnannotatedPeaks::KeepAll] {
+            let (table, degradation) =
+                read_counting_degradation(&path, deciding_unannotated(unannotated))
+                    .expect("an entry over the ceiling loads rather than failing");
+            let TargetTable::Mzpaf { geom, frag_intens } = table else {
+                panic!("mzSpecLib carries ion chemistry");
+            };
+            let row = geom.rows().next().expect("one row");
+            assert_eq!(
+                geom.frag_labels(row).len(),
+                UNKNOWN_LABELS_PER_ENTRY,
+                "under {unannotated:?}"
+            );
+            assert_eq!(degradation.total_peaks, PEAKS);
+            assert_eq!(
+                degradation.peaks_over_the_label_ceiling,
+                PEAKS - UNKNOWN_LABELS_PER_ENTRY
+            );
+
+            let quietest_kept = 1.0 + (PEAKS - UNKNOWN_LABELS_PER_ENTRY) as f32;
+            let intens = frag_intens.expect("mzSpecLib fills the sidecar");
+            assert_eq!(
+                intens.iter().copied().fold(f32::INFINITY, f32::min),
+                quietest_kept,
+                "the 45 quietest peaks are the ones dropped"
+            );
+            assert_eq!(
+                geom.frag_mzs(row).first().copied(),
+                Some(100.0 + (PEAKS - UNKNOWN_LABELS_PER_ENTRY) as f64),
+                "the survivors stay in the order the file wrote them"
+            );
         }
     }
 
