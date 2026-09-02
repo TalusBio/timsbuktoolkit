@@ -164,10 +164,13 @@ impl<Lib: Deref<Target = TargetColumns<L>>, L: KeyLike + DecoyShift> QueryGeom f
 mod tests {
     use super::*;
     use crate::IonAnnot;
-    use crate::models::TargetColumns;
     use crate::models::capabilities::*;
     use crate::models::source_id::SourceId;
     use crate::models::target_columns::Row;
+    use crate::models::{
+        TargetColumns,
+        TargetColumnsBuilder,
+    };
     use crate::traits::QueryGeom;
 
     /// Rows come from the arena; there is no constructor from an integer.
@@ -192,7 +195,7 @@ mod tests {
     /// One target row, sealed `IfMissing`, which with no shipped decoy resolves
     /// to `MassShift` -- so the ± variants below exist.
     fn one_target_lib() -> TargetColumns<IonAnnot> {
-        let mut c = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
+        let mut c = TargetColumnsBuilder::with_capabilities(TargetCapabilities::default_diann());
         c.push_row(Row {
             precursor_mz: 654.855,
             charge: 2,
@@ -284,8 +287,8 @@ mod tests {
     #[test]
     fn string_flyweight_never_shifts() {
         use std::sync::Arc;
-        let mut c: TargetColumns<Arc<str>> =
-            TargetColumns::with_capabilities(TargetCapabilities::default_unlabeled());
+        let mut c: TargetColumnsBuilder<Arc<str>> =
+            TargetColumnsBuilder::with_capabilities(TargetCapabilities::default_unlabeled());
         c.push_row(Row {
             precursor_mz: 500.0,
             charge: 2,

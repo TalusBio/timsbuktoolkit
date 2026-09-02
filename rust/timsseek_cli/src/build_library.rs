@@ -169,7 +169,7 @@ pub fn resolve_prediction(fasta: PathBuf, library: &LibraryConfig) -> ResolvedPr
 /// for a library on disk. Predicting them is the default, so the usual run seals
 /// with real decoys and derives nothing; a `decoys = false` gets mass-shift
 /// decoys under `if-missing` and none at all under `never`, which
-/// `ReferenceLibrary::from_sealed_arena` warns about. Reading the policy here
+/// `ReferenceLibrary::try_from` warns about. Reading the policy here
 /// instead would override a `decoys = false` the user wrote down.
 pub fn resolve_search_prediction(
     fasta: PathBuf,
@@ -230,15 +230,27 @@ fn reject_remote_paths(resolved: &ResolvedBuild) -> Result<(), CliError> {
 /// Checked before the model loads, so a mistyped `--out` costs a second rather
 /// than the minutes a proteome takes to predict and then discard.
 fn reject_existing_output(resolved: &ResolvedBuild) -> Result<(), CliError> {
-    if resolved.overwrite || !resolved.out.exists() {
+    if resolved.overwrite {
         return Ok(());
     }
-    Err(CliError::Config {
-        source: format!(
-            "{} already exists; pass --overwrite/-O to replace it",
-            resolved.out.display()
-        ),
-    })
+    let existing: Vec<_> = std::iter::once(&resolved.out)
+        .chain(resolved.config_out.as_ref())
+        .filter(|path| path.exists())
+        .collect();
+    if existing.is_empty() {
+        Ok(())
+    } else {
+        Err(CliError::Config {
+            source: format!(
+                "artifact(s) already exist: {}; pass --overwrite/-O to replace them",
+                existing
+                    .iter()
+                    .map(|path| path.display().to_string())
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        })
+    }
 }
 
 /// `--config-out <path>`, `<out>.config.json` by default, `None` when
@@ -255,7 +267,7 @@ fn sidecar_path(args: &BuildLibraryArgs) -> Option<PathBuf> {
 
 /// The sidecar that belongs to a library, named after the file rather than a
 /// stem, because the suffix is what picks the format.
-fn default_sidecar(out: &Path) -> PathBuf {
+pub(crate) fn default_sidecar(out: &Path) -> PathBuf {
     let mut path = out.to_path_buf().into_os_string();
     path.push(".config.json");
     PathBuf::from(path)
@@ -349,9 +361,16 @@ pub fn run(resolved: &ResolvedBuild) -> Result<(), CliError> {
     // dropped before `write_library` is called.
     let progress = BuildProgress::new();
     let report = progress.callback();
+    let pending_out = pending_path(&resolved.out);
+    let pending_config = resolved.config_out.as_deref().map(pending_path);
+    let mut cleanup = PendingArtifacts::new(
+        std::iter::once(pending_out.clone())
+            .chain(pending_config.iter().cloned())
+            .collect(),
+    );
     let stats = write_library(&LibraryOptions {
-        out: &resolved.out,
-        config_out: resolved.config_out.as_deref(),
+        out: &pending_out,
+        config_out: pending_config.as_deref(),
         stream: stream_options(&resolved.prediction, model, &report),
     })
     .map_err(|e| CliError::LibraryBuild {
@@ -360,6 +379,18 @@ pub fn run(resolved: &ResolvedBuild) -> Result<(), CliError> {
     // Before anything else writes: an open bar is a line the summary below
     // would land on the end of.
     progress.finish();
+
+    if let Some(path) = pending_config.as_deref() {
+        rewrite_sidecar_output(path, &resolved.out)?;
+    }
+    let mut artifacts = vec![(pending_out.as_path(), resolved.out.as_path())];
+    if let (Some(pending), Some(final_path)) =
+        (pending_config.as_deref(), resolved.config_out.as_deref())
+    {
+        artifacts.push((pending, final_path));
+    }
+    publish_artifacts(&artifacts, resolved.overwrite)?;
+    cleanup.disarm();
 
     println!(
         "{} proteins -> {} peptides -> {} precursors ({} decoys) -> {} fragments -> {}",
@@ -371,6 +402,129 @@ pub fn run(resolved: &ResolvedBuild) -> Result<(), CliError> {
         resolved.out.display()
     );
     Ok(())
+}
+
+fn pending_path(final_path: &Path) -> PathBuf {
+    use std::sync::atomic::{
+        AtomicU64,
+        Ordering,
+    };
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    let name = final_path.file_name().unwrap_or_default().to_string_lossy();
+    final_path.with_file_name(format!(
+        ".timsseek-{}-{}-{name}",
+        std::process::id(),
+        NEXT.fetch_add(1, Ordering::Relaxed),
+    ))
+}
+
+/// Remove unpublished artifacts on every error path.
+struct PendingArtifacts(Vec<PathBuf>);
+
+impl PendingArtifacts {
+    fn new(paths: Vec<PathBuf>) -> Self {
+        Self(paths)
+    }
+
+    fn disarm(&mut self) {
+        self.0.clear();
+    }
+}
+
+impl Drop for PendingArtifacts {
+    fn drop(&mut self) {
+        for path in self.0.drain(..) {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+/// Publish all generated files together. Existing artifacts are first moved to
+/// same-directory backups, so any failed rename restores the previous pair.
+fn publish_artifacts(artifacts: &[(&Path, &Path)], overwrite: bool) -> Result<(), CliError> {
+    if !overwrite && let Some((_, path)) = artifacts.iter().find(|(_, path)| path.exists()) {
+        return Err(CliError::Config {
+            source: format!(
+                "{} appeared while the library was building; refusing to overwrite it",
+                path.display()
+            ),
+        });
+    }
+
+    let mut backups: Vec<(PathBuf, PathBuf)> = Vec::new();
+    if overwrite {
+        for (_, final_path) in artifacts {
+            if final_path.exists() {
+                let backup = pending_path(final_path);
+                if let Err(error) = std::fs::rename(final_path, &backup) {
+                    restore_backups(&backups);
+                    return Err(io_error(final_path, error));
+                }
+                backups.push((final_path.to_path_buf(), backup));
+            }
+        }
+    }
+
+    let mut published: Vec<PathBuf> = Vec::new();
+    for (pending, final_path) in artifacts {
+        if let Err(error) = std::fs::rename(pending, final_path) {
+            for path in published.iter().rev() {
+                let _ = std::fs::remove_file(path);
+            }
+            restore_backups(&backups);
+            return Err(io_error(final_path, error));
+        }
+        published.push(final_path.to_path_buf());
+    }
+    for (_, backup) in backups {
+        if let Err(error) = std::fs::remove_file(&backup) {
+            tracing::warn!(
+                "failed to remove replaced-artifact backup {}: {error}",
+                backup.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+fn restore_backups(backups: &[(PathBuf, PathBuf)]) {
+    for (final_path, backup) in backups.iter().rev() {
+        let _ = std::fs::rename(backup, final_path);
+    }
+}
+
+fn io_error(path: &Path, error: std::io::Error) -> CliError {
+    CliError::Io {
+        source: error.to_string(),
+        path: Some(path.display().to_string()),
+    }
+}
+
+fn rewrite_sidecar_output(path: &Path, final_out: &Path) -> Result<(), CliError> {
+    let bytes = std::fs::read(path).map_err(|e| CliError::Io {
+        source: e.to_string(),
+        path: Some(path.display().to_string()),
+    })?;
+    let mut sidecar: serde_json::Value =
+        serde_json::from_slice(&bytes).map_err(|e| CliError::LibraryBuild {
+            source: format!("invalid generated sidecar {}: {e}", path.display()),
+        })?;
+    if let Some(output) = sidecar
+        .get_mut("output")
+        .and_then(serde_json::Value::as_object_mut)
+    {
+        output.insert(
+            "path".to_string(),
+            serde_json::Value::String(final_out.display().to_string()),
+        );
+    }
+    let bytes = serde_json::to_vec_pretty(&sidecar).map_err(|e| CliError::LibraryBuild {
+        source: format!("serializing generated sidecar {}: {e}", path.display()),
+    })?;
+    std::fs::write(path, bytes).map_err(|e| CliError::Io {
+        source: e.to_string(),
+        path: Some(path.display().to_string()),
+    })
 }
 
 /// `builtin:NAME` for a model compiled into msspeculator, anything else a path
@@ -449,6 +603,19 @@ mod tests {
             resolved.decoys,
             "predicted decoys beat the mass-shift ones a search would derive"
         );
+    }
+
+    #[test]
+    fn prediction_streams_directly_into_a_search_library() {
+        let fasta = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/test_data/tiny.fasta");
+        let mut prediction = resolve_prediction(fasta, &LibraryConfig::default());
+        prediction.decoys = false;
+        prediction.max_fragments = Some(4);
+
+        let predicted = predict_in_memory(&prediction, DecoyPolicy::IfMissing)
+            .expect("builtin model predicts directly into the arena");
+        assert!(!predicted.library.is_empty());
+        assert!(predicted.provenance.is_object());
     }
 
     /// A flag has to be able to turn a configured setting *off*, which a bare
@@ -613,6 +780,42 @@ model = "builtin:from-config"
             &dir.path().join("new.mzspeclib.txt.gz").to_string_lossy(),
         );
         assert!(reject_existing_output(&fresh).is_ok());
+    }
+
+    #[test]
+    fn an_existing_sidecar_is_not_replaced_without_asking() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("lib.mzspeclib.txt.gz");
+        let sidecar = default_sidecar(&out);
+        std::fs::write(&sidecar, b"existing").unwrap();
+        let mut resolved = paths("p.fasta", &out.to_string_lossy());
+        resolved.config_out = Some(sidecar);
+
+        assert!(reject_existing_output(&resolved).is_err());
+        resolved.overwrite = true;
+        assert!(reject_existing_output(&resolved).is_ok());
+    }
+
+    #[test]
+    fn publishing_one_failed_artifact_restores_the_previous_pair() {
+        let dir = tempfile::tempdir().unwrap();
+        let out = dir.path().join("library");
+        let sidecar = dir.path().join("sidecar");
+        let pending_out = dir.path().join("pending-library");
+        let missing_pending_sidecar = dir.path().join("missing-pending-sidecar");
+        std::fs::write(&out, b"old library").unwrap();
+        std::fs::write(&sidecar, b"old sidecar").unwrap();
+        std::fs::write(&pending_out, b"new library").unwrap();
+
+        assert!(
+            publish_artifacts(
+                &[(&pending_out, &out), (&missing_pending_sidecar, &sidecar),],
+                true,
+            )
+            .is_err()
+        );
+        assert_eq!(std::fs::read(out).unwrap(), b"old library");
+        assert_eq!(std::fs::read(sidecar).unwrap(), b"old sidecar");
     }
 
     /// The "same targets" criterion, as far as it can be asserted without a

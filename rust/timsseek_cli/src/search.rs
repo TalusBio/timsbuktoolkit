@@ -224,101 +224,110 @@ fn get_frag_range_from_index(
     }
 }
 
-fn process_single_file(
-    raw_uri: &str,
-    backend: &tims_stage::PerRunTempdir,
+struct SearchRun<'a> {
+    backend: &'a tims_stage::PerRunTempdir,
     save_sidecar: bool,
-    speclib: &timsseek::data_sources::reference_library::ReferenceLibrary,
-    calib_lib: Option<&timsseek::data_sources::reference_library::ReferenceLibrary>,
-    config: &Config,
-    sink: &OutputSink,
+    speclib: &'a timsseek::data_sources::reference_library::ReferenceLibrary,
+    calib_lib: Option<&'a timsseek::data_sources::reference_library::ReferenceLibrary>,
+    config: &'a Config,
+    sink: &'a OutputSink,
     overwrite: bool,
     max_qvalue: f32,
     no_feature_stats: bool,
-) -> std::result::Result<timsseek::scoring::PipelineReport, errors::CliError> {
-    let file_name = std::path::Path::new(raw_uri)
-        .file_name()
-        .and_then(|s| s.to_str())
-        .unwrap_or(raw_uri);
-    let _file_span = info_span!("file", name = file_name).entered();
-    info!("Processing raw input: {}", raw_uri);
+}
 
-    let step = TimedStep::begin("Loading index");
-    let (index, index_source) = load_index(
-        raw_uri,
-        backend,
-        save_sidecar,
-        IndexingCentroidingConfig::default(),
-    )
-    .map_err(|e| errors::CliError::Io {
-        source: format!("load_index({raw_uri}): {e}"),
-        path: Some(raw_uri.to_string()),
-    })?;
-    // Cache reuse vs raw build is otherwise invisible to the user.
-    let load_index_ms = step.finish_with(format_args!("{index_source}")).as_millis() as u64;
-    match index.mobility_kind() {
-        timscentroid::MobilityKind::Ook0 => info!("Mobility axis: TIMS 1/K0 (searchable)"),
-        timscentroid::MobilityKind::Absent => {
-            info!("Mobility axis: none -- mobility filter + score features disabled")
+impl SearchRun<'_> {
+    fn process_file(
+        &self,
+        raw_uri: &str,
+    ) -> std::result::Result<timsseek::scoring::PipelineReport, errors::CliError> {
+        let file_name = std::path::Path::new(raw_uri)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(raw_uri);
+        let _file_span = info_span!("file", name = file_name).entered();
+        info!("Processing raw input: {}", raw_uri);
+
+        let step = TimedStep::begin("Loading index");
+        let (index, index_source) = load_index(
+            raw_uri,
+            self.backend,
+            self.save_sidecar,
+            IndexingCentroidingConfig::default(),
+        )
+        .map_err(|e| errors::CliError::Io {
+            source: format!("load_index({raw_uri}): {e}"),
+            path: Some(raw_uri.to_string()),
+        })?;
+        // Cache reuse vs raw build is otherwise invisible to the user.
+        let load_index_ms = step.finish_with(format_args!("{index_source}")).as_millis() as u64;
+        match index.mobility_kind() {
+            timscentroid::MobilityKind::Ook0 => info!("Mobility axis: TIMS 1/K0 (searchable)"),
+            timscentroid::MobilityKind::Absent => {
+                info!("Mobility axis: none -- mobility filter + score features disabled")
+            }
+            timscentroid::MobilityKind::Unsupported(label) => info!(
+                "Mobility axis: unsupported [{label}] -- mobility filter + score features disabled"
+            ),
         }
-        timscentroid::MobilityKind::Unsupported(label) => info!(
-            "Mobility axis: unsupported [{label}] -- mobility filter + score features disabled"
-        ),
+        alloc_track::snap!("Loading index");
+
+        // On-disk caches use `bucket_size=4096`, too large for the tight mz
+        // tolerances of Phase 1 / Phase 3 (measured: ~−24% wall at 256).
+        const REBUCKET_LEN: usize = 256;
+        let step = TimedStep::begin(format_args!("Rebucket at {}", REBUCKET_LEN));
+        let index = index.rebucket(REBUCKET_LEN);
+        step.finish();
+
+        let fragmented_range = get_frag_range_from_index(&index)?;
+
+        let pipeline = Scorer {
+            index,
+            broad_tolerance: self.config.analysis.tolerance.clone(),
+            fragmented_range,
+        };
+
+        let file_stem = sample_name_from_uri(raw_uri).ok_or_else(|| errors::CliError::Io {
+            source: "Unable to derive sample name from URI".to_string(),
+            path: Some(raw_uri.to_string()),
+        })?;
+        let file_output_dir = self.sink.sample_dir(&file_stem);
+
+        std::fs::create_dir_all(&file_output_dir).map_err(|e| errors::CliError::Io {
+            source: format!("Failed to create output subdirectory: {}", e),
+            path: Some(file_output_dir.to_string_lossy().to_string()),
+        })?;
+
+        if self.overwrite {
+            self.sink.clear_existing(&file_stem)?;
+        }
+
+        let file_output_config = OutputConfig {
+            uri: file_output_dir.to_string_lossy().to_string(),
+        };
+
+        let options = processing::PipelineOptions {
+            chunk_size: self.config.analysis.chunk_size,
+            output: &file_output_config,
+            max_qvalue: self.max_qvalue,
+            calibration: &self.config.calibration,
+            no_feature_stats: self.no_feature_stats,
+            rescore_model: self.config.analysis.rescore_model,
+        };
+        let report = processing::run_pipeline(
+            self.speclib,
+            self.calib_lib,
+            &pipeline,
+            load_index_ms,
+            &options,
+        )
+        .map_err(|e| errors::CliError::DataReading {
+            source: format!("{}", e),
+        })?;
+
+        info!("Successfully processed {}", raw_uri);
+        Ok(report)
     }
-    alloc_track::snap!("Loading index");
-
-    // On-disk caches use `bucket_size=4096`, too large for the tight mz
-    // tolerances of Phase 1 / Phase 3 (measured: ~−24% wall at 256).
-    const REBUCKET_LEN: usize = 256;
-    let step = TimedStep::begin(format_args!("Rebucket at {}", REBUCKET_LEN));
-    let index = index.rebucket(REBUCKET_LEN);
-    step.finish();
-
-    let fragmented_range = get_frag_range_from_index(&index)?;
-
-    let pipeline = Scorer {
-        index,
-        broad_tolerance: config.analysis.tolerance.clone(),
-        fragmented_range,
-    };
-
-    let file_stem = sample_name_from_uri(raw_uri).ok_or_else(|| errors::CliError::Io {
-        source: "Unable to derive sample name from URI".to_string(),
-        path: Some(raw_uri.to_string()),
-    })?;
-    let file_output_dir = sink.sample_dir(&file_stem);
-
-    std::fs::create_dir_all(&file_output_dir).map_err(|e| errors::CliError::Io {
-        source: format!("Failed to create output subdirectory: {}", e),
-        path: Some(file_output_dir.to_string_lossy().to_string()),
-    })?;
-
-    if overwrite {
-        sink.clear_existing(&file_stem)?;
-    }
-
-    let file_output_config = OutputConfig {
-        uri: file_output_dir.to_string_lossy().to_string(),
-    };
-
-    let report = processing::run_pipeline(
-        speclib,
-        calib_lib,
-        &pipeline,
-        config.analysis.chunk_size,
-        &file_output_config,
-        max_qvalue,
-        load_index_ms,
-        &config.calibration,
-        no_feature_stats,
-        config.analysis.rescore_model,
-    )
-    .map_err(|e| errors::CliError::DataReading {
-        source: format!("{}", e),
-    })?;
-
-    info!("Successfully processed {}", raw_uri);
-    Ok(report)
 }
 
 /// Load a library from a local path or remote URI.
@@ -519,6 +528,17 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
 
     let total_files = validated.raw_inputs.len();
     info!("Processing {} raw input(s)", total_files);
+    let search_run = SearchRun {
+        backend: &backend,
+        save_sidecar: save_sidecar_flag,
+        speclib: &speclib,
+        calib_lib: calib_lib.as_ref(),
+        config: &config,
+        sink: &sink,
+        overwrite: validated.overwrite,
+        max_qvalue: args.max_qvalue,
+        no_feature_stats: args.no_feature_stats,
+    };
 
     for (idx, raw_uri) in validated.raw_inputs.iter().enumerate() {
         info!(
@@ -547,18 +567,7 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
         let file_start = std::time::Instant::now();
         let sample_dest = sink.dest_uri_for(&sample_name);
 
-        match process_single_file(
-            raw_uri,
-            &backend,
-            save_sidecar_flag,
-            &speclib,
-            calib_lib.as_ref(),
-            &config,
-            &sink,
-            validated.overwrite,
-            args.max_qvalue,
-            args.no_feature_stats,
-        ) {
+        match search_run.process_file(raw_uri) {
             Ok(report) => {
                 if let Err(e) = sink.finalize_sample(&sample_name) {
                     error!("Failed to finalize sample {}: {}", sample_name, e);

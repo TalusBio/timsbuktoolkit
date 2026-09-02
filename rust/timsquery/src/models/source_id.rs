@@ -144,6 +144,11 @@ pub enum SourceIds {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum SourceIdError {
+    #[error(
+        "decoy policy `force` requires readers to exclude shipped decoys before sealing, but \
+         {count} shipped decoy row(s) remain"
+    )]
+    ForceWithStoredDecoys { count: usize },
     #[error("{ids} source ids for {rows} rows")]
     LengthMismatch { ids: usize, rows: usize },
     /// Callers key results by this id, so a repeat makes one row unreachable.

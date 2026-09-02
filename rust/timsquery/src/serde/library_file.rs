@@ -36,6 +36,7 @@ use crate::models::{
     SourceIdError,
     TargetCapabilities,
     TargetColumns,
+    TargetColumnsBuilder,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -209,7 +210,7 @@ impl TargetTable {
             )));
         }
 
-        let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
+        let mut geom = TargetColumnsBuilder::with_capabilities(TargetCapabilities::default_diann());
         let mut frag_intens: Vec<f32> = Vec::new();
 
         for (eg, row) in egs.iter().zip(rows) {
@@ -247,11 +248,11 @@ impl TargetTable {
             });
         }
 
-        if frag_intens.len() != geom.frag_labels.len() {
+        if frag_intens.len() != geom.n_fragments() {
             return Err(TargetReadingError::SpeclibParse(format!(
                 "reference-intensity sidecar ({}) must stay parallel to the fragment-label arena ({})",
                 frag_intens.len(),
-                geom.frag_labels.len(),
+                geom.n_fragments(),
             )));
         }
 
@@ -286,7 +287,7 @@ impl TargetTable {
             }
             ElutionGroupCollection::MzpafLabels(egs, None) => {
                 let mut geom =
-                    TargetColumns::with_capabilities(TargetCapabilities::default_diann());
+                    TargetColumnsBuilder::with_capabilities(TargetCapabilities::default_diann());
                 for eg in &egs {
                     let frags: Vec<(IonAnnot, f64)> =
                         eg.iter_fragments().map(|(l, mz)| (*l, mz)).collect();
@@ -314,8 +315,9 @@ impl TargetTable {
                 // fragment label untouched (`DecoyShift for Arc<str>` is the
                 // identity), so the variants would be scored against the
                 // target's own fragments.
-                let mut geom =
-                    TargetColumns::with_capabilities(TargetCapabilities::default_unlabeled());
+                let mut geom = TargetColumnsBuilder::with_capabilities(
+                    TargetCapabilities::default_unlabeled(),
+                );
                 for eg in &egs {
                     let frags: Vec<(Arc<str>, f64)> = eg
                         .iter_fragments()
@@ -461,11 +463,6 @@ impl LibraryReader for DiannSpeclibReader {
     }
 
     fn read(&self, path: &Path, policy: LoadPolicy) -> Result<TargetTable, TargetReadingError> {
-        // This reader discards the embedded decoys under every policy, not just
-        // `Force`: a shipped decoy with no declared competition group lands in a
-        // singleton group and always wins, silently breaking FDR. Keeping them
-        // needs `Row` to carry a group first. The policy still decides what the
-        // resulting all-targets arena derives, so it is passed through.
         read_diann_speclib_library_file(path, policy.decoys)
     }
 }

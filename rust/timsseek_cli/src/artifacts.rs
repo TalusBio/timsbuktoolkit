@@ -77,9 +77,14 @@ pub(crate) fn probe_collisions(
 ) -> Result<Vec<String>, CliError> {
     let mut collisions: Vec<String> = Vec::new();
     if let Some(library) = built_library {
-        let uri = library.to_string_lossy().into_owned();
-        if probe_uri_exists(&uri)? {
-            collisions.push(uri);
+        for artifact in [
+            library.to_path_buf(),
+            crate::build_library::default_sidecar(library),
+        ] {
+            let uri = artifact.to_string_lossy().into_owned();
+            if probe_uri_exists(&uri)? {
+                collisions.push(uri);
+            }
         }
     }
     for raw_uri in raw_inputs {
@@ -147,6 +152,18 @@ mod tests {
         )
         .unwrap();
         assert_eq!(collisions, vec![library.to_string_lossy().to_string()]);
+    }
+
+    #[test]
+    fn the_probe_reports_a_predicted_library_sidecar() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = dir.path().join("proteome.mzspeclib.txt.gz");
+        let sidecar = crate::build_library::default_sidecar(&library);
+        std::fs::write(&sidecar, b"sidecar").unwrap();
+
+        let collisions =
+            probe_collisions(&dir.path().to_string_lossy(), &[], Some(&library)).unwrap();
+        assert_eq!(collisions, vec![sidecar.to_string_lossy().to_string()]);
     }
 
     /// The name a run derives when it was told to build a library but not where

@@ -16,6 +16,7 @@ use crate::cli::SearchArgs;
 use crate::config::{
     Config,
     InputConfig,
+    LibraryInputConfig,
     OutputConfig,
     SequencesConfig,
 };
@@ -86,7 +87,7 @@ fn library_source(
 ) -> Result<LibrarySource, CliError> {
     let fasta = sequences.map(|SequencesConfig { fasta }| expand_local_path(fasta));
     match (input, fasta) {
-        (Some(InputConfig::Speclib { uri, .. }), fasta) => {
+        (Some(InputConfig::Speclib { uri }), fasta) => {
             let uri = expand_local_uri(uri);
             // The probe is skipped without the flag: the library is opened
             // either way, and `validate_inputs` is where a missing one is
@@ -182,24 +183,12 @@ fn merge_cli_into_config(config: &mut Config, args: &SearchArgs) {
     // must not silently drop the other's configured value.
     if let Some(uri) = &args.speclib_uri {
         match &mut config.input {
-            Some(InputConfig::Speclib {
-                uri: configured, ..
-            }) => *configured = uri.clone(),
-            None => {
-                config.input = Some(InputConfig::Speclib {
-                    uri: uri.clone(),
-                    calib_uri: None,
-                })
-            }
+            Some(InputConfig::Speclib { uri: configured }) => *configured = uri.clone(),
+            None => config.input = Some(InputConfig::Speclib { uri: uri.clone() }),
         }
     }
     if let Some(calib) = &args.calib_lib {
-        match &mut config.input {
-            Some(InputConfig::Speclib { calib_uri, .. }) => *calib_uri = Some(calib.clone()),
-            // A calibration library with no library to calibrate is rejected by
-            // `read_inputs`, which reports the missing one by flag name.
-            None => {}
-        }
+        config.calibration_library = Some(LibraryInputConfig { uri: calib.clone() });
     }
     // The sequence database is merged independently of the library, because
     // `[sequences]` and `[input]` describe two inputs that are given together as
@@ -251,10 +240,10 @@ fn read_inputs(args: &SearchArgs, config: &Config) -> Result<ResolvedInputs, Cli
         &output_uri,
         &crate::output_sink::probe_uri_exists,
     )?;
-    let calib_lib_uri = match &config.input {
-        Some(InputConfig::Speclib { calib_uri, .. }) => calib_uri.as_deref().map(expand_local_uri),
-        None => None,
-    };
+    let calib_lib_uri = config
+        .calibration_library
+        .as_ref()
+        .map(|library| expand_local_uri(&library.uri));
 
     Ok(ResolvedInputs {
         raw_inputs,
@@ -301,7 +290,6 @@ mod tests {
     ) -> Result<LibrarySource, CliError> {
         let input = uri.map(|uri| InputConfig::Speclib {
             uri: uri.to_string(),
-            calib_uri: None,
         });
         let sequences = fasta.map(|fasta| SequencesConfig {
             fasta: PathBuf::from(fasta),
@@ -707,8 +695,8 @@ uri = "config_results"
         let from_config = resolve(
             &["--output-uri", "out", "--raw-inputs", "a.d"],
             config_with(
-                "[input]\ntype = \"speclib\"\nuri = \"lib.mzspeclib.txt\"\n\
-                 calib_uri = \"calib.mzspeclib.txt\"\n",
+                "[input]\ntype = \"speclib\"\nuri = \"lib.mzspeclib.txt\"\n\n\
+                 [calibration_library]\nuri = \"calib.mzspeclib.txt\"\n",
             ),
         )
         .unwrap();
@@ -718,8 +706,8 @@ uri = "config_results"
         );
     }
 
-    /// `--speclib-uri` and `--calib-lib` reach the same config field, so naming
-    /// one on the command line must not drop the other's configured value.
+    /// Naming the searched library must not drop the independently configured
+    /// calibration library.
     #[test]
     fn naming_one_library_keeps_the_other() {
         let resolved = resolve(
@@ -732,8 +720,8 @@ uri = "config_results"
                 "flag.mzspeclib.txt",
             ],
             config_with(
-                "[input]\ntype = \"speclib\"\nuri = \"config.mzspeclib.txt\"\n\
-                 calib_uri = \"calib.mzspeclib.txt\"\n",
+                "[input]\ntype = \"speclib\"\nuri = \"config.mzspeclib.txt\"\n\n\
+                 [calibration_library]\nuri = \"calib.mzspeclib.txt\"\n",
             ),
         )
         .unwrap();
@@ -743,6 +731,43 @@ uri = "config_results"
             Some("calib.mzspeclib.txt"),
             "the flag replaced the library, not the calibration library"
         );
+    }
+
+    #[test]
+    fn a_calibration_library_is_accepted_with_a_fasta_primary_library() {
+        let (merged, resolved) = resolve_pair(
+            &[
+                "--fasta",
+                "proteome.fasta",
+                "--calib-lib",
+                "calib.mzspeclib.txt",
+                "--output-uri",
+                "out",
+                "--raw-inputs",
+                "a.d",
+            ],
+            config_with(""),
+        );
+
+        assert_eq!(
+            resolved.library,
+            LibrarySource::Fasta(PathBuf::from("proteome.fasta"))
+        );
+        assert_eq!(
+            resolved.calib_lib_uri.as_deref(),
+            Some("calib.mzspeclib.txt")
+        );
+        assert_eq!(
+            merged
+                .calibration_library
+                .as_ref()
+                .map(|input| input.uri.as_str()),
+            Some("calib.mzspeclib.txt"),
+            "config_used.json must retain the independent calibration input"
+        );
+        let encoded = serde_json::to_string(&merged).unwrap();
+        let decoded: Config = serde_json::from_str(&encoded).unwrap();
+        assert_eq!(decoded.calibration_library, merged.calibration_library);
     }
 
     /// A sequence database and a spectral library are independent inputs: one

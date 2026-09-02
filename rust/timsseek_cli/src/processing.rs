@@ -380,17 +380,29 @@ fn write_feature_stats_sidecar(
     feature = "instrumentation",
     tracing::instrument(skip_all, level = "trace")
 )]
+pub struct PipelineOptions<'a> {
+    pub chunk_size: usize,
+    pub output: &'a OutputConfig,
+    pub max_qvalue: f32,
+    pub calibration: &'a CalibrationConfig,
+    pub no_feature_stats: bool,
+    pub rescore_model: RescoreModel,
+}
+
 pub fn execute_pipeline<I: ScorerQueriable>(
     speclib: &ReferenceLibrary,
     calib_lib: Option<&ReferenceLibrary>,
     pipeline: &Scorer<I>,
-    chunk_size: usize,
-    out_path: &OutputConfig,
-    max_qvalue: f32,
-    calib_config: &CalibrationConfig,
-    no_feature_stats: bool,
-    rescore_model: RescoreModel,
+    options: &PipelineOptions<'_>,
 ) -> std::result::Result<PipelineReport, TimsSeekError> {
+    let PipelineOptions {
+        chunk_size,
+        output: out_path,
+        max_qvalue,
+        calibration: calib_config,
+        no_feature_stats,
+        rescore_model,
+    } = *options;
     // === PHASE 1: Broad prescore -> collect top calibrants ===
     // Use calibration library if provided, otherwise fall back to main speclib
     let phase1_lib = calib_lib.unwrap_or(speclib);
@@ -1168,27 +1180,13 @@ pub fn run_pipeline(
     speclib: &ReferenceLibrary,
     calib_lib: Option<&ReferenceLibrary>,
     pipeline: &Scorer<IndexedTimstofPeaks>,
-    chunk_size: usize,
-    output: &OutputConfig,
-    max_qvalue: f32,
     load_index_ms: u64,
-    calib_config: &CalibrationConfig,
-    no_feature_stats: bool,
-    rescore_model: RescoreModel,
+    options: &PipelineOptions<'_>,
 ) -> std::result::Result<PipelineReport, TimsSeekError> {
-    let performance_report_path = std::path::Path::new(&output.uri).join(PERFORMANCE_REPORT);
+    let performance_report_path =
+        std::path::Path::new(&options.output.uri).join(PERFORMANCE_REPORT);
 
-    let mut timings = execute_pipeline(
-        speclib,
-        calib_lib,
-        pipeline,
-        chunk_size,
-        output,
-        max_qvalue,
-        calib_config,
-        no_feature_stats,
-        rescore_model,
-    )?;
+    let mut timings = execute_pipeline(speclib, calib_lib, pipeline, options)?;
     timings.load_index_ms = load_index_ms;
     // Write per-file report
     let perf_report =

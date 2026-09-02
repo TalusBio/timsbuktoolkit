@@ -17,6 +17,7 @@ MS:1003270|proforma peptidoform ion notation=AQIPILR/2
 MS:1003061|library spectrum name=AQIPILR/2 DECOY
 MS:1000744|selected ion m/z=405.763438
 MS:1000041|charge state=2
+MS:1003072|spectrum origin type=MS:1003074|predicted spectrum
 MS:1003212|library attribute set name=DECOY
 <Analyte=1>
 MS:1003270|proforma peptidoform ion notation=RLIPIQA/2

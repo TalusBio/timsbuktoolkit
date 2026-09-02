@@ -78,6 +78,12 @@ use super::timings::{
     PrescoreTimings,
     ScoreTimings,
 };
+
+struct CandidateIdentity {
+    handles: RowHandles,
+    source_id: timsquery::models::OwnedSourceId,
+    digest: Peptide,
+}
 use crate::rt_calibration::{
     CalibrationResult,
     LibraryRT,
@@ -561,11 +567,8 @@ impl<I: ScorerQueriable> Scorer<I> {
     fn build_calibrated_extraction_into(
         &self,
         query: &Target<IonAnnot>,
-        // The flyweight's handles: the scratch `Target` is a reused buffer and
-        // cannot carry them.
-        handles: RowHandles,
+        identity: CandidateIdentity,
         expected: &ExpectedIntensities<IonAnnot>,
-        digest: Peptide,
         calibration: &CalibrationResult,
         worker: &mut ScoringWorker,
     ) -> Result<super::apex_finding::PeptideMetadata, SkipReason> {
@@ -588,9 +591,10 @@ impl<I: ScorerQueriable> Scorer<I> {
         )?;
 
         Ok(super::apex_finding::PeptideMetadata {
-            digest,
+            digest: identity.digest,
             charge: query.precursor_charge(),
-            handles,
+            handles: identity.handles,
+            source_id: identity.source_id,
             library_rt: original_irt.0,
             calibrated_rt_seconds: calibrated_rt.0,
             ref_mobility_ook0: query.mobility_ook0(),
@@ -604,13 +608,11 @@ impl<I: ScorerQueriable> Scorer<I> {
         feature = "instrumentation",
         tracing::instrument(skip_all, level = "trace")
     )]
-    #[allow(clippy::too_many_arguments)]
-    pub fn score_calibrated_extraction(
+    fn score_calibrated_extraction(
         &self,
         query: &Target<IonAnnot>,
-        handles: RowHandles,
+        identity: CandidateIdentity,
         expected: &ExpectedIntensities<IonAnnot>,
-        digest: Peptide,
         calibration: &CalibrationResult,
         worker: &mut ScoringWorker,
         timings: &mut ScoreTimings,
@@ -620,14 +622,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         let metadata = timed!(
             timings.extraction,
             tracing::span!(tracing::Level::TRACE, "score_calibrated::extraction").in_scope(|| self
-                .build_calibrated_extraction_into(
-                    query,
-                    handles,
-                    expected,
-                    digest,
-                    calibration,
-                    worker
-                ))
+                .build_calibrated_extraction_into(query, identity, expected, calibration, worker))
         )?;
 
         let scoring_ctx = worker
@@ -762,12 +757,15 @@ impl<I: ScorerQueriable> Scorer<I> {
                         tracing::span!(tracing::Level::TRACE, "score_calibrated_item").entered();
                     let mut t = ScoreTimings::default();
                     scratch.fill_from(&q);
-                    let digest = q.materialize_peptide();
+                    let identity = CandidateIdentity {
+                        handles: q.handles(),
+                        source_id: q.output_id().to_owned_id(),
+                        digest: q.materialize_peptide(),
+                    };
                     let result = self.score_calibrated_extraction(
                         &scratch.eg,
-                        q.handles(),
+                        identity,
                         &scratch.expected,
-                        digest,
                         calibration,
                         &mut worker,
                         &mut t,
@@ -956,11 +954,11 @@ mod tests {
     use timsquery::models::capabilities::TargetCapabilities;
     use timsquery::models::{
         Row,
-        TargetColumns,
+        TargetColumnsBuilder,
     };
 
     fn tiny_lazy_lib() -> ReferenceLibrary {
-        let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
+        let mut geom = TargetColumnsBuilder::with_capabilities(TargetCapabilities::default_diann());
         geom.push_row(Row {
             precursor_mz: 900.4,
             charge: 2,
@@ -978,10 +976,11 @@ mod tests {
         let geom = geom
             .seal(crate::models::DecoyPolicy::Force)
             .expect("fixture ids are usable");
-        ReferenceLibrary {
+        ReferenceLibrary::from_sealed_arena(timsquery::serde::TargetTable::Mzpaf {
             geom,
-            frag_intens: vec![1.0, 0.5],
-        }
+            frag_intens: Some(vec![1.0, 0.5]),
+        })
+        .expect("fixture is a valid reference library")
     }
 
     #[test]

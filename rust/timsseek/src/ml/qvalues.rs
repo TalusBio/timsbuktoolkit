@@ -179,14 +179,10 @@ const RESCORE_SHUFFLE_SEED: u64 = 42;
 /// peak-bucket layouts produce identical features but different vec orderings).
 /// Without a stable sort here, the seeded shuffle sees different inputs across
 /// runs -> different fold assignment -> different q-values -> drifting target
-/// counts across equivalent configs. `(row, precursor_charge)` is a non-FP
-/// composite key that should be unique per candidate after target-decoy
-/// competition: a target and its ±decoy variants share a row, but competition
-/// leaves exactly ONE candidate per (row, charge), so the key stays unique
-/// among the survivors that reach here.
-///
-/// The key is the arena row rather than the id the row reports, so a
-/// caller-supplied id can never reach the sort and change the fold assignment.
+/// counts across equivalent configs. `(source_id, precursor_charge)` is a
+/// non-FP composite key unique after target-decoy competition.
+/// Source identity, unlike arena row, is stable across persisted and in-memory
+/// prediction routes.
 ///
 /// The shuffle is NOT cosmetic: every fold partition below is positional, so an
 /// unshuffled (library-ordered) input would make folds correlate with library
@@ -197,7 +193,16 @@ const RESCORE_SHUFFLE_SEED: u64 = 42;
 /// labels are positional. Building a frame first would misalign its rows after
 /// the shuffle without changing its shape.
 fn canonicalize_and_shuffle(data: &mut [CompetedCandidate]) {
-    data.sort_unstable_by_key(|c| (c.scoring.identity.row, c.scoring.identity.precursor_charge));
+    data.sort_unstable_by(|a, b| {
+        (
+            &a.scoring.identity.source_id,
+            a.scoring.identity.precursor_charge,
+        )
+            .cmp(&(
+                &b.scoring.identity.source_id,
+                b.scoring.identity.precursor_charge,
+            ))
+    });
 
     use rand::SeedableRng;
     let mut rng = rand::rngs::StdRng::seed_from_u64(RESCORE_SHUFFLE_SEED);
@@ -951,23 +956,25 @@ mod feature_tests {
         ScoringFields,
     };
     use std::sync::Arc;
-    use timsquery::models::{
-        RowIdx,
-        test_handles,
-    };
+    use timsquery::models::test_handles;
 
     fn base_scoring_fields(peptide: Peptide) -> ScoringFields {
         ScoringFields::sample(peptide)
     }
 
     /// Pairs each candidate with the score it got, sorted, so two runs are
-    /// comparable regardless of output order. Keyed on the arena row because
+    /// comparable regardless of output order. Keyed on stable source id because
     /// that is what `canonicalize_and_shuffle` sorts by, so a run that assigned
     /// the same set of scores to different candidates still fails.
-    fn determinism_key(out: &[FinalResult]) -> Vec<(RowIdx, u32)> {
-        let mut v: Vec<(RowIdx, u32)> = out
+    fn determinism_key(out: &[FinalResult]) -> Vec<(timsquery::models::OwnedSourceId, u32)> {
+        let mut v: Vec<_> = out
             .iter()
-            .map(|r| (r.scoring.identity.row, r.discriminant_score.to_bits()))
+            .map(|r| {
+                (
+                    r.scoring.identity.source_id.clone(),
+                    r.discriminant_score.to_bits(),
+                )
+            })
             .collect();
         v.sort_unstable();
         v
@@ -1104,6 +1111,7 @@ mod feature_tests {
             .map(|i| {
                 let mut c = sample_competed_candidate(true);
                 c.scoring.identity.row = test_handles::row(i);
+                c.scoring.identity.source_id = timsquery::models::OwnedSourceId::Numeric(i as u64);
                 let is_target = i % 2 == 0;
                 c.scoring.identity.is_target = is_target;
                 let base: u8 = if is_target { 20 } else { 8 };
@@ -1637,6 +1645,7 @@ mod feature_tests {
             .map(|i| {
                 let mut c = sample_competed_candidate(true);
                 c.scoring.identity.row = test_handles::row(i);
+                c.scoring.identity.source_id = timsquery::models::OwnedSourceId::Numeric(i as u64);
                 c.scoring.identity.is_target = i % 2 == 0;
                 c
             })

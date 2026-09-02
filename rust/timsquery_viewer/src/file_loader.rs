@@ -408,7 +408,7 @@ mod tests {
     use timsquery::models::capabilities::TargetCapabilities;
     use timsquery::models::{
         Row,
-        TargetColumns,
+        TargetColumnsBuilder,
     };
     use timsquery::utils::constants::PROTON_MASS;
     use timsseek::fragment_mass::isotope_dist_or_averagine;
@@ -417,7 +417,7 @@ mod tests {
     /// uncountable composition (`B` is not a real residue), forcing the
     /// averagine isotope path.
     fn uncountable_lib() -> ReferenceLibrary {
-        let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
+        let mut geom = TargetColumnsBuilder::with_capabilities(TargetCapabilities::default_diann());
         geom.push_row(Row {
             precursor_mz: 600.0,
             charge: 1,
@@ -434,10 +434,11 @@ mod tests {
         let geom = geom
             .seal(timsquery::models::capabilities::DecoyPolicy::Never)
             .expect("fixture ids are usable");
-        ReferenceLibrary {
+        ReferenceLibrary::try_from(timsquery::serde::TargetTable::Mzpaf {
             geom,
-            frag_intens: vec![1.0, 0.5],
-        }
+            frag_intens: Some(vec![1.0, 0.5]),
+        })
+        .expect("fixture is a valid reference library")
     }
 
     /// The envelope the viewer DISPLAYS (obtained via `get_elem`, i.e. the

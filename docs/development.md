@@ -7,7 +7,6 @@ Reference for working on timsbuktoolkit. All binaries ship `--help` for CLI flag
 | Binary | Crate | Purpose |
 |--------|-------|---------|
 | `timsseek` | `timsseek_cli` | Peptide-centric search |
-| `timsseek_sample_speclib` | `timsseek_cli` | Speclib sampling utility |
 | `timsquery_cli` | `timsquery_cli` | Low-level timsTOF query |
 | `timsquery_viewer` | `timsquery_viewer` | GUI viewer for query results |
 | `calib_dash` | `calib_dash` | Replay a saved `calibration.json` in the RT-calibration dashboard |

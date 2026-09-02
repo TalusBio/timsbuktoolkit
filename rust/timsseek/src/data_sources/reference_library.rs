@@ -37,6 +37,7 @@ pub struct ReferenceLibrary {
     pub geom: TargetColumns<IonAnnot>,
     /// Parallel to `geom.frag_labels` / `geom.frag_mzs`; same `frag_off` ranges.
     pub frag_intens: Vec<f32>,
+    sequence_features: SeqFeatureState,
 }
 
 pub trait ExpectedIntensity {
@@ -115,7 +116,12 @@ impl ReferenceLibrary {
                         ),
                     });
                 }
-                Ok(ReferenceLibrary { geom, frag_intens })
+                let sequence_features = geom.capabilities().sequence_features;
+                Ok(ReferenceLibrary {
+                    geom,
+                    frag_intens,
+                    sequence_features,
+                })
             }
             TargetTable::Str { .. } => Err(TargetReadingError::UnsupportedFormat {
                 message: "timsseek requires ion-annotated fragments (mzpaf); got string labels"
@@ -125,8 +131,8 @@ impl ReferenceLibrary {
     }
 }
 
-/// The conversion spelling of [`ReferenceLibrary::from_sealed_arena`], finalize
-/// included, so no `.try_into()` yields a library whose parse gate never ran.
+/// The public conversion spelling; finalize included, so no `.try_into()`
+/// yields a library whose parse gate never ran.
 impl TryFrom<TargetTable> for ReferenceLibrary {
     type Error = TargetReadingError;
 
@@ -184,7 +190,7 @@ impl<'a> ExpectedIntensity for RefQuery<'a> {
 
     fn expected_precursor_envelope(&self) -> SmallVec<[(i8, f32); 3]> {
         let tgt = self.geom.row();
-        let IsotopeStrategy::FromComposition { n_isotopes } = self.lib.geom.caps.isotopes;
+        let IsotopeStrategy::FromComposition { n_isotopes } = self.lib.geom.capabilities().isotopes;
         let seq = self.lib.geom.seq_strip(tgt);
         let charge = self.lib.geom.charge(tgt) as f64;
         let neutral = self.lib.geom.precursor_mz(tgt) * charge - charge * PROTON_MASS;
@@ -290,7 +296,7 @@ impl<'a> ScoredIdentity for RefQuery<'a> {
         Peptide {
             raw: coll.seq_mod(self.geom.row()).into(),
             decoy: self.decoy_marking(),
-            sequence_features: coll.caps.sequence_features == SeqFeatureState::Available,
+            sequence_features: self.lib.sequence_features == SeqFeatureState::Available,
         }
     }
 }
@@ -331,7 +337,7 @@ impl ReferenceLibrary {
     /// from standing at the reader's optimistic default -- claiming
     /// sequence-derived features for rows that will not parse. Every route in,
     /// [`Self::from_file`] included, ends here.
-    pub fn from_sealed_arena(arena: TargetTable) -> Result<Self, TargetReadingError> {
+    pub(crate) fn from_sealed_arena(arena: TargetTable) -> Result<Self, TargetReadingError> {
         let mut lib = Self::from_arena(arena)?;
         lib.report_decoys();
         lib.gate_sequence_features();
@@ -374,7 +380,7 @@ impl ReferenceLibrary {
     /// Whether every sequence in the library parsed (gates sequence-derived
     /// scoring features). Reads the sealed arena's `sequence_features` state.
     pub fn parsable_sequences(&self) -> bool {
-        self.geom.caps.sequence_features == SeqFeatureState::Available
+        self.sequence_features == SeqFeatureState::Available
     }
 
     /// Mean number of fragments per entry (0.0 for an empty library).
@@ -448,7 +454,7 @@ impl ReferenceLibrary {
             }
         }
 
-        self.geom.caps.sequence_features = if n_unparsable == 0 {
+        self.sequence_features = if n_unparsable == 0 {
             SeqFeatureState::Available
         } else {
             SeqFeatureState::Unavailable
@@ -483,7 +489,7 @@ impl ReferenceLibrary {
             self.geom.n_rows(),
             self.len(),
             self.geom.n_fragments(),
-            self.geom.caps.sequence_features,
+            self.sequence_features,
         );
     }
 }
@@ -492,7 +498,10 @@ impl ReferenceLibrary {
 mod tests {
     use super::*;
     use timsquery::IonAnnot;
-    use timsquery::models::Row;
+    use timsquery::models::{
+        Row,
+        TargetColumnsBuilder,
+    };
 
     /// Indices come from the arena; there is no constructor from an integer.
     fn row(lib: &ReferenceLibrary, i: usize) -> RowIdx {
@@ -503,11 +512,10 @@ mod tests {
         lib.geom.flats().nth(i).unwrap()
     }
 
-    use timsquery::models::TargetColumns;
     use timsquery::models::capabilities::*;
 
     fn tiny_ref_lib() -> ReferenceLibrary {
-        let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
+        let mut geom = TargetColumnsBuilder::with_capabilities(TargetCapabilities::default_diann());
         geom.push_row(Row {
             precursor_mz: 900.4,
             charge: 2,
@@ -529,15 +537,15 @@ mod tests {
         ReferenceLibrary {
             geom,
             frag_intens: vec![1.0, 0.5],
+            sequence_features: SeqFeatureState::Available,
         }
     }
 
     #[test]
     fn target_table_narrows_to_reference_library() {
-        use timsquery::models::TargetColumns;
         use timsquery::models::capabilities::TargetCapabilities;
         use timsquery::serde::TargetTable;
-        let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
+        let mut geom = TargetColumnsBuilder::with_capabilities(TargetCapabilities::default_diann());
         geom.push_row(Row {
             precursor_mz: 900.4,
             charge: 2,
@@ -558,8 +566,8 @@ mod tests {
         let lib: ReferenceLibrary = arena.try_into().unwrap();
         assert_eq!(lib.frag_intens.len(), 1);
 
-        let sgeom: TargetColumns<std::sync::Arc<str>> =
-            TargetColumns::with_capabilities(TargetCapabilities::default_diann());
+        let sgeom: TargetColumnsBuilder<std::sync::Arc<str>> =
+            TargetColumnsBuilder::with_capabilities(TargetCapabilities::default_diann());
         let sgeom = sgeom
             .seal(crate::models::DecoyPolicy::Never)
             .expect("an empty arena seals");
@@ -646,6 +654,11 @@ mod load_tests {
     use crate::data_sources::reference_library::{
         ExpectedIntensity,
         RefQuery,
+    };
+    use timsquery::models::{
+        Row,
+        TargetCapabilities,
+        TargetColumnsBuilder,
     };
 
     /// A retired format is recognised by name and rejected, whichever way its
@@ -976,16 +989,11 @@ mod load_tests {
     /// against the rows: the same specs under two policies are two different
     /// libraries, which is most of what there is to test here.
     fn hand_assembled_arena(policy: crate::models::DecoyPolicy, rows: &[RowSpec]) -> TargetTable {
-        use timsquery::models::{
-            Row,
-            TargetCapabilities,
-        };
-
         let frags = [
             (IonAnnot::try_from("y1").unwrap(), 300.0),
             (IonAnnot::try_from("y2").unwrap(), 400.0),
         ];
-        let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
+        let mut geom = TargetColumnsBuilder::with_capabilities(TargetCapabilities::default_diann());
         for (i, spec) in rows.iter().enumerate() {
             geom.push_row(Row {
                 precursor_mz: 500.0 + 100.0 * i as f64,
@@ -1263,36 +1271,30 @@ mod load_tests {
 
     /// Where the exclusion above is enforced, stated where it can fail.
     ///
-    /// `seal` resolves `Force` to `MassShift` off the rows it was handed and
-    /// drops nothing, so an arena assembled outside a reader keeps its shipped
-    /// decoys and derives variants over them as well. Every route from a file
-    /// goes through a reader, which applies `DecoyPolicy::accepts` per row, so
-    /// nothing in the workload reaches this state -- but the drop lives in each
-    /// reader rather than in the seal, which checks the groups it was handed and
-    /// not the rows a policy should have excluded, and a reader that forgets it
-    /// lands here.
+    /// The sealed boundary rejects a reader that forgot to apply `Force` while
+    /// its intensity sidecar was still aligned with rows.
     #[test]
-    fn seal_alone_keeps_shipped_decoys_under_force() {
-        let lib = ReferenceLibrary::from_sealed_arena(hand_assembled_arena(
-            crate::models::DecoyPolicy::Force,
-            &a_shipped_pair(),
-        ))
-        .expect("an mzpaf arena carrying intensities narrows");
-
-        assert_eq!(lib.geom.n_stored_decoys(), 1);
-        assert_eq!(lib.geom.variants_per_row(), 3);
-        assert_eq!(
-            marks_of(&lib),
-            vec![
-                DecoyMarking::Target,
-                DecoyMarking::MassShiftedDecoy,
-                DecoyMarking::MassShiftedDecoy,
-                DecoyMarking::ReversedDecoy,
-                DecoyMarking::MassShiftedDecoy,
-                DecoyMarking::MassShiftedDecoy,
-            ],
-            "the shifted variants of a shipped decoy are marked as derived"
-        );
+    fn seal_rejects_shipped_decoys_under_force() {
+        let mut geom = TargetColumnsBuilder::with_capabilities(TargetCapabilities::default_diann());
+        for spec in a_shipped_pair() {
+            geom.push_row(Row {
+                precursor_mz: 500.0,
+                charge: 2,
+                frags: &[(IonAnnot::try_from("y2").unwrap(), 200.0)],
+                seq_strip: spec.sequence,
+                seq_mod: spec.sequence,
+                is_decoy: spec.is_decoy,
+                decoy_group: spec.group.map(Into::into),
+                ..Default::default()
+            });
+        }
+        let err = geom
+            .seal(crate::models::DecoyPolicy::Force)
+            .expect_err("derived decoys over stored decoys are invalid");
+        assert!(matches!(
+            err,
+            timsquery::models::SourceIdError::ForceWithStoredDecoys { count: 1 }
+        ));
     }
 
     /// The OFF branch of the library-scale parse gate, and the only test of it.
@@ -1416,14 +1418,9 @@ mod load_tests {
     /// causes the disclosed DIA-NN/Skyline regression).
     #[test]
     fn reference_library_rejects_mzpaf_without_intensities() {
-        use timsquery::models::capabilities::TargetCapabilities;
-        use timsquery::models::{
-            Row,
-            TargetColumns,
-        };
         use timsquery::serde::TargetTable;
 
-        let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
+        let mut geom = TargetColumnsBuilder::with_capabilities(TargetCapabilities::default_diann());
         geom.push_row(Row {
             precursor_mz: 900.4,
             charge: 2,

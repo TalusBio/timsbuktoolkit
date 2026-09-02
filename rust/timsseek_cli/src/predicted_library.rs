@@ -2,13 +2,11 @@
 //! between.
 //!
 //! msspeculator hands every precursor to a [`LibrarySink`]; this one spells the
-//! rows into [`TargetColumns`] instead of into mzSpecLib or DIA-NN text. The
+//! rows into [`timsquery::models::TargetColumns`] instead of into mzSpecLib or DIA-NN text. The
 //! result has to agree with loading the same library off disk on every value a
 //! scorer reads, so every spelling decision here mirrors the mzSpecLib reader in
 //! `timsquery::serde::mzspeclib_io` -- the two routes agree on the numbers they
-//! store, not on the strings they pass through. Row order is the exception: the
-//! file route stores prediction-arrival order, this one sorts (see
-//! [`build_arena`]).
+//! store, not on the strings they pass through.
 //!
 //! The sink is moved onto msspeculator's writer thread and never handed back, so
 //! the finished rows come out through shared state: [`sink`] returns a handle
@@ -39,7 +37,7 @@ use timsquery::ion::{
 use timsquery::models::{
     Row,
     TargetCapabilities,
-    TargetColumns,
+    TargetColumnsBuilder,
 };
 use timsquery::serde::{
     TargetReadingError,
@@ -63,7 +61,7 @@ use crate::errors::CliError;
 /// and disagree the moment a run holds one of each --
 /// `check_rt_scale_compatibility` then reports a pair with no overlapping RT
 /// range. That the unit is wrong for the context-free case is
-/// https://github.com/TalusBio/timsbuktoolkit/issues/115, which is a different
+/// <https://github.com/TalusBio/timsbuktoolkit/issues/115>, which is a different
 /// question from the two routes agreeing.
 const SECONDS_PER_MINUTE: f32 = 60.0;
 
@@ -168,10 +166,9 @@ impl PredictedLibraryHandle {
         let arena = build_arena(rows, decoys).map_err(|e| CliError::LibraryBuild {
             source: format!("assembling the predicted library: {e:?}"),
         })?;
-        let library =
-            ReferenceLibrary::from_sealed_arena(arena).map_err(|e| CliError::LibraryBuild {
-                source: format!("finalizing the predicted library: {e:?}"),
-            })?;
+        let library = ReferenceLibrary::try_from(arena).map_err(|e| CliError::LibraryBuild {
+            source: format!("finalizing the predicted library: {e:?}"),
+        })?;
         Ok(PredictedLibrary {
             library,
             provenance,
@@ -309,20 +306,8 @@ fn ion_annot(peak: &Peak<'_>) -> Result<IonAnnot> {
 }
 
 /// Push every kept row into a sealed arena, with the intensity sidecar beside it.
-///
-/// Rows go in sorted rather than in arrival order. msspeculator calls `spectrum`
-/// as predictions come back from a pool of workers, so the same FASTA predicted
-/// twice arrives in a different order; `RowIdx` is then the canonicalization key
-/// for rescoring, where `canonicalize_and_shuffle` sorts by
-/// `(identity.row, precursor_charge)` and cuts folds positionally. Arrival order
-/// would put a peptide in a different fold on every run and give one library two
-/// sets of q-values. The buffer this drains exists for that and not for speed.
-///
-/// `{proforma}/{charge}` is a total order over the rows and is also the source
-/// id, so two rows can only tie by being one duplicated id, which the seal
-/// rejects.
 fn build_arena(
-    mut rows: Vec<PredictedRow>,
+    rows: Vec<PredictedRow>,
     decoys: DecoyPolicy,
 ) -> Result<TargetTable, TargetReadingError> {
     // A zero-row arena seals: ids and groups are both vacuously consistent, the
@@ -336,9 +321,7 @@ fn build_arena(
                 .to_string(),
         ));
     }
-    rows.sort_unstable_by(|a, b| a.id.cmp(&b.id));
-
-    let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
+    let mut geom = TargetColumnsBuilder::with_capabilities(TargetCapabilities::default_diann());
     let mut frag_intens: Vec<f32> = Vec::new();
 
     for row in &rows {
@@ -412,6 +395,7 @@ mod tests {
         DecoyStrategy,
         RowIdx,
         SeqFeatureState,
+        TargetColumns,
     };
 
     use super::*;
@@ -520,7 +504,8 @@ mod tests {
     /// Everything a scorer can observe about a library, so two of them can be
     /// compared without reaching into the arena's private columns.
     fn projection(lib: &PredictedLibrary) -> Vec<String> {
-        lib.library
+        let mut rows: Vec<_> = lib
+            .library
             .geom
             .rows()
             .map(|tgt| {
@@ -538,11 +523,13 @@ mod tests {
                     &lib.library.frag_intens[geom.frag_range(tgt)],
                 )
             })
-            .collect()
+            .collect();
+        rows.sort_unstable();
+        rows
     }
 
     #[test]
-    fn rows_handed_over_out_of_order_produce_the_same_library_as_rows_handed_over_in_order() {
+    fn arrival_order_does_not_change_library_contents() {
         let first = Fixture::new("AAAPEPTIDEK", "AAAPEPTIDEK");
         let second = Fixture::new("MMMPEPTIDER", "MMMPEPTIDER");
 
@@ -564,7 +551,6 @@ mod tests {
         );
 
         assert_eq!(projection(&ordered), projection(&shuffled));
-        assert_eq!(ordered.library.frag_intens, shuffled.library.frag_intens);
     }
 
     #[test]
@@ -636,7 +622,7 @@ mod tests {
         assert_eq!(lib.library.geom.n_rows(), 1);
         assert_eq!(lib.library.frag_intens.len(), 3);
         assert!(matches!(
-            lib.library.geom.caps.decoys,
+            lib.library.geom.capabilities().decoys,
             DecoyStrategy::MassShift { .. }
         ));
     }
@@ -664,7 +650,7 @@ mod tests {
         assert_eq!(lib.library.geom.seq_mod(tgt), "PEPC[UNIMOD:4]IDEK/2");
         assert_eq!(lib.library.geom.seq_strip(tgt), "PEPCIDEK");
         assert_eq!(
-            lib.library.geom.caps.sequence_features,
+            lib.library.geom.capabilities().sequence_features,
             SeqFeatureState::Available,
         );
     }
@@ -810,8 +796,7 @@ mod tests {
             .collect()
     }
 
-    /// Find the row carrying `id`, since row order is the one thing the two
-    /// routes are not expected to share (see [`build_arena`]).
+    /// Find the row carrying `id`; persistence is free to choose storage order.
     fn row_named(geom: &TargetColumns<IonAnnot>, id: &str) -> RowIdx {
         geom.rows()
             .find(|row| geom.output_id(*row).to_string() == id)

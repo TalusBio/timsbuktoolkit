@@ -91,7 +91,7 @@ pub const DEPRECATED_FLAGS: &[(&str, &str)] = &[
 
 /// The date the deprecated spellings stop being accepted, in the first release
 /// after it. The removal is scheduled work rather than a constant nobody reads:
-/// see https://github.com/TalusBio/timsbuktoolkit/issues/116.
+/// see <https://github.com/TalusBio/timsbuktoolkit/issues/116>.
 pub const DEPRECATION_REMOVAL_DATE: &str = "2026-12-31";
 
 impl Cli {

@@ -56,7 +56,7 @@ pub enum DecoyStrategy {
 ///
 /// Distinct from [`DecoyStrategy`], which is the mechanism the arena ends up
 /// using. A policy plus the rows the file turned out to ship determines the
-/// strategy ([`Self::strategy`]), and [`TargetColumns::seal`](crate::models::TargetColumns::seal) is the only place
+/// strategy ([`Self::strategy`]), and [`TargetColumnsBuilder::seal`](crate::models::TargetColumnsBuilder::seal) is the only place
 /// that resolves one into the other -- so `caps.decoys` is written exactly once
 /// per arena, by the seal, and nothing downstream can revise it.
 ///
@@ -221,7 +221,7 @@ impl TargetCapabilities {
     /// available (re-gated at load), 3-isotope composition envelopes, and no
     /// decoys.
     ///
-    /// `decoys` is a placeholder: [`TargetColumns::seal`](crate::models::TargetColumns::seal) overwrites it from the
+    /// `decoys` is a placeholder: [`TargetColumnsBuilder::seal`](crate::models::TargetColumnsBuilder::seal) overwrites it from the
     /// caller's [`DecoyPolicy`], so nothing reads it before the seal and no
     /// constructor here can decide it. `Stored` rather than `MassShift` so that
     /// a hypothetical unsealed read sees target geometry only -- a decoying

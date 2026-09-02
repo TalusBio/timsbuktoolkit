@@ -18,7 +18,8 @@
 //! before the read rather than a fallback taken during it. The decision is only
 //! ever reached for a library that annotates nothing, because mzPAF's `?` -- the
 //! writer marking a peak noise -- arrives as the same empty annotation list a
-//! file with no annotation column produces. See [`AnnotationCensus`].
+//! file with no annotation column produces. The reader classifies that property
+//! in a preflight pass, so spectrum order cannot change library semantics.
 //!
 //! Finding that theoretical m/z is itself a ladder, because the exports differ
 //! again: the composition when the annotation carries one, the mzPAF mass-error
@@ -29,6 +30,7 @@
 //! and reported once. A field being absent and a field being unreadable are
 //! different, and the counts are what tell them apart; see [`Degradation`].
 
+use std::collections::HashSet;
 use std::io::BufRead;
 use std::path::Path;
 
@@ -78,7 +80,7 @@ use crate::models::capabilities::{
 use crate::models::{
     Row,
     TargetCapabilities,
-    TargetColumns,
+    TargetColumnsBuilder,
 };
 
 /// What the parser yields. `MzSpecLibTextParser`'s `Iterator::Item` fixes the
@@ -209,28 +211,42 @@ fn read_counting_degradation(
     path: &Path,
     policy: LoadPolicy,
 ) -> Result<(TargetTable, Degradation), TargetReadingError> {
+    let unannotated = if policy.unannotated == UnannotatedPeaks::KeepAll {
+        UnannotatedPeaks::KeepAll
+    } else if library_has_annotations(path)? {
+        UnannotatedPeaks::Skip
+    } else {
+        policy.unannotated
+    };
     let reader = open_reader(path)?;
     let parser = MzSpecLibTextParser::open(reader, Some(path.to_path_buf()), ontologies())
         .map_err(|e| TargetReadingError::SpeclibParse(format!("mzSpecLib header: {e}")))?;
 
-    let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
+    let mut geom = TargetColumnsBuilder::with_capabilities(TargetCapabilities::default_diann());
     let mut frag_intens: Vec<f32> = Vec::new();
     let mut degradation = Degradation::default();
     // Read off the header before the iterator takes the parser, which is also
     // the only place it can be read: it is what an entry declaring nothing about
     // its mass provenance falls back to.
     let library_theoretical_mz = library_declares_theoretical_mz(parser.header());
-    let mut census = AnnotationCensus::new(policy.unannotated);
+    let spectrum_attribute_sets: HashSet<String> = parser
+        .header()
+        .attribute_classes
+        .get(&EntryType::Spectrum)
+        .into_iter()
+        .flatten()
+        .map(|set| set.id.clone())
+        .collect();
 
     for (index, spectrum) in parser.enumerate() {
         let spectrum = spectrum.map_err(|e| {
             TargetReadingError::SpeclibParse(format!("mzSpecLib spectrum {}: {e}", index + 1))
         })?;
-        let unannotated = census.plan_for(&spectrum)?;
         let row = SpectrumRow::extract(
             &spectrum,
             library_theoretical_mz,
             unannotated,
+            &spectrum_attribute_sets,
             &mut degradation,
         )?;
         // Dropped here, so the decoy's peaks are never pushed and its group
@@ -287,70 +303,26 @@ fn read_counting_degradation(
     ))
 }
 
-/// Whether this library annotates its peaks at all, decided from the first
-/// entry that has any.
-///
-/// The decision is the library's rather than the peak's because the peak cannot
-/// carry it: mzannotate collapses mzPAF's `?` onto the same empty annotation
-/// list a bare peak list produces, so a noise-marked peak and an unannotated one
-/// are one shape here. An entry that annotates something has marked the rest of
-/// its peaks noise; a library that annotates nothing is the library the caller's
-/// [`UnannotatedPeaks`] was stated for.
-///
-/// A leading entry with no peaks decides nothing, or a library whose first entry
-/// happens to declare none would have that entry answer for all the rest.
-struct AnnotationCensus {
-    /// The caller's decision, reached only once the library turns out to
-    /// annotate nothing.
-    policy: UnannotatedPeaks,
-    annotates: Option<bool>,
-}
-
-impl AnnotationCensus {
-    fn new(policy: UnannotatedPeaks) -> Self {
-        Self {
-            policy,
-            annotates: None,
-        }
-    }
-
-    /// What this entry's unannotated peaks get.
-    ///
-    /// [`UnannotatedPeaks::KeepAll`] discards the annotations an entry does
-    /// carry, so it never asks the question and the census stays undecided
-    /// under it.
-    fn plan_for(&mut self, spectrum: &Spectrum) -> Result<UnannotatedPeaks, TargetReadingError> {
-        if self.policy == UnannotatedPeaks::KeepAll {
-            return Ok(UnannotatedPeaks::KeepAll);
-        }
-        let annotates = spectrum
+/// Determine the library-wide meaning of an empty annotation list before
+/// emitting rows. Reopening is intentional: buffering a proteome-scale library
+/// merely to make this decision would be substantially more expensive.
+fn library_has_annotations(path: &Path) -> Result<bool, TargetReadingError> {
+    let parser =
+        MzSpecLibTextParser::open(open_reader(path)?, Some(path.to_path_buf()), ontologies())
+            .map_err(|e| TargetReadingError::SpeclibParse(format!("mzSpecLib header: {e}")))?;
+    for (index, spectrum) in parser.enumerate() {
+        let spectrum = spectrum.map_err(|e| {
+            TargetReadingError::SpeclibParse(format!("mzSpecLib spectrum {}: {e}", index + 1))
+        })?;
+        if spectrum
             .peaks
             .iter()
-            .any(|peak| !peak.annotations.is_empty());
-        match self.annotates {
-            // Nothing in the corpus does this. It is refused rather than
-            // resolved because the two answers are not reconcilable: the
-            // earlier entries' unannotated peaks were read as the only peaks
-            // the library has, and this entry says they were noise.
-            Some(false) if annotates => {
-                return Err(TargetReadingError::SpeclibParse(format!(
-                    "spectrum {} ({}) carries an annotated peak, in a library whose earlier \
-                     entries annotate none; its unannotated peaks have already been read as \
-                     the only peaks it has",
-                    spectrum.key,
-                    source_id(spectrum),
-                )));
-            }
-            None if !spectrum.peaks.is_empty() => self.annotates = Some(annotates),
-            _ => {}
+            .any(|peak| !peak.annotations.is_empty())
+        {
+            return Ok(true);
         }
-        if self.annotates == Some(true) {
-            // An annotated peak anywhere in the library makes an unannotated
-            // one mzPAF's `?`, which is the writer calling it noise.
-            return Ok(UnannotatedPeaks::Skip);
-        }
-        Ok(self.policy)
     }
+    Ok(false)
 }
 
 /// What a library lost on the way into the arena, counted rather than logged
@@ -377,9 +349,6 @@ struct Degradation {
     // on a normalized scale rather than an absence -- it is an anchor point, and
     // it is what msspeculator's own libraries write -- so there is nothing to
     // test for. See the CONTEXT.md entry on retention time.
-    /// A set, because this is reached per spectrum rather than per file and a
-    /// library repeats one unrecognised term on every row.
-    unrecognised_origin_types: std::collections::BTreeSet<u32>,
 }
 
 impl Degradation {
@@ -442,14 +411,6 @@ impl Degradation {
                 self.rows_without_fragments
             );
         }
-        for accession in &self.unrecognised_origin_types {
-            warn!(
-                "mzSpecLib: spectrum origin type MS:{accession} is outside this build's copy of \
-                 the vocabulary (psi-ms {}) and was read as a target. Re-run \
-                 scripts/gen_psims_origin_type.py if the term is newer than that.",
-                psims_origin_type::DATA_VERSION,
-            );
-        }
     }
 }
 
@@ -478,9 +439,10 @@ impl SpectrumRow {
         spectrum: &Spectrum,
         library_declares_theoretical_mz: bool,
         unannotated: UnannotatedPeaks,
+        spectrum_attribute_sets: &HashSet<String>,
         degradation: &mut Degradation,
     ) -> Result<Self, TargetReadingError> {
-        reject_unresolved_attribute_sets(spectrum)?;
+        reject_unresolved_attribute_sets(spectrum, spectrum_attribute_sets)?;
 
         let analyte = spectrum.analytes.first();
         let peptidoform = analyte.and_then(|a| match &a.target {
@@ -566,7 +528,7 @@ impl SpectrumRow {
             charge: charge(spectrum, peptidoform),
             rt_seconds: rt_seconds(spectrum),
             mobility: mobility(spectrum),
-            is_decoy: is_decoy(spectrum, degradation),
+            is_decoy: is_decoy(spectrum)?,
             declared_group: declared_group(spectrum),
             seq_strip,
             seq_mod,
@@ -582,23 +544,20 @@ impl SpectrumRow {
 /// absent, and the decoy declaration is exactly what such a set usually carries.
 /// mzannotate drops an unresolvable claim silently but leaves the claim itself
 /// in the spectrum's leftover attributes, which is what this sees.
-fn reject_unresolved_attribute_sets(spectrum: &Spectrum) -> Result<(), TargetReadingError> {
-    // A resolved claim contributes its own attributes, so the origin type is
-    // present; an unresolved one leaves only the claim.
-    let origin_type_present = spectrum
-        .description
-        .params
-        .iter()
-        .any(|p| is_ms_term(p, SPECTRUM_ORIGIN_TYPE));
+fn reject_unresolved_attribute_sets(
+    spectrum: &Spectrum,
+    defined: &HashSet<String>,
+) -> Result<(), TargetReadingError> {
     for attribute in spectrum.attributes.iter().flatten() {
         if attribute.name.accession != mzcv::curie!(MS:1003212) {
             continue;
         }
-        if !origin_type_present {
+        let claimed = attribute.value.to_string();
+        if !defined.contains(&claimed) {
             return Err(TargetReadingError::SpeclibParse(format!(
                 "spectrum {} claims attribute set {} which the header does not define; \
                  refusing to read its entries as targets",
-                spectrum.key, attribute.value
+                spectrum.key, claimed
             )));
         }
     }
@@ -726,17 +685,23 @@ fn mobility(spectrum: &Spectrum) -> f32 {
 /// One decoy subtype anywhere among the entry's origin types is enough, for the
 /// reason [`origin_types`] gives: a further origin type naming how the masses
 /// were produced does not withdraw the decoy claim.
-fn is_decoy(spectrum: &Spectrum, degradation: &mut Degradation) -> bool {
+fn is_decoy(spectrum: &Spectrum) -> Result<bool, TargetReadingError> {
     let mut decoy = false;
     for accession in origin_types(spectrum) {
         match subsumes_decoy(accession) {
             Some(subsumes) => decoy |= subsumes,
             None => {
-                degradation.unrecognised_origin_types.insert(accession);
+                return Err(TargetReadingError::SpeclibParse(format!(
+                    "spectrum {} ({}) declares unknown spectrum origin type MS:{accession}; \
+                 refusing to guess target/decoy status (reader vocabulary psi-ms {})",
+                    spectrum.key,
+                    source_id(spectrum),
+                    psims_origin_type::DATA_VERSION,
+                )));
             }
         }
     }
-    decoy
+    Ok(decoy)
 }
 
 /// The `spectrum origin type` accessions on this entry.
@@ -1309,19 +1274,26 @@ mod tests {
         assert_eq!(geom.frag_labels(annotated).len(), 2);
     }
 
-    /// Nothing in the corpus mixes the two entry-wise, and the reader would
-    /// have read one library two ways if it did: the first entry's peaks stored
-    /// as the only peaks it has, the second's marked noise and dropped.
+    /// A library-wide preflight makes mixed annotation behavior independent of
+    /// entry order: once any entry annotates peaks, empty annotations are noise.
     #[test]
-    fn an_annotated_entry_after_an_unannotated_one_is_refused() {
-        let Err(err) = read_mzspeclib_library_file(
-            &fixture("entry_annotates_after_one_that_does_not.mzspeclib.txt"),
-            LoadPolicy::default(),
-        ) else {
-            panic!("a library that annotates only some of its entries must not load");
-        };
-        let msg = format!("{err:?}");
-        assert!(msg.contains("SAMPLERK/2"), "names the entry: {msg}");
+    fn annotated_entry_after_unannotated_entry_uses_library_policy() {
+        let geom = arena("entry_annotates_after_one_that_does_not.mzspeclib.txt");
+        let (unannotated, annotated) = (geom.rows().next().unwrap(), geom.rows().nth(1).unwrap());
+        assert!(geom.frag_labels(unannotated).is_empty());
+        assert!(!geom.frag_labels(annotated).is_empty());
+
+        let reversed = arena("entry_annotates_before_one_that_does_not.mzspeclib.txt");
+        for id in ["PEPTIDEK/2", "SAMPLERK/2"] {
+            let count = |library: &TargetColumns<IonAnnot>| {
+                let row = library
+                    .rows()
+                    .find(|row| library.output_id(*row).to_string() == id)
+                    .unwrap();
+                library.frag_labels(row).len()
+            };
+            assert_eq!(count(&geom), count(&reversed), "entry order changed {id}");
+        }
     }
 
     /// Five targets and five decoys, where the only thing marking a decoy is
@@ -1752,6 +1724,17 @@ mod tests {
     fn a_term_outside_the_subtree_does_not_resolve() {
         assert_eq!(subsumes_decoy(9_999_999), None);
         assert_eq!(subsumes_decoy(0), None);
+    }
+
+    #[test]
+    fn an_unknown_origin_type_is_refused_at_file_boundary() {
+        let Err(err) = read_mzspeclib_library_file(
+            &fixture("unknown_origin_type.mzspeclib.txt"),
+            LoadPolicy::default(),
+        ) else {
+            panic!("unknown origin must not silently become a target");
+        };
+        assert!(format!("{err:?}").contains("unknown spectrum origin type"));
     }
 
     /// Both terms whose definitions state the m/z is calculated, and one whose

@@ -137,7 +137,7 @@ pub struct DecoyGroups {
     labels: SourceIds,
 }
 
-/// One row's worth of input to [`TargetColumns::push_row`].
+/// One row's worth of input to [`TargetColumnsBuilder::push_row`].
 ///
 /// Carries the row's `id`, so a row cannot be stored apart from the name its
 /// file gave it. `Default` covers the optional half, so a caller names only
@@ -167,7 +167,7 @@ pub struct Row<'a, L: KeyLike> {
     /// A decoy the library shipped, as opposed to one the arena derives.
     pub is_decoy: bool,
     /// What the source file called this row, in the shape it used. `None` for a
-    /// format that names nothing; [`TargetColumns::seal`] mints ids only when
+    /// format that names nothing; [`TargetColumnsBuilder::seal`] mints ids only when
     /// *every* row arrived `None`.
     pub id: Option<OwnedSourceId>,
     /// Which competition group the file put this row in. Rows sharing one
@@ -177,7 +177,7 @@ pub struct Row<'a, L: KeyLike> {
     /// on the target's row too.
     ///
     /// `None` means "the file did not say", and a row the file did not place
-    /// competes alone. [`TargetColumns::seal`] stores nothing at all when that
+    /// competes alone. [`TargetColumnsBuilder::seal`] stores nothing at all when that
     /// is true of every row, and when the groups it did get are all singletons
     /// -- both cases are what deriving the group from the row already does.
     ///
@@ -217,7 +217,7 @@ pub struct ModDefinition {
 
 #[derive(Debug, Clone)]
 pub struct TargetColumns<L: KeyLike> {
-    pub caps: TargetCapabilities,
+    pub(crate) caps: TargetCapabilities,
     // per-target scalars, len = n_rows; addressed by `RowIdx`, never by a
     // caller-supplied id (those live in `source_ids`)
     pub(crate) precursor_mz: Vec<f64>,
@@ -261,8 +261,42 @@ pub struct TargetColumns<L: KeyLike> {
     pub(crate) mod_registry: Vec<ModDefinition>,
 }
 
-impl<L: KeyLike> TargetColumns<L> {
+/// The only mutable construction state for a [`TargetColumns`] arena.
+///
+/// Keeping this distinct from the sealed arena makes ids, competition groups,
+/// and the decoy strategy mandatory before query methods become available.
+/// Consuming [`Self::seal`] is the sole public transition into a scorable arena.
+#[derive(Debug, Clone)]
+pub struct TargetColumnsBuilder<L: KeyLike> {
+    pub(crate) inner: TargetColumns<L>,
+}
+
+impl<L: KeyLike> TargetColumnsBuilder<L> {
     pub fn with_capabilities(caps: TargetCapabilities) -> Self {
+        Self {
+            inner: TargetColumns::empty(caps),
+        }
+    }
+
+    pub fn push_row(&mut self, row: Row<'_, L>) {
+        self.inner.push_row(row);
+    }
+
+    pub fn n_rows(&self) -> usize {
+        self.inner.n_rows()
+    }
+
+    pub fn n_fragments(&self) -> usize {
+        self.inner.n_fragments()
+    }
+
+    pub fn seal(self, decoys: DecoyPolicy) -> Result<TargetColumns<L>, SourceIdError> {
+        self.inner.seal(decoys)
+    }
+}
+
+impl<L: KeyLike> TargetColumns<L> {
+    fn empty(caps: TargetCapabilities) -> Self {
         Self {
             caps,
             precursor_mz: Vec::new(),
@@ -290,7 +324,7 @@ impl<L: KeyLike> TargetColumns<L> {
     /// Append one row. `mods` are (position, registry_idx) pairs; the caller
     /// is responsible for having registered the mod tokens in `mod_registry`.
     #[allow(clippy::too_many_arguments)]
-    pub fn push_row(&mut self, row: Row<'_, L>) {
+    fn push_row(&mut self, row: Row<'_, L>) {
         let Row {
             precursor_mz,
             charge,
@@ -468,7 +502,7 @@ impl<L: KeyLike> TargetColumns<L> {
         self.source_ids.get(tgt.get())
     }
 
-    /// The id a result for row `tgt` carries. Always a source id: [`Self::seal`]
+    /// The id a result for row `tgt` carries. Always a source id: [`TargetColumnsBuilder::seal`]
     /// mints them for formats that carry none, so a row position has no route
     /// into output.
     pub fn output_id(&self, tgt: RowIdx) -> SourceId<'_> {
@@ -569,15 +603,13 @@ impl<L: KeyLike> TargetColumns<L> {
     /// is refused rather than warned about because the loss leaves no trace in
     /// the output -- the run reports a lower target count and nothing else --
     /// whereas a refusal names the file at the moment it is read.
-    ///
-    /// Panics if called on an already-sealed arena, which can only happen by
-    /// cloning one.
-    pub fn seal(mut self, decoys: DecoyPolicy) -> Result<Self, SourceIdError> {
-        assert!(
-            matches!(self.source_ids, SourceIds::Absent),
-            "arena is already sealed; seal resolves the decoy policy, so a second call would \
-             revise a decision downstream code has already read"
-        );
+    fn seal(mut self, decoys: DecoyPolicy) -> Result<Self, SourceIdError> {
+        let stored_decoys = self.is_decoy.iter().filter(|&&is_decoy| is_decoy).count();
+        if decoys == DecoyPolicy::Force && stored_decoys > 0 {
+            return Err(SourceIdError::ForceWithStoredDecoys {
+                count: stored_decoys,
+            });
+        }
         // Groups first: an undeclared row falls back to its own id, which is
         // still in `pending_ids` at this point.
         self.build_decoy_groups()?;
@@ -601,6 +633,10 @@ impl<L: KeyLike> TargetColumns<L> {
         }
         self.shrink();
         Ok(self)
+    }
+
+    pub fn capabilities(&self) -> &TargetCapabilities {
+        &self.caps
     }
 
     fn build_source_ids(&mut self) -> Result<(), SourceIdError> {
@@ -800,8 +836,8 @@ mod tests {
         }
     }
 
-    fn arena_of(specs: &[Spec]) -> TargetColumns<IonAnnot> {
-        let mut c = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
+    fn arena_of(specs: &[Spec]) -> TargetColumnsBuilder<IonAnnot> {
+        let mut c = TargetColumnsBuilder::with_capabilities(TargetCapabilities::default_diann());
         for spec in specs {
             c.push_row(Row {
                 precursor_mz: 500.0,
@@ -819,7 +855,7 @@ mod tests {
         c
     }
 
-    fn two_rows() -> TargetColumns<IonAnnot> {
+    fn two_rows() -> TargetColumnsBuilder<IonAnnot> {
         arena_of(&[Spec::undeclared(), Spec::undeclared()])
     }
 
@@ -892,7 +928,7 @@ mod tests {
     /// alone, under its own id.
     #[test]
     fn a_row_outside_every_declared_group_competes_alone() {
-        let mut c = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
+        let mut c = TargetColumnsBuilder::with_capabilities(TargetCapabilities::default_diann());
         // `b` is the decoy of `a`: a group holds one target per charge, so the
         // pair is the only two-row group there is at a single charge.
         for (id, group, is_decoy) in [
@@ -940,24 +976,11 @@ mod tests {
         assert_eq!(c.decoy_group(b), SourceId::Numeric(1));
     }
 
-    /// Sealing resolves the decoy policy, so a second seal would revise a
-    /// decision downstream code has already read. Consuming `self` makes that
-    /// unreachable for a moved arena; this covers the one route left, a clone.
-    #[test]
-    #[should_panic(expected = "already sealed")]
-    fn sealing_twice_panics() {
-        let c = two_rows()
-            .seal(DecoyPolicy::Never)
-            .expect("fixture ids are usable");
-        let _ = c.clone().seal(DecoyPolicy::Force);
-    }
-
     /// `output_id` expects a source id on every row; this is what makes that
     /// safe for the formats that carry none.
     #[test]
     fn seal_mints_ids_when_the_input_carried_none() {
         let c = two_rows();
-        assert_eq!(c.source_id(RowIdx::new(0)), None);
         let c = c.seal(DecoyPolicy::Never).expect("fixture ids are usable");
         assert_eq!(c.output_id(RowIdx::new(0)), SourceId::Numeric(0));
         assert_eq!(c.output_id(RowIdx::new(1)), SourceId::Numeric(1));
@@ -965,7 +988,7 @@ mod tests {
 
     #[test]
     fn lazy_massshift_expands_len_and_flags_targets() {
-        let mut c = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
+        let mut c = TargetColumnsBuilder::with_capabilities(TargetCapabilities::default_diann());
         c.push_row(Row {
             precursor_mz: 500.0,
             charge: 2,
@@ -989,7 +1012,7 @@ mod tests {
 
     #[test]
     fn stored_is_one_variant_per_row_honoring_is_decoy() {
-        let mut c = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
+        let mut c = TargetColumnsBuilder::with_capabilities(TargetCapabilities::default_diann());
         c.push_row(Row {
             precursor_mz: 500.0,
             charge: 2,
@@ -1023,7 +1046,7 @@ mod tests {
 
     #[test]
     fn csr_ranges_recover_per_target_fragments() {
-        let mut c = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
+        let mut c = TargetColumnsBuilder::with_capabilities(TargetCapabilities::default_diann());
         // target 0: 2 frags; target 1: 3 frags
         c.push_row(Row {
             precursor_mz: 500.0,
@@ -1070,8 +1093,8 @@ mod tests {
     #[test]
     fn string_labeled_collection_and_is_decoy() {
         use std::sync::Arc;
-        let mut c: TargetColumns<Arc<str>> =
-            TargetColumns::with_capabilities(TargetCapabilities::default_diann());
+        let mut c: TargetColumnsBuilder<Arc<str>> =
+            TargetColumnsBuilder::with_capabilities(TargetCapabilities::default_diann());
         c.push_row(Row {
             precursor_mz: 500.0,
             charge: 2,
