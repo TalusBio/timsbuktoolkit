@@ -4149,7 +4149,7 @@ dependencies = [
 [[package]]
 name = "msspeculator-core"
 version = "0.1.0"
-source = "git+https://github.com/TalusBio/msspeculator?rev=34618131c4454b253fc16cb17376d913584e9f90#34618131c4454b253fc16cb17376d913584e9f90"
+source = "git+https://github.com/TalusBio/msspeculator?rev=f2034bada2f117a11b691d4a20290bb7d8071b67#f2034bada2f117a11b691d4a20290bb7d8071b67"
 dependencies = [
  "anyhow",
  "blake2",
@@ -4165,7 +4165,7 @@ dependencies = [
 [[package]]
 name = "msspeculator-inference"
 version = "0.1.0"
-source = "git+https://github.com/TalusBio/msspeculator?rev=34618131c4454b253fc16cb17376d913584e9f90#34618131c4454b253fc16cb17376d913584e9f90"
+source = "git+https://github.com/TalusBio/msspeculator?rev=f2034bada2f117a11b691d4a20290bb7d8071b67#f2034bada2f117a11b691d4a20290bb7d8071b67"
 dependencies = [
  "anyhow",
  "blake2",
