@@ -70,17 +70,36 @@ _Avoid_: id, library id, output id
 A deliberately wrong analyte scored alongside real ones to estimate the false
 discovery rate. Either shipped by the library or generated as a mass shift.
 
+How a shipped decoy was made is the library's business, not ours, and the methods
+have nothing in common:
+
+| method | sequence | composition and mass |
+| --- | --- | --- |
+| pseudo-reverse | permuted | preserved |
+| edge-mutate | substituted | changed |
+| mass-shift ±CH2 | identical | changed, by construction |
+
+Nothing is stable across all three, which is why **pairing can only be read, never
+derived**. A reader that tries to recognise a decoy's target by sequence, mass or
+composition is right for one method and wrong for the others. The only sound
+source is an explicit statement by the writer.
+
 **Decoy group**:
 The set of analytes that compete, so that one result survives per group and
-charge. Two ways a group arises, and they differ in size:
+charge. Two ways a group arises:
 
-- _Declared_ by the library, which can put **several targets** in one group --
-  `PEPTIDEK/2` and its reversed partner `PEDITPEP/2` compete because the file
-  says they are alternatives for the same evidence.
+- _Declared_ by the library, which is the only way a target and a decoy of that
+  target end up in one group: `PEPTIDEK/2` and its reversed partner
+  `PEDITPEP/2`.
 - _Derived_ when the library declares nothing, where a target competes only with
   its own decoy variants.
 
-The declared case is the reason a group is not simply "a target and its decoys".
+A group holds at most one target per charge. More than one means competition
+discards a real identification to keep another, so a group spanning several
+precursor masses -- two modified forms of one peptide, say -- is a mis-declared
+group rather than a large one. A library whose pair identifier names a peptide
+rather than a precursor produces exactly that, and the loss is silent: the run
+reports a lower target count and nothing else.
 
 Only mzSpecLib declares them. It is the one format with a way to say that one
 entry is the counterpart of another (`related spectrum keys`); a DIA-NN,
@@ -91,8 +110,23 @@ nothing more, and its group is derived.
 **Variant**:
 One member of a single target's decoy expansion -- the target itself, or one of
 its mass-shifted decoys. Scoped to one row, not to a group: a declared group
-holds several targets, each with its own variants. A stored row expands into
-several scored variants, so "one row" is not "one result".
+holds a target and its partners, each row with its own variants. A stored row
+expands into several scored variants, so "one row" is not "one result".
+
+**Shipped and derived**:
+The two independent ways a scored slot can be a decoy, and neither implies the
+other. A shipped decoy is a row the library marked as one; it sits in the
+variant-0 slot exactly as a target does. A derived decoy is a mass-shifted
+variant of a row that is itself a target. So "is this a decoy" is a question
+about the row *and* the variant, and a reader that asks only one of them calls
+half the decoys targets -- which leaves the false discovery rate estimated from
+nothing while reporting every candidate as passing.
+
+The two never coexist in one arena: a library that ships decoys is expanded 1:1,
+and mass-shift variants are derived only when nothing was shipped. That is what
+makes the variant-0 slot of a decoy row mean "shipped". It holds because the
+decoy policy is applied when rows are read, so it is a property of how an arena
+was filled rather than of the arena itself.
 
 ### Capabilities
 
