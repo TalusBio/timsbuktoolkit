@@ -3,9 +3,12 @@ use serde::{
     Serialize,
 };
 use timsquery::Tolerance;
-use timsseek::DecoyPolicy;
 use timsseek::ml::RescoreModel;
 use timsseek::scoring::CalibrationConfig;
+use timsseek::{
+    DecoyPolicy,
+    UnannotatedPeaks,
+};
 use tracing::info;
 
 use crate::errors;
@@ -165,6 +168,9 @@ pub struct AnalysisConfig {
 
     #[serde(default)]
     pub decoy_strategy: DecoyPolicy,
+
+    #[serde(default)]
+    pub unannotated_peaks: UnannotatedPeaks,
 
     #[serde(default)]
     pub rescore_model: RescoreModel,

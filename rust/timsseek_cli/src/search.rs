@@ -440,9 +440,10 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
         "Decoy generation strategy: {}",
         config.analysis.decoy_strategy
     );
+    info!("Unannotated peaks: {}", config.analysis.unannotated_peaks);
     let load_policy = timsseek::LoadPolicy {
         decoys: config.analysis.decoy_strategy,
-        ..Default::default()
+        unannotated: config.analysis.unannotated_peaks,
     };
     // Predicting draws its own progress bars, and a bar cannot share a line with
     // an open `TimedStep` label, so those routes hold the label back to the end.

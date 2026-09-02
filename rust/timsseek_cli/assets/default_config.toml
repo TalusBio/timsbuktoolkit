@@ -27,6 +27,21 @@ chunk_size = 20000
 ##                 the library ships none, which leaves FDR estimated from no decoys
 decoy_strategy = "if_missing"
 
+## What to do with a library peak that carries no annotation, and so no
+## theoretical m/z. Read only for a library that annotates nothing at all,
+## "keep_all" aside: a bare peak beside annotated ones is mzPAF's "?", which is
+## the writer calling it noise, and those are always dropped.
+## "keep"     -- store it at the m/z the file measured, under a "?N" label
+## "skip"     -- drop it; a library that annotates nothing then has no fragments
+##               left and is refused as unsearchable
+## "fail"     -- refuse the library at the first one
+## "keep_all" -- store every peak that way, annotated or not, discarding the
+##               annotations the file did carry
+##
+## A kept peak is at an observed mass where an annotated one is at a theoretical
+## mass, and calibration fits its m/z offsets assuming the latter.
+unannotated_peaks = "keep"
+
 ## Rescore model applied in Phase 5 (`--rescore-model` overrides this).
 ## "gbm"        -- cross-validated gradient-boosted trees
 ## "lda"        -- Sage-style shrinkage LDA on the linear lane

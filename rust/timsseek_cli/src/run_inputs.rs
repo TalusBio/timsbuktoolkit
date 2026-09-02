@@ -215,6 +215,9 @@ fn merge_cli_into_config(config: &mut Config, args: &SearchArgs) {
     if let Some(strategy) = args.decoy_strategy {
         config.analysis.decoy_strategy = strategy;
     }
+    if let Some(policy) = args.unannotated_peaks {
+        config.analysis.unannotated_peaks = policy;
+    }
     if let Some(model) = args.rescore_model {
         config.analysis.rescore_model = model.into();
     }
@@ -444,8 +447,11 @@ uri = "config_results"
         assert_eq!(resolved.raw_inputs, vec!["from_config.d".to_string()]);
     }
 
-    /// `--decoy-strategy` overrides the same way the input flags do, and the
-    /// merged configuration is what the rest of the run reads.
+    /// `--decoy-strategy` and `--unannotated-peaks` override the same way the
+    /// input flags do, and the merged configuration is what the rest of the run
+    /// reads. Both halves of the load policy, because the run builds one value
+    /// out of the two and a half that never left the config file would be a
+    /// half the search cannot see.
     #[test]
     fn a_flag_beats_the_configuration_file_for_non_input_settings() {
         let (merged, _) = resolve_run_inputs(
@@ -458,12 +464,18 @@ uri = "config_results"
                 "a.d",
                 "--decoy-strategy",
                 "never",
+                "--unannotated-peaks",
+                "keep-all",
             ])
             .search_args(),
             config_with(""),
         )
         .unwrap();
         assert_eq!(merged.analysis.decoy_strategy, DecoyPolicy::Never);
+        assert_eq!(
+            merged.analysis.unannotated_peaks,
+            timsseek::UnannotatedPeaks::KeepAll
+        );
     }
 
     /// Both flags, because a library file is no longer the only way to supply

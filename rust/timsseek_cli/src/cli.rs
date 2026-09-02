@@ -3,8 +3,11 @@ use clap::{
     ValueEnum,
 };
 use std::path::PathBuf;
-use timsseek::DecoyPolicy;
 use timsseek::ml::RescoreModel;
+use timsseek::{
+    DecoyPolicy,
+    UnannotatedPeaks,
+};
 
 /// Clap mirror of [`timsseek::ml::RescoreModel`]: `ValueEnum` is a foreign
 /// trait, so it cannot be implemented for the lib-owned type from this crate.
@@ -249,6 +252,19 @@ pub struct SearchArgs {
     /// - never: Use library as-is without decoy generation
     #[arg(long, value_name = "STRATEGY")]
     pub decoy_strategy: Option<DecoyPolicy>,
+
+    /// What to do with a library peak that carries no annotation.
+    /// Options: keep (default), skip, fail, keep-all
+    /// - keep: store it at the m/z the file measured, under a `?N` label
+    /// - skip: drop it, leaving the entry only its annotated peaks
+    /// - fail: refuse the library at the first one
+    /// - keep-all: store every peak that way, annotated or not
+    ///
+    /// Read only for a library that annotates nothing at all, keep-all aside:
+    /// a peak with no annotation beside peaks that have one is mzPAF's `?`,
+    /// which is the writer calling it noise.
+    #[arg(long, value_name = "POLICY")]
+    pub unannotated_peaks: Option<UnannotatedPeaks>,
 
     /// Rescore model; overrides the config file.
     #[arg(long, value_enum)]

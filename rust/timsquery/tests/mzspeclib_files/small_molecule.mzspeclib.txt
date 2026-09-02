@@ -1,4 +1,7 @@
 <mzSpecLib>
+# Trimmed from the mzSpecLib specification's own examples/spice.mzSpecLib.txt at
+# commit 506791706f41e95e0c2a1d4de15e49f25b59c760: one of its entries, carrying
+# 5 of that entry's 51 peaks. Comments are mzSpecLib v1.0 section 4.1.18.
 MS:1003186|library format version=1.0
 MS:1003188|library name=spice
 MS:1003190|library version=1.0

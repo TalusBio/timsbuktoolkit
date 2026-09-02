@@ -159,6 +159,33 @@ pub enum UnannotatedPeaks {
     KeepAll,
 }
 
+impl std::fmt::Display for UnannotatedPeaks {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Skip => write!(f, "skip"),
+            Self::Fail => write!(f, "fail"),
+            Self::Keep => write!(f, "keep"),
+            Self::KeepAll => write!(f, "keep-all"),
+        }
+    }
+}
+
+impl std::str::FromStr for UnannotatedPeaks {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
+        match s.to_lowercase().as_str() {
+            "skip" | "drop" => Ok(Self::Skip),
+            "fail" => Ok(Self::Fail),
+            "keep" => Ok(Self::Keep),
+            "keep-all" | "keepall" | "keep_all" => Ok(Self::KeepAll),
+            _ => Err(format!(
+                "Invalid unannotated-peak policy: '{s}'. Valid options: keep, skip, fail, keep-all"
+            )),
+        }
+    }
+}
+
 /// Every decision a caller makes before a file is read.
 ///
 /// One value through the reader registry, so a second knob is a second field
@@ -284,6 +311,24 @@ mod tests {
         assert_eq!("if_missing".parse(), Ok(DecoyPolicy::IfMissing));
         assert_eq!("none".parse(), Ok(DecoyPolicy::Never));
         assert!("sometimes".parse::<DecoyPolicy>().is_err());
+    }
+
+    /// The other half of the policy has the same two spellings to survive: a
+    /// flag string and a config file, where the config file is snake_case
+    /// because serde renders it that way.
+    #[test]
+    fn the_cli_spellings_of_the_peak_policy_round_trip() {
+        for p in [
+            UnannotatedPeaks::Skip,
+            UnannotatedPeaks::Fail,
+            UnannotatedPeaks::Keep,
+            UnannotatedPeaks::KeepAll,
+        ] {
+            assert_eq!(p.to_string().parse::<UnannotatedPeaks>(), Ok(p));
+        }
+        assert_eq!("keep_all".parse(), Ok(UnannotatedPeaks::KeepAll));
+        assert_eq!("KEEP-ALL".parse(), Ok(UnannotatedPeaks::KeepAll));
+        assert!("mostly".parse::<UnannotatedPeaks>().is_err());
     }
 
     #[test]
