@@ -365,6 +365,15 @@ impl<L: KeyLike> TargetColumns<L> {
     /// A row that declared nothing while others did keeps its own id as its
     /// group, so it competes alone -- the group column has to cover every row
     /// once it exists, since a code indexes it directly.
+    ///
+    /// Refuses a group that declares two targets at one charge, which is a
+    /// group the arena cannot compete: one result survives per group and
+    /// charge, so the second target would be dropped. The check belongs here
+    /// rather than in each reader because the arena is what holds `is_decoy`
+    /// and `charge` beside the labels, so this is the one place that can answer
+    /// it for every format at once. It rides the interning loop: one extra hash
+    /// probe per target row, and a map bounded by the `(group, charge)` pairs
+    /// that carry one.
     fn build_decoy_groups(&mut self) -> Result<(), SourceIdError> {
         let n = self.n_rows();
         debug_assert_eq!(self.pending_groups.len(), n, "a group slot per row");
@@ -378,6 +387,10 @@ impl<L: KeyLike> TargetColumns<L> {
             std::collections::HashMap::new();
         let mut labels: Vec<OwnedSourceId> = Vec::new();
         let mut codes = Vec::with_capacity(n);
+        // The target already claiming each `(group, charge)`, so a second one
+        // can name the row it collides with.
+        let mut claimed: std::collections::HashMap<(GroupCode, u8), usize> =
+            std::collections::HashMap::new();
         for (row, group) in self.pending_groups.drain(..).enumerate() {
             let group = match group {
                 Some(g) => g,
@@ -392,6 +405,22 @@ impl<L: KeyLike> TargetColumns<L> {
                 labels.push(group);
                 GroupCode::new((labels.len() - 1) as u32)
             });
+            if !self.is_decoy[row] {
+                let charge = self.charge[row];
+                match claimed.entry((code, charge)) {
+                    std::collections::hash_map::Entry::Occupied(first) => {
+                        return Err(SourceIdError::GroupHasTwoTargets {
+                            group: labels[code.get()].to_string(),
+                            first_row: *first.get(),
+                            row,
+                            charge,
+                        });
+                    }
+                    std::collections::hash_map::Entry::Vacant(slot) => {
+                        slot.insert(row);
+                    }
+                }
+            }
             codes.push(code);
         }
         self.pending_groups.shrink_to_fit();
@@ -533,6 +562,13 @@ impl<L: KeyLike> TargetColumns<L> {
     /// (a caller keys results by it, so a repeat hides a row), or a library
     /// mixing numeric and text ids (storing both would coerce the numbers to
     /// strings, and `7` and `"7"` would become two ids in one column).
+    ///
+    /// Fails too when a declared group holds two targets at one charge, which is
+    /// a group that cannot be competed: one result survives per group and
+    /// charge, so loading it would silently discard a real identification. That
+    /// is refused rather than warned about because the loss leaves no trace in
+    /// the output -- the run reports a lower target count and nothing else --
+    /// whereas a refusal names the file at the moment it is read.
     ///
     /// Panics if called on an already-sealed arena, which can only happen by
     /// cloning one.
@@ -720,18 +756,63 @@ mod tests {
     use super::*;
     use crate::IonAnnot;
 
-    fn two_rows_in_groups(groups: [Option<&str>; 2]) -> TargetColumns<IonAnnot> {
+    /// One row of a test arena in the terms the group checks read it: which
+    /// group it declares, whether the library shipped it as a decoy, and its
+    /// charge.
+    ///
+    /// Written as `Spec::target(..)` / `Spec::decoy(..)` so the decoy side of a
+    /// fixture is legible at the call site rather than a positional `true`.
+    #[derive(Clone, Copy)]
+    struct Spec {
+        group: Option<&'static str>,
+        is_decoy: bool,
+        charge: u8,
+    }
+
+    impl Spec {
+        fn target(group: &'static str) -> Self {
+            Self {
+                group: Some(group),
+                is_decoy: false,
+                charge: 2,
+            }
+        }
+
+        fn decoy(group: &'static str) -> Self {
+            Self {
+                is_decoy: true,
+                ..Self::target(group)
+            }
+        }
+
+        /// A row the file placed in no group, which is every format but
+        /// mzSpecLib.
+        fn undeclared() -> Self {
+            Self {
+                group: None,
+                is_decoy: false,
+                charge: 2,
+            }
+        }
+
+        fn at_charge(self, charge: u8) -> Self {
+            Self { charge, ..self }
+        }
+    }
+
+    fn arena_of(specs: &[Spec]) -> TargetColumns<IonAnnot> {
         let mut c = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
-        for group in groups {
+        for spec in specs {
             c.push_row(Row {
                 precursor_mz: 500.0,
-                charge: 2,
+                charge: spec.charge,
                 rt_seconds: 1.0,
                 mobility: 0.8,
                 frags: &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
                 seq_strip: "PEP",
                 seq_mod: "PEP",
-                decoy_group: group.map(Into::into),
+                is_decoy: spec.is_decoy,
+                decoy_group: spec.group.map(Into::into),
                 ..Default::default()
             });
         }
@@ -739,14 +820,15 @@ mod tests {
     }
 
     fn two_rows() -> TargetColumns<IonAnnot> {
-        two_rows_in_groups([None, None])
+        arena_of(&[Spec::undeclared(), Spec::undeclared()])
     }
 
-    /// Declared groups are interned, so two rows in one group share a code and
-    /// the label is stored once rather than per row.
+    /// Declared groups are interned, so a target and the decoy the library
+    /// shipped for it share a code and the label is stored once rather than per
+    /// row. The ordinary declared pair, which has to keep loading.
     #[test]
     fn rows_in_one_declared_group_share_a_code() {
-        let c = two_rows_in_groups([Some("g1"), Some("g1")])
+        let c = arena_of(&[Spec::target("g1"), Spec::decoy("g1")])
             .seal(DecoyPolicy::Never)
             .expect("fixture ids are usable");
 
@@ -755,13 +837,48 @@ mod tests {
         assert_eq!(c.decoy_group(a), SourceId::Text("g1"));
     }
 
+    /// One survivor per group *and charge*, so a group naming a target at each
+    /// of two charges discards nothing -- that is the ordinary multi-charge
+    /// library, and refusing it would reject most of them.
+    #[test]
+    fn one_group_holds_a_target_at_each_charge() {
+        let c = arena_of(&[Spec::target("g1"), Spec::target("g1").at_charge(3)])
+            .seal(DecoyPolicy::Never)
+            .expect("two charges of one precursor compete separately");
+
+        let (a, b) = (c.rows().next().unwrap(), c.rows().nth(1).unwrap());
+        assert_eq!(c.decoy_group_code(a), c.decoy_group_code(b));
+    }
+
+    /// A group with two targets at one charge is a group the arena cannot
+    /// compete: one of the two would be dropped for the other, and the run would
+    /// report a lower target count and nothing else. Sealing refuses it, naming
+    /// the group and both rows, since the shared label is all a reader of a
+    /// million-row library would otherwise have to go on.
+    #[test]
+    fn a_group_declaring_two_targets_at_one_charge_does_not_seal() {
+        let err = arena_of(&[Spec::target("g1"), Spec::target("g1")])
+            .seal(DecoyPolicy::Never)
+            .expect_err("a group that cannot be competed is not a sealable arena");
+
+        assert_eq!(
+            err,
+            SourceIdError::GroupHasTwoTargets {
+                group: "g1".to_string(),
+                first_row: 0,
+                row: 1,
+                charge: 2,
+            }
+        );
+    }
+
     /// Declared groups that are all singletons say no more than deriving from
     /// the row does, so the column is dropped rather than stored. This is what
     /// lets a reader name a group on every row without charging a library that
     /// contains no pairs for a label per row.
     #[test]
     fn all_singleton_groups_are_not_stored() {
-        let c = two_rows_in_groups([Some("g1"), Some("g2")])
+        let c = arena_of(&[Spec::target("g1"), Spec::target("g2")])
             .seal(DecoyPolicy::Never)
             .expect("fixture ids are usable");
 
@@ -776,7 +893,13 @@ mod tests {
     #[test]
     fn a_row_outside_every_declared_group_competes_alone() {
         let mut c = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
-        for (id, group) in [("a", Some("pair")), ("b", Some("pair")), ("c", None)] {
+        // `b` is the decoy of `a`: a group holds one target per charge, so the
+        // pair is the only two-row group there is at a single charge.
+        for (id, group, is_decoy) in [
+            ("a", Some("pair"), false),
+            ("b", Some("pair"), true),
+            ("c", None, false),
+        ] {
             c.push_row(Row {
                 precursor_mz: 500.0,
                 charge: 2,
@@ -785,6 +908,7 @@ mod tests {
                 frags: &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
                 seq_strip: "PEP",
                 seq_mod: "PEP",
+                is_decoy,
                 id: Some(id.into()),
                 decoy_group: group.map(Into::into),
                 ..Default::default()

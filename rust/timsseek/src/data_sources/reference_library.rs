@@ -1238,9 +1238,10 @@ mod load_tests {
     /// drops nothing, so an arena assembled outside a reader keeps its shipped
     /// decoys and derives variants over them as well. Every route from a file
     /// goes through a reader, which applies `DecoyPolicy::accepts` per row, so
-    /// nothing in the workload reaches this state -- but the contract lives in
-    /// each reader rather than in the seal, and a reader that forgets it lands
-    /// here.
+    /// nothing in the workload reaches this state -- but the drop lives in each
+    /// reader rather than in the seal, which checks the groups it was handed and
+    /// not the rows a policy should have excluded, and a reader that forgets it
+    /// lands here.
     #[test]
     fn seal_alone_keeps_shipped_decoys_under_force() {
         let lib = ReferenceLibrary::from_sealed_arena(hand_assembled_arena(

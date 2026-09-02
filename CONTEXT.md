@@ -101,6 +101,12 @@ group rather than a large one. A library whose pair identifier names a peptide
 rather than a precursor produces exactly that, and the loss is silent: the run
 reports a lower target count and nothing else.
 
+Sealing an arena refuses such a group rather than loading it. The arena holds the
+decoy flag and the charge beside the group labels, so it is the one place that can
+check this for every format at once; the alternative is every reader getting it
+right on its own, which is the situation that produced the silent loss in the
+first place.
+
 Only mzSpecLib declares them. It is the one format with a way to say that one
 entry is the counterpart of another (`related spectrum keys`); a DIA-NN,
 Spectronaut or Skyline `transition_group_id` names the row it sits on, not a

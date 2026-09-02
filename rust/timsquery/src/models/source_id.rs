@@ -167,6 +167,25 @@ pub enum SourceIdError {
         value: String,
         first_numeric_row: usize,
     },
+    /// A competition group holding two targets at one charge. Competition keeps
+    /// one result per group and charge, so the second target is a real
+    /// identification discarded to keep the first, and the only symptom is a
+    /// lower target count -- no output says a row was dropped.
+    ///
+    /// Names the group and both rows: the label is shared by every row in the
+    /// group, so there is nothing else to locate the collision by in a library
+    /// of a million rows.
+    #[error(
+        "competition group {group} declares a target on row {first_row} and another on row \
+         {row}, both at charge {charge}; a group holds at most one target per charge, since \
+         competition keeps one result per group and charge"
+    )]
+    GroupHasTwoTargets {
+        group: String,
+        first_row: usize,
+        row: usize,
+        charge: u8,
+    },
 }
 
 impl SourceIds {
