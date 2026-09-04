@@ -82,14 +82,11 @@ impl MzTolerance {
         let (lo, hi) = (bin_ppm(mz_range.0), bin_ppm(mz_range.1));
         match self {
             MzTolerance::Bins(n) => format!(
-                "{n} bins = {:.1}-{:.1} ppm over {:.0}-{:.0} m/z",
-                *n as f64 * hi,
-                *n as f64 * lo,
-                mz_range.0,
-                mz_range.1
+                "{n} bins (1 bin = {:.1}-{:.1} ppm over {:.0}-{:.0} m/z)",
+                hi, lo, mz_range.0, mz_range.1
             ),
             MzTolerance::Ppm(p) => format!(
-                "{p} ppm = {:.2}-{:.2} bins over {:.0}-{:.0} m/z (rounded per peak)",
+                "{p} ppm = {:.2}-{:.2} bins over {:.0}-{:.0} m/z, rounded per peak",
                 p / lo,
                 p / hi,
                 mz_range.0,
