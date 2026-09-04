@@ -91,3 +91,26 @@ jobs:
       # ubuntu-latest ships python3, and the script is standard library only.
       - name: PSI-MS vocabulary snapshot is current
         run: python3 scripts/gen_psims_origin_type.py --check
+
+  # `deny.toml` existed for a long time with nothing invoking it, so dependency
+  # licensing drifted red unnoticed. This is the gate.
+  #
+  # `advisories` is split off and non-fatal on purpose: it reads a database that
+  # moves without us touching the lockfile, so a green PR can go red overnight
+  # for a crate nobody here can upgrade (several current findings have no safe
+  # upgrade at all). Loud, not fatal — same treatment as `psims-vocabulary`.
+  # Resolving the standing advisory findings is tracked in #94.
+  cargo-deny:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        checks:
+          - "bans licenses sources"
+          - advisories
+    continue-on-error: ${{ matrix.checks == 'advisories' }}
+    steps:
+      - uses: actions/checkout@v6
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check ${{ matrix.checks }}

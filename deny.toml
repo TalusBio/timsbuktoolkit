@@ -100,7 +100,12 @@ version = 2
 allow = [
   "MIT",
   "Apache-2.0",
+  # Only reached via `target-lexicon`, a build dependency of pyo3.
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
   "BSD-3-Clause",
+  # Boost: permissive, and does not require attribution in binaries.
+  "BSL-1.0",
   "Unicode-3.0",
   "Zlib",
   "ISC",
@@ -113,11 +118,35 @@ allow = [
 confidence-threshold = 0.95
 # Allow 1 or more licenses on a per-crate basis, so that particular licenses
 # aren't accepted for every possible crate as with the normal allow list
-exceptions = []
+#
+# MPL-2.0 is file-level copyleft: linking `option-ext` does not affect our code,
+# but modifying its own files would. Scoped to the crate rather than allowed
+# outright, so a future MPL dependency still has to be looked at. `option-ext`
+# arrives via dirs-sys -> directories, an unconditional dependency of mzcv.
+#
+# `epaint_default_fonts` licences the font files it embeds; see the clarify
+# entry below for why the Ubuntu font licence needs a `LicenseRef`.
+exceptions = [
+  { name = "option-ext", allow = ["MPL-2.0"] },
+  { name = "epaint_default_fonts", allow = [
+    "OFL-1.1",
+    "LicenseRef-Ubuntu-font-1.0",
+  ] },
+]
 
 # Some crates don't have (easily) machine readable licensing information,
 # adding a clarification entry for it allows you to manually specify the
 # licensing information
+
+# Declared as `(MIT OR Apache-2.0) AND OFL-1.1 AND Ubuntu-font-1.0`.
+# `Ubuntu-font-1.0` is not an SPDX identifier, so cargo-deny cannot parse the
+# expression at all and reports the crate as unlicensed rather than rejected.
+# Restate it with a `LicenseRef` for that one term; the rest is unchanged.
+[[licenses.clarify]]
+name = "epaint_default_fonts"
+expression = "(MIT OR Apache-2.0) AND OFL-1.1 AND LicenseRef-Ubuntu-font-1.0"
+license-files = [{ path = "fonts/OFL.txt", hash = 0x447eed1c }]
+
 [[licenses.clarify]]
 name = "webpki"
 expression = "ISC"
