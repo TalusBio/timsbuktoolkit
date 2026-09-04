@@ -95,22 +95,15 @@ jobs:
   # `deny.toml` existed for a long time with nothing invoking it, so dependency
   # licensing drifted red unnoticed. This is the gate.
   #
-  # `advisories` is split off and non-fatal on purpose: it reads a database that
-  # moves without us touching the lockfile, so a green PR can go red overnight
-  # for a crate nobody here can upgrade (several current findings have no safe
-  # upgrade at all). Loud, not fatal — same treatment as `psims-vocabulary`.
-  # Resolving the standing advisory findings is tracked in #94.
+  # `advisories` blocks too. It reads a database that moves without the lockfile
+  # moving, so this job can go red on a commit that changed nothing — that is
+  # the intended behaviour, not a flake. Every finding with no reachable fix is
+  # an `advisories.ignore` entry in `deny.toml` carrying the blocker, so a new
+  # red here is genuinely new.
   cargo-deny:
     runs-on: ubuntu-latest
-    strategy:
-      fail-fast: false
-      matrix:
-        checks:
-          - "bans licenses sources"
-          - advisories
-    continue-on-error: ${{ matrix.checks == 'advisories' }}
     steps:
       - uses: actions/checkout@v6
       - uses: EmbarkStudios/cargo-deny-action@v2
         with:
-          command: check ${{ matrix.checks }}
+          command: check
