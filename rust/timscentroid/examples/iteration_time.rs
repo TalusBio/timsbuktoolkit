@@ -82,7 +82,7 @@ fn main() {
         CentroidingConfig {
             max_peaks: MAX_PEAKS,
             im_pct_tol: 3.0,
-            mz_tol_bins: 0,
+            mz_tol: timscentroid::centroiding::MzTolerance::Bins(0),
             early_stop_iterations: 200,
             window_cap: None,
         },

@@ -16,7 +16,7 @@ pub struct PeakCentroider<T1: ConvertableDomain, T2: ConvertableDomain> {
     neighbor_ranges: Vec<(usize, usize)>, // (start_idx, end_idx) for each peak
     ims_ranges: Vec<(u16, u16)>,          // (min_im, max_im) for scan index
     max_peaks: usize,
-    mz_tol_bins: u32,
+    mz_tol: MzTolerance,
     im_pct_tol: f64,
     mz_converter: T1,
     im_converter: T2,
@@ -38,13 +38,8 @@ pub struct CentroidingConfig {
     /// centroiding is higher, the centroiding will stop
     /// early. A number ~20,000-50,000 seems to work well in practice.
     pub max_peaks: usize,
-    /// Neighbor radius along TOF, in raw bins. 0 merges identical indices only.
-    ///
-    /// Raw TDF entries are already peak-picked to one index per ion per scan,
-    /// and a bin is 2.4-7 ppm wide on an Ultra 2, so the old 0.5-1 ppm values
-    /// rounded to 0 bins. Merging at 1-2 bins lost identifications when
-    /// measured; keep this at 0 unless re-measured.
-    pub mz_tol_bins: u32,
+    /// Neighbor radius along TOF. See [`MzTolerance`].
+    pub mz_tol: MzTolerance,
     /// IM tolerance in percentage for clustering
     /// 3.0 (3%) seems to work well in practice.
     pub im_pct_tol: f64,
@@ -57,9 +52,51 @@ pub struct CentroidingConfig {
     /// A number ~200 seems to work well in practice. **`0` disables
     /// early-stop** -- the whole frame is clustered and only `max_peaks`
     /// can truncate it. Disabling is the right choice under a tight
-    /// `mz_tol_bins`, where most peaks are singletons and early-stop would
+    /// `mz_tol`, where most peaks are singletons and early-stop would
     /// otherwise clip real signal (see `IndexingCentroidingConfig`).
     pub early_stop_iterations: u32,
+}
+
+/// Neighbor radius along TOF for clustering.
+///
+/// Raw TDF entries are already peak-picked to one integer index per ion per
+/// scan. On an Ultra 2 a bin is 2.4-7 ppm wide (narrower in ppm at high m/z),
+/// so `Ppm(x)` below half a bin rounds to zero bins and only identical indices
+/// merge; that is what the old 0.5 / 1 ppm defaults did, and `Bins(0)` says so.
+/// Merging at 1-2 bins lost identifications on that one run. Other instrument
+/// families have other bin widths; `Ppm` exists for them, and the index build
+/// logs the equivalent in the other unit.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+pub enum MzTolerance {
+    Ppm(f64),
+    Bins(u32),
+}
+
+impl MzTolerance {
+    /// The tolerance in the other unit at the edges of `mz_range`, for logs.
+    pub fn describe(&self, conv: &impl ConvertableDomain, mz_range: (f64, f64)) -> String {
+        let bin_ppm = |mz: f64| {
+            let t = conv.invert(mz).round();
+            (conv.convert(t + 1.0) - conv.convert(t)) / mz * 1e6
+        };
+        let (lo, hi) = (bin_ppm(mz_range.0), bin_ppm(mz_range.1));
+        match self {
+            MzTolerance::Bins(n) => format!(
+                "{n} bins = {:.1}-{:.1} ppm over {:.0}-{:.0} m/z",
+                *n as f64 * hi,
+                *n as f64 * lo,
+                mz_range.0,
+                mz_range.1
+            ),
+            MzTolerance::Ppm(p) => format!(
+                "{p} ppm = {:.2}-{:.2} bins over {:.0}-{:.0} m/z (rounded per peak)",
+                p / lo,
+                p / hi,
+                mz_range.0,
+                mz_range.1
+            ),
+        }
+    }
 }
 
 /// Per-m/z-window centroid cap. Unlike `max_peaks`, which ranks the whole
@@ -78,7 +115,7 @@ impl Default for CentroidingConfig {
     fn default() -> Self {
         Self {
             max_peaks: 20_000,
-            mz_tol_bins: 0,
+            mz_tol: MzTolerance::Bins(0),
             im_pct_tol: 3.0,
             early_stop_iterations: 200,
             window_cap: None,
@@ -117,14 +154,14 @@ impl Default for IndexingCentroidingConfig {
         Self {
             ms1: CentroidingConfig {
                 max_peaks: 20_000,
-                mz_tol_bins: 0,
+                mz_tol: MzTolerance::Bins(0),
                 im_pct_tol: 2.0,
                 early_stop_iterations: 200,
                 window_cap: None,
             },
             ms2: CentroidingConfig {
                 max_peaks: 50_000,
-                mz_tol_bins: 0,
+                mz_tol: MzTolerance::Bins(0),
                 im_pct_tol: 3.0,
                 early_stop_iterations: 0, // disabled -- see field doc
                 window_cap: Some(WindowCap {
@@ -205,6 +242,26 @@ enum TakenState {
     /// Refused by the window cap. Never absorbed later: every later parent is
     /// weaker, and a centroid must not be pulled toward a peak that outranks it.
     Dropped,
+}
+
+/// What one pass over a frame did: why it stopped, how many peaks it
+/// accounted for (parent, taken or dropped), how many the window cap refused.
+struct FrameOutcome {
+    reason: StoppingReason,
+    included: u32,
+    window_capped: u32,
+}
+
+/// Takes one parent slot in the window holding `mz`. `false` when it is full.
+/// `counts` is sized by `PeakCentroider::reset_window_counts` for the frame.
+fn claim_window_slot(counts: &mut [u32], cap: WindowCap, mz: f64) -> bool {
+    let w = (mz / cap.window_da as f64).max(0.0) as usize;
+    let slot = &mut counts[w.min(counts.len() - 1)];
+    if *slot >= cap.max_peaks {
+        return false;
+    }
+    *slot += 1;
+    true
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -345,7 +402,7 @@ impl<T1: ConvertableDomain, T2: ConvertableDomain> PeakCentroider<T1, T2> {
             // for each peak ... (and even extend only if needed)
             ims_ranges: Vec::new(),
             max_peaks: config.max_peaks,
-            mz_tol_bins: config.mz_tol_bins,
+            mz_tol: config.mz_tol,
             im_pct_tol: config.im_pct_tol,
             mz_converter,
             im_converter,
@@ -357,28 +414,30 @@ impl<T1: ConvertableDomain, T2: ConvertableDomain> PeakCentroider<T1, T2> {
 
     /// Inclusive TOF index range that clusters with `tof_index`.
     fn tof_index_bounds(&self, tof_index: u32) -> (u32, u32) {
-        (
-            tof_index.saturating_sub(self.mz_tol_bins),
-            tof_index.saturating_add(self.mz_tol_bins),
-        )
+        match self.mz_tol {
+            MzTolerance::Bins(n) => (tof_index.saturating_sub(n), tof_index.saturating_add(n)),
+            MzTolerance::Ppm(ppm) => {
+                let mz = self.mz_converter.convert(tof_index as f64);
+                let delta = mz * ppm * 1e-6;
+                (
+                    self.mz_converter.invert(mz - delta).round() as u32,
+                    self.mz_converter.invert(mz + delta).round() as u32,
+                )
+            }
+        }
     }
 
-    /// Takes one parent slot in the m/z window of peak `idx`. `false` when the
-    /// window is full. Always `true` without a cap.
-    fn try_claim_window_slot(&mut self, idx: usize) -> bool {
+    /// One counter per `window_da` of m/z, enough for the highest peak in the
+    /// frame. `peaks` must already be loaded.
+    fn reset_window_counts(&mut self) {
         let Some(cap) = self.window_cap else {
-            return true;
+            return;
         };
-        let mz = self.mz_converter.convert(self.peaks[idx].tof_index);
-        let w = (mz / cap.window_da as f64).max(0.0) as usize;
-        if w >= self.window_counts.len() {
-            self.window_counts.resize(w + 1, 0);
-        }
-        if self.window_counts[w] >= cap.max_peaks {
-            return false;
-        }
-        self.window_counts[w] += 1;
-        true
+        let max_tof = self.peaks.iter().map(|p| p.tof_index).max().unwrap_or(0);
+        let max_mz = self.mz_converter.convert(max_tof);
+        let n = (max_mz / cap.window_da as f64).max(0.0) as usize + 1;
+        self.window_counts.clear();
+        self.window_counts.resize(n, 0);
     }
 
     fn im_index_bounds(&self, im_index: u16) -> (u16, u16) {
@@ -422,6 +481,7 @@ impl<T1: ConvertableDomain, T2: ConvertableDomain> PeakCentroider<T1, T2> {
         self.peaks.extend(frame.iter_corrected_peaks());
         assert_eq!(self.peaks.len(), expect_len);
         self.maybe_extend_ims_ranges();
+        self.reset_window_counts();
 
         // sort by mz ... bc binary searching on the mz space
         // for neighbors is the fastest way to find neighbors that I have tried.
@@ -446,7 +506,6 @@ impl<T1: ConvertableDomain, T2: ConvertableDomain> PeakCentroider<T1, T2> {
         self.order.clear();
         self.taken_buff.clear();
         self.agg_buff.clear();
-        self.window_counts.fill(0);
     }
 
     /// Expands the internal buffers to the specified capacity
@@ -486,9 +545,7 @@ impl<T1: ConvertableDomain, T2: ConvertableDomain> PeakCentroider<T1, T2> {
     /// This dramatically reduces the number of peaks in the spectra
     /// which saves a ton of memory and time when doing LFQ, since we
     /// iterate over each peak.
-    /// Returns (stopping reason, peaks accounted for, peaks refused by the
-    /// window cap).
-    fn itercentroid_frame(&mut self) -> (StoppingReason, usize, usize) {
+    fn itercentroid_frame(&mut self) -> FrameOutcome {
         assert!(self.agg_buff.is_empty(), "agg_buff is not empty");
 
         self.taken_buff
@@ -508,14 +565,13 @@ impl<T1: ConvertableDomain, T2: ConvertableDomain> PeakCentroider<T1, T2> {
         );
         assert!(self.agg_buff.is_empty(), "agg_buff is not empty");
 
-        let mut global_num_included = 0;
-        let mut num_window_capped = 0;
+        let mut global_num_included: u32 = 0;
+        let mut num_window_capped: u32 = 0;
         let mut early_stop_remaining = self.early_stop_iterations;
         let mut out = StoppingReason::AllTaken;
+        let n_peaks = self.peaks.len() as u32;
 
-        // Indexed, not `for &idx in &self.order`: the window claim needs `&mut self`.
-        for oi in 0..self.order.len() {
-            let idx = self.order[oi];
+        for &idx in &self.order {
             if self.agg_buff.len() > self.max_peaks {
                 out = StoppingReason::MaxPeaks;
                 break;
@@ -528,14 +584,17 @@ impl<T1: ConvertableDomain, T2: ConvertableDomain> PeakCentroider<T1, T2> {
                 TakenState::Dropped => unreachable!("dropped only at its own visit"),
                 TakenState::Taken { parent_idx } => (parent_idx, false),
                 TakenState::Untaken => {
-                    if !self.try_claim_window_slot(idx) {
-                        self.taken_buff[idx] = TakenState::Dropped;
-                        global_num_included += 1;
-                        num_window_capped += 1;
-                        if global_num_included == self.peaks.len() {
-                            break;
+                    if let Some(cap) = self.window_cap {
+                        let mz = self.mz_converter.convert(self.peaks[idx].tof_index);
+                        if !claim_window_slot(&mut self.window_counts, cap, mz) {
+                            self.taken_buff[idx] = TakenState::Dropped;
+                            global_num_included += 1;
+                            num_window_capped += 1;
+                            if global_num_included == n_peaks {
+                                break;
+                            }
+                            continue;
                         }
-                        continue;
                     }
                     self.taken_buff[idx] = TakenState::Parent;
                     self.agg_buff.push(PeakAggregator::new(&self.peaks[idx]));
@@ -572,7 +631,7 @@ impl<T1: ConvertableDomain, T2: ConvertableDomain> PeakCentroider<T1, T2> {
                 }
             }
 
-            global_num_included += num_includable;
+            global_num_included += num_includable as u32;
 
             // `early_stop_iterations == 0` disables early-stop entirely: the
             // whole frame is clustered (only `max_peaks` can still truncate).
@@ -592,7 +651,7 @@ impl<T1: ConvertableDomain, T2: ConvertableDomain> PeakCentroider<T1, T2> {
                 }
             }
 
-            if global_num_included == self.peaks.len() {
+            if global_num_included == n_peaks {
                 out = StoppingReason::AllTaken;
                 break;
             }
@@ -603,7 +662,11 @@ impl<T1: ConvertableDomain, T2: ConvertableDomain> PeakCentroider<T1, T2> {
         // HT2 data is usually start 400k end 40k, limiting to 10k
         // rarely leaves peaks with intensity > 200 ... ive never seen
         // it happen. -JSP 2025-Jan
-        (out, global_num_included, num_window_capped)
+        FrameOutcome {
+            reason: out,
+            included: global_num_included,
+            window_capped: num_window_capped,
+        }
     }
 
     fn drain_aggregated_peaks(&mut self) -> impl Iterator<Item = CorrectedFramePeak> + '_ {
@@ -636,14 +699,14 @@ impl<T1: ConvertableDomain, T2: ConvertableDomain> PeakCentroider<T1, T2> {
     ) {
         let start = std::time::Instant::now();
         self.with_frame(frame);
-        let (stop_cause, num_accumulated, window_capped) = self.itercentroid_frame();
+        let outcome = self.itercentroid_frame();
         let elapsed = start.elapsed();
         let summary = ClusteringSummary {
             initial_peaks: self.peaks.len(),
-            aggregated_peaks: num_accumulated,
+            aggregated_peaks: outcome.included as usize,
             final_peaks: self.agg_buff.len(),
-            window_capped,
-            stopping_reason: stop_cause,
+            window_capped: outcome.window_capped as usize,
+            stopping_reason: outcome.reason,
             elapsed,
         };
         (summary, self.drain_aggregated_peaks())
@@ -751,7 +814,7 @@ mod tests {
     fn config(mz_tol_bins: u32, window_cap: Option<WindowCap>) -> CentroidingConfig {
         CentroidingConfig {
             max_peaks: 1_000,
-            mz_tol_bins,
+            mz_tol: MzTolerance::Bins(mz_tol_bins),
             im_pct_tol: 3.0,
             early_stop_iterations: 0,
             window_cap,
@@ -772,6 +835,19 @@ mod tests {
         let f = frame(&[(1000, 100), (1001, 90)]);
         assert_eq!(centroid(config(0, None), &f).1, vec![1000, 1001]);
         assert_eq!(centroid(config(1, None), &f).1, vec![1000]);
+    }
+
+    #[test]
+    fn ppm_below_half_a_bin_is_zero_bins() {
+        // Identity converter: one bin is one m/z unit, so at m/z 1000 a bin is
+        // 1000 ppm. 400 ppm rounds to 0 bins, 600 ppm to 1.
+        let f = frame(&[(1000, 100), (1001, 90)]);
+        let ppm = |p| CentroidingConfig {
+            mz_tol: MzTolerance::Ppm(p),
+            ..config(0, None)
+        };
+        assert_eq!(centroid(ppm(400.0), &f).1, vec![1000, 1001]);
+        assert_eq!(centroid(ppm(600.0), &f).1, vec![1000]);
     }
 
     /// Fifty peaks in 100-200 with intensity rising along m/z, five in 300-400.

@@ -2,7 +2,10 @@ use serde::{
     Deserialize,
     Serialize,
 };
-use timscentroid::centroiding::WindowCap;
+use timscentroid::centroiding::{
+    MzTolerance,
+    WindowCap,
+};
 use timsquery::{
     CentroidingConfig,
     IndexingCentroidingConfig,
@@ -90,8 +93,9 @@ pub struct IndexingConfig {
 pub struct CentroidingOverride {
     #[serde(default)]
     pub max_peaks: Option<usize>,
+    /// `{ Bins = n }` or `{ Ppm = x }`.
     #[serde(default)]
-    pub mz_tol_bins: Option<u32>,
+    pub mz_tol: Option<MzTolerance>,
     #[serde(default)]
     pub im_pct_tol: Option<f64>,
     #[serde(default)]
@@ -102,23 +106,21 @@ pub struct CentroidingOverride {
 }
 
 impl CentroidingOverride {
-    fn apply(&self, mut base: CentroidingConfig) -> CentroidingConfig {
-        if let Some(v) = self.max_peaks {
-            base.max_peaks = v;
+    fn apply(&self, base: CentroidingConfig) -> CentroidingConfig {
+        let Self {
+            max_peaks,
+            mz_tol,
+            im_pct_tol,
+            early_stop_iterations,
+            window_cap,
+        } = self;
+        CentroidingConfig {
+            max_peaks: max_peaks.unwrap_or(base.max_peaks),
+            mz_tol: mz_tol.unwrap_or(base.mz_tol),
+            im_pct_tol: im_pct_tol.unwrap_or(base.im_pct_tol),
+            early_stop_iterations: early_stop_iterations.unwrap_or(base.early_stop_iterations),
+            window_cap: window_cap.or(base.window_cap),
         }
-        if let Some(v) = self.mz_tol_bins {
-            base.mz_tol_bins = v;
-        }
-        if let Some(v) = self.im_pct_tol {
-            base.im_pct_tol = v;
-        }
-        if let Some(v) = self.early_stop_iterations {
-            base.early_stop_iterations = v;
-        }
-        if let Some(v) = self.window_cap {
-            base.window_cap = Some(v);
-        }
-        base
     }
 }
 
@@ -350,6 +352,20 @@ rt = "Unrestricted"
         assert_eq!(resolved.ms2.max_peaks, default.ms2.max_peaks);
         assert_eq!(resolved.ms1.window_cap, default.ms1.window_cap);
         assert_eq!(resolved.ms1.im_pct_tol, default.ms1.im_pct_tol);
+    }
+
+    #[test]
+    fn indexing_mz_tol_takes_either_unit() {
+        let toml = format!(
+            "{MINIMAL_TOML}\n[indexing.ms1]\nmz_tol = {{ Ppm = 5.0 }}\n[indexing.ms2]\nmz_tol = {{ Bins = 1 }}\n"
+        );
+        let resolved = toml::from_str::<Config>(&toml)
+            .unwrap()
+            .indexing
+            .unwrap()
+            .resolve();
+        assert_eq!(resolved.ms1.mz_tol, MzTolerance::Ppm(5.0));
+        assert_eq!(resolved.ms2.mz_tol, MzTolerance::Bins(1));
     }
 
     #[test]

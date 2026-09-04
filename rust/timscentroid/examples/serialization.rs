@@ -26,7 +26,7 @@ fn main() {
 
     let centroiding_config = CentroidingConfig {
         max_peaks: 20_000,
-        mz_tol_bins: 0,
+        mz_tol: timscentroid::centroiding::MzTolerance::Bins(0),
         im_pct_tol: 3.0,
         early_stop_iterations: 200,
         window_cap: None,

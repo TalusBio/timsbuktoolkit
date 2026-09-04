@@ -15,6 +15,7 @@ use timsrust::{
     Metadata,
 };
 use tracing::{
+    info,
     instrument,
     warn,
 };
@@ -171,6 +172,18 @@ impl IndexedTimstofPeaks {
     ) -> (Self, IndexBuildingStats) {
         let frame_reader = file.load_frame_reader().unwrap();
         let metadata = file.load_metadata().unwrap();
+        let mz_range = (metadata.lower_mz, metadata.upper_mz);
+        info!(
+            "centroiding m/z tolerance: MS1 {}; MS2 {}",
+            centroiding_config
+                .ms1
+                .mz_tol
+                .describe(&metadata.mz_converter, mz_range),
+            centroiding_config
+                .ms2
+                .mz_tol
+                .describe(&metadata.mz_converter, mz_range),
+        );
 
         // Read MS1 peaks (MS1-specific centroiding config)
         let st = std::time::Instant::now();
