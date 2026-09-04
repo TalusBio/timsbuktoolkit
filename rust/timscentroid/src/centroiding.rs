@@ -1,7 +1,20 @@
 use std::fmt::Display;
 
-use timsrust::CorrectedFramePeak;
-use timsrust::converters::ConvertableDomain;
+/// Numeric converter interface used by the centroiding hot path.
+///
+/// timsrust 0.6 uses strongly typed coordinates; this boundary keeps the
+/// centroiding algorithm's numeric hot path independent of those wrappers.
+pub trait ConvertableDomain: Clone + Send + Sync {
+    fn convert(&self, value: f64) -> f64;
+    fn invert(&self, value: f64) -> f64;
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct CorrectedFramePeak {
+    pub scan_index: u16,
+    pub tof_index: u32,
+    pub corrected_intensity: f64,
+}
 
 /// Buffer that gets re-used on each thread to store the intermediates
 /// of the centroiding for a single frame.
@@ -431,7 +444,7 @@ impl<T1: ConvertableDomain, T2: ConvertableDomain> PeakCentroider<T1, T2> {
             return;
         };
         let max_tof = self.peaks.iter().map(|p| p.tof_index).max().unwrap_or(0);
-        let max_mz = self.mz_converter.convert(max_tof);
+        let max_mz = self.mz_converter.convert(max_tof as f64);
         let n = (max_mz / cap.window_da as f64).max(0.0) as usize + 1;
         self.window_counts.clear();
         self.window_counts.resize(n, 0);
@@ -471,11 +484,23 @@ impl<T1: ConvertableDomain, T2: ConvertableDomain> PeakCentroider<T1, T2> {
 
     /// Carries out the setup of the internal buffers with the frame
     /// to be centroided.
-    fn with_frame(&mut self, frame: &timsrust::Frame) {
+    fn with_frame(&mut self, frame: &timsrust::core::Frame) {
         self.clear();
-        let expect_len = frame.peaks.len();
+        let expect_len = frame.len();
         self.expand_to_capacity(expect_len);
-        self.peaks.extend(frame.iter_corrected_peaks());
+        let factor = frame.info().intensity_correction_factor();
+        for scan_index in 0..frame.ions().scan_count() {
+            let scan_index =
+                u16::try_from(scan_index).expect("Frames should never have more than 65535 scans");
+            self.peaks
+                .extend(frame.ions().read_scan(scan_index as usize).map(
+                    |(tof_index, intensity)| CorrectedFramePeak {
+                        scan_index,
+                        tof_index: u32::from(tof_index),
+                        corrected_intensity: factor * u32::from(intensity) as f64,
+                    },
+                ));
+        }
         assert_eq!(self.peaks.len(), expect_len);
         self.maybe_extend_ims_ranges();
         self.reset_window_counts();
@@ -582,7 +607,7 @@ impl<T1: ConvertableDomain, T2: ConvertableDomain> PeakCentroider<T1, T2> {
                 TakenState::Taken { parent_idx } => (parent_idx, false),
                 TakenState::Untaken => {
                     if let Some(cap) = self.window_cap {
-                        let mz = self.mz_converter.convert(self.peaks[idx].tof_index);
+                        let mz = self.mz_converter.convert(self.peaks[idx].tof_index as f64);
                         if !claim_window_slot(&mut self.window_counts, cap, mz) {
                             self.taken_buff[idx] = TakenState::Dropped;
                             global_num_included += 1;
@@ -689,7 +714,7 @@ impl<T1: ConvertableDomain, T2: ConvertableDomain> PeakCentroider<T1, T2> {
     /// iterate over each peak.
     pub fn centroid_frame(
         &mut self,
-        frame: &timsrust::Frame,
+        frame: &timsrust::core::Frame,
     ) -> (
         ClusteringSummary,
         impl Iterator<Item = CorrectedFramePeak> + '_,
@@ -782,30 +807,61 @@ mod tests {
     use super::*;
 
     /// tof index is m/z, scan index is mobility.
+    #[derive(Clone)]
     struct Identity;
     impl ConvertableDomain for Identity {
-        fn convert<T: Into<f64> + Copy>(&self, v: T) -> f64 {
-            v.into()
+        fn convert(&self, v: f64) -> f64 {
+            v
         }
 
-        fn invert<T: Into<f64> + Copy>(&self, v: T) -> f64 {
-            v.into()
+        fn invert(&self, v: f64) -> f64 {
+            v
         }
     }
 
     /// One scan holding `(tof, intensity)` peaks.
-    fn frame(peaks: &[(u32, u32)]) -> timsrust::Frame {
-        let mut fp = timsrust::FramePeaks::with_capacity(1, peaks.len());
-        fp.scan_offsets = vec![0, peaks.len() as u32];
-        for &(tof, i) in peaks {
-            fp.tof_indices.push(tof);
-            fp.intensities.push(i);
-        }
-        let meta = timsrust::FrameMeta {
-            intensity_correction_factor: 1.0,
-            ..Default::default()
+    fn frame(peaks: &[(u32, u32)]) -> timsrust::core::Frame {
+        frame_with_intensity_factor(peaks, 1.0)
+    }
+
+    fn frame_with_intensity_factor(
+        peaks: &[(u32, u32)],
+        intensity_correction_factor: f64,
+    ) -> timsrust::core::Frame {
+        use std::sync::Arc;
+
+        use timsrust::core::{
+            AcquisitionType,
+            FrameInfo,
+            FrameIons,
+            IntensityIndex,
+            MSLevel,
+            QuadrupoleSettings,
+            TofIndex,
         };
-        timsrust::Frame { peaks: fp, meta }
+
+        let ions = FrameIons::new(
+            vec![0, peaks.len()],
+            peaks
+                .iter()
+                .map(|&(tof, _)| TofIndex::try_from(tof).unwrap())
+                .collect(),
+            peaks
+                .iter()
+                .map(|&(_, intensity)| IntensityIndex::try_from(intensity).unwrap())
+                .collect(),
+        );
+        let info = FrameInfo::new(
+            Arc::new(QuadrupoleSettings::default()),
+            1,
+            0.0,
+            intensity_correction_factor,
+            AcquisitionType::Unknown,
+            MSLevel::MS1,
+            0,
+            None,
+        );
+        info.add_ions(ions)
     }
 
     fn config(mz_tol_bins: u32, window_cap: Option<WindowCap>) -> CentroidingConfig {
@@ -819,7 +875,10 @@ mod tests {
     }
 
     /// Sorted tof indices of the centroids.
-    fn centroid(cfg: CentroidingConfig, f: &timsrust::Frame) -> (ClusteringSummary, Vec<u32>) {
+    fn centroid(
+        cfg: CentroidingConfig,
+        f: &timsrust::core::Frame,
+    ) -> (ClusteringSummary, Vec<u32>) {
         let mut c = PeakCentroider::with_capacity(64, cfg, Identity, Identity);
         let (summary, peaks) = c.centroid_frame(f);
         let mut tofs: Vec<u32> = peaks.map(|p| p.tof_index).collect();
@@ -847,8 +906,18 @@ mod tests {
         assert_eq!(centroid(ppm(600.0), &f).1, vec![1000]);
     }
 
+    #[test]
+    fn applies_frame_intensity_correction_factor() {
+        let f = frame_with_intensity_factor(&[(1000, 100)], 2.5);
+        let mut c = PeakCentroider::with_capacity(64, config(0, None), Identity, Identity);
+        let (_, mut peaks) = c.centroid_frame(&f);
+        let peak = peaks.next().unwrap();
+        assert_eq!(peak.corrected_intensity, 250.0);
+        assert!(peaks.next().is_none());
+    }
+
     /// Fifty peaks in 100-200 with intensity rising along m/z, five in 300-400.
-    fn two_window_frame() -> timsrust::Frame {
+    fn two_window_frame() -> timsrust::core::Frame {
         let mut peaks: Vec<(u32, u32)> = (0..50u32).map(|k| (100 + 2 * k, 1_000 + k)).collect();
         peaks.extend((0..5u32).map(|k| (300 + 10 * k, 500)));
         frame(&peaks)
