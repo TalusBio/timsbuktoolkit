@@ -16,11 +16,15 @@ pub struct PeakCentroider<T1: ConvertableDomain, T2: ConvertableDomain> {
     neighbor_ranges: Vec<(usize, usize)>, // (start_idx, end_idx) for each peak
     ims_ranges: Vec<(u16, u16)>,          // (min_im, max_im) for scan index
     max_peaks: usize,
-    mz_ppm_tol: f64,
+    mz_tol_bins: u32,
     im_pct_tol: f64,
     mz_converter: T1,
     im_converter: T2,
     early_stop_iterations: u32,
+    window_cap: Option<WindowCap>,
+    /// Parents claimed per m/z window in the current frame, indexed by
+    /// `mz / window_da`.
+    window_counts: Vec<u32>,
 }
 
 /// Configuration for the centroiding algorithm
@@ -34,30 +38,50 @@ pub struct CentroidingConfig {
     /// centroiding is higher, the centroiding will stop
     /// early. A number ~20,000-50,000 seems to work well in practice.
     pub max_peaks: usize,
-    /// M/Z tolerance in ppm for clustering, 5.0 (5 ppm)
-    /// seems to work well in practice.
-    pub mz_ppm_tol: f64,
+    /// Neighbor radius along TOF, in raw bins. 0 merges identical indices only.
+    ///
+    /// Raw TDF entries are already peak-picked to one index per ion per scan,
+    /// and a bin is 2.4-7 ppm wide on an Ultra 2, so the old 0.5-1 ppm values
+    /// rounded to 0 bins. Merging at 1-2 bins lost identifications when
+    /// measured; keep this at 0 unless re-measured.
+    pub mz_tol_bins: u32,
     /// IM tolerance in percentage for clustering
     /// 3.0 (3%) seems to work well in practice.
     pub im_pct_tol: f64,
+    /// Keep at most `max_peaks` centroids per `window_da` of m/z per frame,
+    /// the most intense first. `None` leaves only the frame-wide `max_peaks`.
+    pub window_cap: Option<WindowCap>,
     /// Number of consecutive iterations with no new peaks clustered
     /// after which the centroiding will stop early (instead of going
     /// through all peaks, which will very likely be noise).
     /// A number ~200 seems to work well in practice. **`0` disables
     /// early-stop** -- the whole frame is clustered and only `max_peaks`
     /// can truncate it. Disabling is the right choice under a tight
-    /// `mz_ppm_tol`, where most peaks are singletons and early-stop would
+    /// `mz_tol_bins`, where most peaks are singletons and early-stop would
     /// otherwise clip real signal (see `IndexingCentroidingConfig`).
     pub early_stop_iterations: u32,
+}
+
+/// Per-m/z-window centroid cap. Unlike `max_peaks`, which ranks the whole
+/// frame by intensity and lets a dense region starve a sparse one, this
+/// spends the budget per window, so stored peaks per frame are bounded by
+/// `windows * max_peaks` whatever the sample looks like.
+#[derive(Clone, Copy, Debug, PartialEq, serde::Serialize, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct WindowCap {
+    pub max_peaks: u32,
+    /// Window width in m/z; windows tile from zero.
+    pub window_da: f32,
 }
 
 impl Default for CentroidingConfig {
     fn default() -> Self {
         Self {
             max_peaks: 20_000,
-            mz_ppm_tol: 5.0,
+            mz_tol_bins: 0,
             im_pct_tol: 3.0,
             early_stop_iterations: 200,
+            window_cap: None,
         }
     }
 }
@@ -86,21 +110,27 @@ impl IndexingCentroidingConfig {
 }
 
 impl Default for IndexingCentroidingConfig {
-    /// Tuned defaults from the centroiding sensitivity sweep (timsTOF):
-    /// MS1 `0.5ppm / 2%`; MS2 `1ppm / 3%`, `max_peaks=50k`, early-stop off.
+    /// timsTOF defaults. The MS2 window cap is what bounds index memory: on a
+    /// 21-min diaPASEF HeLa run it took the build from 13.4 GB to 4.5 GB and
+    /// raised 1% IDs by ~10%. Capping MS1 by window cost IDs, so it is not.
     fn default() -> Self {
         Self {
             ms1: CentroidingConfig {
                 max_peaks: 20_000,
-                mz_ppm_tol: 0.5,
+                mz_tol_bins: 0,
                 im_pct_tol: 2.0,
                 early_stop_iterations: 200,
+                window_cap: None,
             },
             ms2: CentroidingConfig {
                 max_peaks: 50_000,
-                mz_ppm_tol: 1.0,
+                mz_tol_bins: 0,
                 im_pct_tol: 3.0,
                 early_stop_iterations: 0, // disabled -- see field doc
+                window_cap: Some(WindowCap {
+                    max_peaks: 500,
+                    window_da: 50.0,
+                }),
             },
         }
     }
@@ -168,8 +198,13 @@ impl PeakAggregator {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TakenState {
     Untaken,
-    Taken { parent_idx: usize },
+    Taken {
+        parent_idx: usize,
+    },
     Parent,
+    /// Refused by the window cap. Never absorbed later: every later parent is
+    /// weaker, and a centroid must not be pulled toward a peak that outranks it.
+    Dropped,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -188,6 +223,8 @@ pub struct ClusteringSummary {
     pub initial_peaks: usize,
     pub aggregated_peaks: usize,
     pub final_peaks: usize,
+    /// Would-be centroids refused by `window_cap`.
+    pub window_capped: usize,
     pub stopping_reason: StoppingReason,
     pub elapsed: std::time::Duration,
 }
@@ -198,6 +235,7 @@ pub struct AggregatedClusteringSummary {
     pub total_initial_peaks: usize,
     pub total_aggregated_peaks: usize,
     pub total_final_peaks: usize,
+    pub total_window_capped: usize,
     pub frames_processed: usize,
     pub stopping_reasons: [usize; 3],
     pub elapsed: std::time::Duration,
@@ -208,6 +246,7 @@ impl AggregatedClusteringSummary {
         self.total_final_peaks += right.total_final_peaks;
         self.total_aggregated_peaks += right.total_aggregated_peaks;
         self.total_initial_peaks += right.total_initial_peaks;
+        self.total_window_capped += right.total_window_capped;
         self.frames_processed += right.frames_processed;
         self.elapsed += right.elapsed;
         for (i, v) in right.stopping_reasons.iter().enumerate() {
@@ -228,6 +267,7 @@ impl AggregatedClusteringSummary {
         left.total_initial_peaks += other.initial_peaks;
         left.total_aggregated_peaks += other.aggregated_peaks;
         left.total_final_peaks += other.final_peaks;
+        left.total_window_capped += other.window_capped;
         left.frames_processed += 1;
         let reason_idx = Self::reason_to_idx(other.stopping_reason);
         left.stopping_reasons[reason_idx] += 1;
@@ -240,6 +280,7 @@ impl AggregatedClusteringSummary {
             total_initial_peaks: 0,
             total_aggregated_peaks: 0,
             total_final_peaks: 0,
+            total_window_capped: 0,
             frames_processed: 0,
             stopping_reasons: [0; 3],
             elapsed: std::time::Duration::new(0, 0),
@@ -268,6 +309,7 @@ impl Display for AggregatedClusteringSummary {
         writeln!(f, "Total initial peaks: {}", self.total_initial_peaks)?;
         writeln!(f, "Total aggregated peaks: {}", self.total_aggregated_peaks)?;
         writeln!(f, "Total final peaks: {}", self.total_final_peaks)?;
+        writeln!(f, "Total window-capped peaks: {}", self.total_window_capped)?;
         writeln!(
             f,
             "Average reduction: {:.2}x",
@@ -303,25 +345,40 @@ impl<T1: ConvertableDomain, T2: ConvertableDomain> PeakCentroider<T1, T2> {
             // for each peak ... (and even extend only if needed)
             ims_ranges: Vec::new(),
             max_peaks: config.max_peaks,
-            mz_ppm_tol: config.mz_ppm_tol,
+            mz_tol_bins: config.mz_tol_bins,
             im_pct_tol: config.im_pct_tol,
             mz_converter,
             im_converter,
             early_stop_iterations: config.early_stop_iterations,
+            window_cap: config.window_cap,
+            window_counts: Vec::new(),
         }
     }
 
-    /// Given a TOF index, returns the (inclusive) bounds of TOF indices
-    /// that fall within the ppm tolerance of the mz corresponding to the TOF index.
-    /// This is used to find neighboring peaks for clustering.
-    fn tof_index_bounds(&self, tof_idex: u32) -> (u32, u32) {
-        let mz = self.mz_converter.convert(tof_idex as f64);
-        let delta_mz = mz * self.mz_ppm_tol * 1e-6;
-        let left_mz = mz - delta_mz;
-        let right_mz = mz + delta_mz;
-        let left_tof = self.mz_converter.invert(left_mz).round() as u32;
-        let right_tof = self.mz_converter.invert(right_mz).round() as u32;
-        (left_tof, right_tof)
+    /// Inclusive TOF index range that clusters with `tof_index`.
+    fn tof_index_bounds(&self, tof_index: u32) -> (u32, u32) {
+        (
+            tof_index.saturating_sub(self.mz_tol_bins),
+            tof_index.saturating_add(self.mz_tol_bins),
+        )
+    }
+
+    /// Takes one parent slot in the m/z window of peak `idx`. `false` when the
+    /// window is full. Always `true` without a cap.
+    fn try_claim_window_slot(&mut self, idx: usize) -> bool {
+        let Some(cap) = self.window_cap else {
+            return true;
+        };
+        let mz = self.mz_converter.convert(self.peaks[idx].tof_index);
+        let w = (mz / cap.window_da as f64).max(0.0) as usize;
+        if w >= self.window_counts.len() {
+            self.window_counts.resize(w + 1, 0);
+        }
+        if self.window_counts[w] >= cap.max_peaks {
+            return false;
+        }
+        self.window_counts[w] += 1;
+        true
     }
 
     fn im_index_bounds(&self, im_index: u16) -> (u16, u16) {
@@ -389,6 +446,7 @@ impl<T1: ConvertableDomain, T2: ConvertableDomain> PeakCentroider<T1, T2> {
         self.order.clear();
         self.taken_buff.clear();
         self.agg_buff.clear();
+        self.window_counts.fill(0);
     }
 
     /// Expands the internal buffers to the specified capacity
@@ -428,7 +486,9 @@ impl<T1: ConvertableDomain, T2: ConvertableDomain> PeakCentroider<T1, T2> {
     /// This dramatically reduces the number of peaks in the spectra
     /// which saves a ton of memory and time when doing LFQ, since we
     /// iterate over each peak.
-    fn itercentroid_frame(&mut self) -> (StoppingReason, usize) {
+    /// Returns (stopping reason, peaks accounted for, peaks refused by the
+    /// window cap).
+    fn itercentroid_frame(&mut self) -> (StoppingReason, usize, usize) {
         assert!(self.agg_buff.is_empty(), "agg_buff is not empty");
 
         self.taken_buff
@@ -449,10 +509,13 @@ impl<T1: ConvertableDomain, T2: ConvertableDomain> PeakCentroider<T1, T2> {
         assert!(self.agg_buff.is_empty(), "agg_buff is not empty");
 
         let mut global_num_included = 0;
+        let mut num_window_capped = 0;
         let mut early_stop_remaining = self.early_stop_iterations;
         let mut out = StoppingReason::AllTaken;
 
-        for &idx in &self.order {
+        // Indexed, not `for &idx in &self.order`: the window claim needs `&mut self`.
+        for oi in 0..self.order.len() {
+            let idx = self.order[oi];
             if self.agg_buff.len() > self.max_peaks {
                 out = StoppingReason::MaxPeaks;
                 break;
@@ -462,8 +525,18 @@ impl<T1: ConvertableDomain, T2: ConvertableDomain> PeakCentroider<T1, T2> {
 
             let (target_index, is_self_parent) = match self.taken_buff[idx] {
                 TakenState::Parent => unreachable!("This should never happen"),
+                TakenState::Dropped => unreachable!("dropped only at its own visit"),
                 TakenState::Taken { parent_idx } => (parent_idx, false),
                 TakenState::Untaken => {
+                    if !self.try_claim_window_slot(idx) {
+                        self.taken_buff[idx] = TakenState::Dropped;
+                        global_num_included += 1;
+                        num_window_capped += 1;
+                        if global_num_included == self.peaks.len() {
+                            break;
+                        }
+                        continue;
+                    }
                     self.taken_buff[idx] = TakenState::Parent;
                     self.agg_buff.push(PeakAggregator::new(&self.peaks[idx]));
                     num_includable += 1;
@@ -481,9 +554,10 @@ impl<T1: ConvertableDomain, T2: ConvertableDomain> PeakCentroider<T1, T2> {
 
             for i in search_range {
                 match self.taken_buff[i] {
-                    TakenState::Taken { .. } => continue,
-                    TakenState::Parent => continue,
-                    _ => { /* continue processing */ }
+                    TakenState::Taken { .. } | TakenState::Parent | TakenState::Dropped => {
+                        continue;
+                    }
+                    TakenState::Untaken => {}
                 }
                 let im_i = self.peaks[i].scan_index;
                 if im_i >= left_im && im_i <= right_im {
@@ -529,7 +603,7 @@ impl<T1: ConvertableDomain, T2: ConvertableDomain> PeakCentroider<T1, T2> {
         // HT2 data is usually start 400k end 40k, limiting to 10k
         // rarely leaves peaks with intensity > 200 ... ive never seen
         // it happen. -JSP 2025-Jan
-        (out, global_num_included)
+        (out, global_num_included, num_window_capped)
     }
 
     fn drain_aggregated_peaks(&mut self) -> impl Iterator<Item = CorrectedFramePeak> + '_ {
@@ -562,12 +636,13 @@ impl<T1: ConvertableDomain, T2: ConvertableDomain> PeakCentroider<T1, T2> {
     ) {
         let start = std::time::Instant::now();
         self.with_frame(frame);
-        let (stop_cause, num_accumulated) = self.itercentroid_frame();
+        let (stop_cause, num_accumulated, window_capped) = self.itercentroid_frame();
         let elapsed = start.elapsed();
         let summary = ClusteringSummary {
             initial_peaks: self.peaks.len(),
             aggregated_peaks: num_accumulated,
             final_peaks: self.agg_buff.len(),
+            window_capped,
             stopping_reason: stop_cause,
             elapsed,
         };
@@ -644,7 +719,106 @@ impl<T1: ConvertableDomain, T2: ConvertableDomain> PeakCentroider<T1, T2> {
 
 #[cfg(test)]
 mod tests {
+    use super::*;
+
+    /// tof index is m/z, scan index is mobility.
+    struct Identity;
+    impl ConvertableDomain for Identity {
+        fn convert<T: Into<f64> + Copy>(&self, v: T) -> f64 {
+            v.into()
+        }
+
+        fn invert<T: Into<f64> + Copy>(&self, v: T) -> f64 {
+            v.into()
+        }
+    }
+
+    /// One scan holding `(tof, intensity)` peaks.
+    fn frame(peaks: &[(u32, u32)]) -> timsrust::Frame {
+        let mut fp = timsrust::FramePeaks::with_capacity(1, peaks.len());
+        fp.scan_offsets = vec![0, peaks.len() as u32];
+        for &(tof, i) in peaks {
+            fp.tof_indices.push(tof);
+            fp.intensities.push(i);
+        }
+        let meta = timsrust::FrameMeta {
+            intensity_correction_factor: 1.0,
+            ..Default::default()
+        };
+        timsrust::Frame { peaks: fp, meta }
+    }
+
+    fn config(mz_tol_bins: u32, window_cap: Option<WindowCap>) -> CentroidingConfig {
+        CentroidingConfig {
+            max_peaks: 1_000,
+            mz_tol_bins,
+            im_pct_tol: 3.0,
+            early_stop_iterations: 0,
+            window_cap,
+        }
+    }
+
+    /// Sorted tof indices of the centroids.
+    fn centroid(cfg: CentroidingConfig, f: &timsrust::Frame) -> (ClusteringSummary, Vec<u32>) {
+        let mut c = PeakCentroider::with_capacity(64, cfg, Identity, Identity);
+        let (summary, peaks) = c.centroid_frame(f);
+        let mut tofs: Vec<u32> = peaks.map(|p| p.tof_index).collect();
+        tofs.sort_unstable();
+        (summary, tofs)
+    }
 
     #[test]
-    fn it_works() {}
+    fn zero_bins_keeps_adjacent_indices_apart_and_one_bin_merges_them() {
+        let f = frame(&[(1000, 100), (1001, 90)]);
+        assert_eq!(centroid(config(0, None), &f).1, vec![1000, 1001]);
+        assert_eq!(centroid(config(1, None), &f).1, vec![1000]);
+    }
+
+    /// Fifty peaks in 100-200 with intensity rising along m/z, five in 300-400.
+    fn two_window_frame() -> timsrust::Frame {
+        let mut peaks: Vec<(u32, u32)> = (0..50u32).map(|k| (100 + 2 * k, 1_000 + k)).collect();
+        peaks.extend((0..5u32).map(|k| (300 + 10 * k, 500)));
+        frame(&peaks)
+    }
+
+    #[test]
+    fn window_cap_keeps_the_most_intense_per_window_and_spares_sparse_windows() {
+        let cap = WindowCap {
+            max_peaks: 10,
+            window_da: 100.0,
+        };
+        let (summary, tofs) = centroid(config(0, Some(cap)), &two_window_frame());
+        let dense: Vec<u32> = tofs.iter().copied().filter(|t| *t < 200).collect();
+        let sparse: Vec<u32> = tofs.iter().copied().filter(|t| *t >= 300).collect();
+        assert_eq!(dense, (40..50u32).map(|k| 100 + 2 * k).collect::<Vec<_>>());
+        assert_eq!(sparse, vec![300, 310, 320, 330, 340]);
+        assert_eq!(summary.window_capped, 40);
+        assert_eq!(summary.stopping_reason, StoppingReason::AllTaken);
+    }
+
+    #[test]
+    fn window_counts_reset_between_frames() {
+        let cap = WindowCap {
+            max_peaks: 10,
+            window_da: 100.0,
+        };
+        let mut c = PeakCentroider::with_capacity(64, config(0, Some(cap)), Identity, Identity);
+        let f = two_window_frame();
+        let n_first = c.centroid_frame(&f).1.count();
+        assert_eq!(c.centroid_frame(&f).1.count(), n_first);
+    }
+
+    #[test]
+    fn a_dropped_peak_is_not_absorbed_by_a_weaker_neighbor() {
+        // Quota 1 per window. 1_500_000 claims the slot; 1_000_000 is dropped
+        // and 1_000_001, one bin away, must not become a parent that swallows it.
+        let cap = WindowCap {
+            max_peaks: 1,
+            window_da: 1e6,
+        };
+        let f = frame(&[(1_500_000, 900), (1_000_000, 500), (1_000_001, 100)]);
+        let (summary, tofs) = centroid(config(1, Some(cap)), &f);
+        assert_eq!(tofs, vec![1_500_000]);
+        assert_eq!(summary.window_capped, 2);
+    }
 }

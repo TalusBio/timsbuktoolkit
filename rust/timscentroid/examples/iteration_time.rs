@@ -82,8 +82,9 @@ fn main() {
         CentroidingConfig {
             max_peaks: MAX_PEAKS,
             im_pct_tol: 3.0,
-            mz_ppm_tol: 5.0,
+            mz_tol_bins: 0,
             early_stop_iterations: 200,
+            window_cap: None,
         },
         metadata.mz_converter,
         metadata.im_converter,

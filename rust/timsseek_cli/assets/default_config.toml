@@ -130,6 +130,24 @@ calibration_query_rt_window_minutes = 0.083333336   # 5 seconds (5 / 60)
 ## the model, made by `model` above.
 
 
+## Centroiding overrides for an index built from raw (all optional; values
+## shown are the defaults). `window_cap` keeps the N most intense centroids
+## per W Da per frame and is what bounds index memory. `mz_tol_bins` is the
+## merge radius in raw TOF bins; 0 merges identical indices only, and wider
+## lost identifications when measured. A cached `.idx` ignores this section.
+# [indexing.ms1]
+# max_peaks = 20000
+# mz_tol_bins = 0
+# im_pct_tol = 2.0
+# early_stop_iterations = 200
+# [indexing.ms2]
+# max_peaks = 50000
+# mz_tol_bins = 0
+# im_pct_tol = 3.0
+# early_stop_iterations = 0
+# window_cap = { max_peaks = 500, window_da = 50.0 }
+
+
 ## Staging controls for S3/remote raw inputs (all optional).
 ## Tempdirs are created under `tempdir_root` (system temp when unset);
 ## remote prefixes are capped at `max_prefix_keys` keys; `save_sidecar`

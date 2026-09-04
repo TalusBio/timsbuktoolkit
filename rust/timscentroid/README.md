@@ -183,15 +183,18 @@ Smaller row groups = more granular queries but more overhead.
 
 ```rust
 use timscentroid::{CentroidingConfig, IndexingCentroidingConfig};
+use timscentroid::centroiding::WindowCap;
 
 // MS1 and MS2 are centroided independently. Override per level:
 let config = IndexingCentroidingConfig {
-    ms1: CentroidingConfig { mz_ppm_tol: 0.5, im_pct_tol: 2.0, ..Default::default() },
+    ms1: CentroidingConfig { im_pct_tol: 2.0, ..Default::default() },
     ms2: CentroidingConfig {
-        mz_ppm_tol: 1.0,
         im_pct_tol: 3.0,
         max_peaks: 50_000,
         early_stop_iterations: 0, // disable early-stop
+        // 500 most intense centroids per 50 Da per frame.
+        window_cap: Some(WindowCap { max_peaks: 500, window_da: 50.0 }),
+        ..Default::default()
     },
 };
 
