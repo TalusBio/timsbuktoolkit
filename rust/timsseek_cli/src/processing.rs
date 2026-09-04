@@ -1055,12 +1055,13 @@ fn phase3_score<I: ScorerQueriable>(
     let skipped = total_peptides - results.len();
     if skipped > total_peptides / 20 {
         warn!(
-            "{}/{} peptides produced no Phase 3 result (>{:.0}%): {}. \
-             If this is unexpected, check calibration quality.",
+            "{}/{} peptides ({:.1}%) produced no Phase 3 result: {}. \
+             Check library/acquisition m/z coverage for range skips; check RT calibration only \
+             for retention-time skips.",
             skipped,
             total_peptides,
             (skipped as f64 / total_peptides as f64) * 100.0,
-            skips,
+            skips.percentage_summary(total_peptides),
         );
     }
 
