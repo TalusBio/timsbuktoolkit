@@ -129,6 +129,28 @@ impl SkipCounts {
         self.named_fields().iter().map(|(n, _)| *n as u64).sum()
     }
 
+    /// Human-readable non-zero buckets with their share of all attempted peptides.
+    pub fn percentage_summary(&self, attempted: usize) -> String {
+        let percentage = |count| {
+            if attempted == 0 {
+                0.0
+            } else {
+                f64::from(count) / attempted as f64 * 100.0
+            }
+        };
+        let fields: Vec<_> = self
+            .named_fields()
+            .into_iter()
+            .filter(|(count, _)| *count != 0)
+            .map(|(count, name)| format!("{name}={count} ({:.1}%)", percentage(count)))
+            .collect();
+        if fields.is_empty() {
+            "none".to_owned()
+        } else {
+            fields.join(", ")
+        }
+    }
+
     /// Single source of truth for field enumeration: exhaustive destructure
     /// so adding a `SkipReason` variant (which requires a new field) is a
     /// compile error here, propagating to `total` / `AddAssign` / `Display`.
@@ -147,17 +169,20 @@ impl SkipCounts {
             invariant_violation,
         } = *self;
         [
-            (precursor_out_of_fragmented_range, "precursor_oofr"),
-            (retention_time_out_of_bounds, "rt_oob"),
-            (no_expected_fragments, "no_expected_frags"),
-            (fragments_outside_scan_range, "frags_outside_scan"),
-            (no_observed_signal, "no_observed_signal"),
-            (apex_empty_data, "apex_empty"),
-            (apex_insufficient_data, "apex_insufficient"),
-            (apex_non_finite_score, "apex_nonfinite"),
-            (calibrant_nan_score, "calibrant_nan"),
-            (finalize_error, "finalize_err"),
-            (invariant_violation, "invariant"),
+            (
+                precursor_out_of_fragmented_range,
+                "precursor outside fragmentation range",
+            ),
+            (retention_time_out_of_bounds, "retention time out of bounds"),
+            (no_expected_fragments, "no expected fragments"),
+            (fragments_outside_scan_range, "fragments outside scan range"),
+            (no_observed_signal, "no observed signal"),
+            (apex_empty_data, "empty apex data"),
+            (apex_insufficient_data, "insufficient apex data"),
+            (apex_non_finite_score, "non-finite apex score"),
+            (calibrant_nan_score, "NaN calibrant score"),
+            (finalize_error, "finalization error"),
+            (invariant_violation, "invariant violation"),
         ]
     }
 }
@@ -253,7 +278,28 @@ mod tests {
         c.bump(SkipReason::RetentionTimeOutOfBounds);
         c.bump(SkipReason::ApexEmptyData);
         c.bump(SkipReason::ApexEmptyData);
-        assert_eq!(format!("{}", c), "rt_oob=1, apex_empty=2");
+        assert_eq!(
+            format!("{}", c),
+            "retention time out of bounds=1, empty apex data=2"
+        );
+    }
+
+    #[test]
+    fn percentage_display_expands_names_and_uses_attempted_total() {
+        let c = SkipCounts {
+            retention_time_out_of_bounds: 1,
+            fragments_outside_scan_range: 2,
+            ..SkipCounts::default()
+        };
+        assert_eq!(
+            c.percentage_summary(4),
+            "retention time out of bounds=1 (25.0%), fragments outside scan range=2 (50.0%)"
+        );
+    }
+
+    #[test]
+    fn percentage_display_handles_empty_input() {
+        assert_eq!(SkipCounts::default().percentage_summary(0), "none");
     }
 
     #[test]
