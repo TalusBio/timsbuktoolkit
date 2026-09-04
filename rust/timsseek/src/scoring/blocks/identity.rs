@@ -5,6 +5,7 @@
 use std::sync::Arc;
 use timsquery::models::{
     GroupCode,
+    OwnedSourceId,
     RowIdx,
 };
 
@@ -30,6 +31,8 @@ pub struct Identity {
     pub row: RowIdx,
     #[serde(skip)]
     pub group: GroupCode,
+    #[serde(skip)]
+    pub source_id: OwnedSourceId,
     pub precursor_mz: f64,
     pub precursor_charge: u8,
     pub precursor_mobility: f32,
@@ -50,6 +53,7 @@ impl Identity {
             peptide: metadata.digest.clone(),
             row: metadata.handles.row,
             group: metadata.handles.group,
+            source_id: metadata.source_id.clone(),
             precursor_mz: metadata.ref_precursor_mz,
             precursor_charge: metadata.charge,
             precursor_mobility: metadata.ref_mobility_ook0,
@@ -98,6 +102,7 @@ impl Identity {
             },
             row: RowIdx::default(),
             group: GroupCode::default(),
+            source_id: OwnedSourceId::placeholder(),
             precursor_mz: 500.0,
             precursor_charge: 2,
             precursor_mobility: 0.9,

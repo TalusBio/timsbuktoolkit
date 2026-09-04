@@ -238,13 +238,16 @@ mod tests {
         SerializedFileReader,
     };
     use std::fs::File;
-    use timsquery::models::Row;
     use timsquery::models::capabilities::TargetCapabilities;
+    use timsquery::models::{
+        Row,
+        TargetColumnsBuilder,
+    };
 
     /// A sealed arena with one row per `(sequence, id)`, for the writer to
     /// resolve ids against. `None` for an id leaves the row to be minted.
     fn arena_of(rows: &[(&str, Option<&str>)]) -> TargetColumns<IonAnnot> {
-        let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
+        let mut geom = TargetColumnsBuilder::with_capabilities(TargetCapabilities::default_diann());
         for (seq, id) in rows {
             geom.push_row(Row {
                 precursor_mz: 900.4,
@@ -258,8 +261,8 @@ mod tests {
                 ..Default::default()
             });
         }
-        geom.seal().expect("fixture ids are usable");
-        geom
+        geom.seal(crate::models::DecoyPolicy::Never)
+            .expect("fixture ids are usable")
     }
 
     fn one_row_arena() -> TargetColumns<IonAnnot> {

@@ -29,7 +29,6 @@ class TimsseekRunner:
     speclib_location: Path
     raw_file_location: Path
     config_dict: dict[str, Any] | None = None
-    koina_url: str | None = None
 
     def build_speclib(self):
         if self.speclib_location.exists():
@@ -41,23 +40,20 @@ class TimsseekRunner:
             "cargo",
             "run",
             "--release",
-            "-p",
-            "speclib_build_cli",
+            "--bin",
+            "timsseek",
             "--",
+            "build-library",
             "--fasta",
             str(self.fasta_file_location),
             "--fixed-mod",
-            "C[U:4]",
-            "--max-ions",
+            "C[UNIMOD:4]",
+            "--max-fragments",
             "10",
+            "--decoys",
             "-o",
             str(self.speclib_location),
         ]
-        if self.koina_url:
-            args.extend(["--koina-url", self.koina_url])
-        else:
-            # Public Koina: use delay to avoid rate limiting
-            args.extend(["--request-delay-ms", "500"])
         res = subprocess.run(args, check=True)
         return res
 
@@ -222,10 +218,10 @@ def wandb_context(config_dict: dict[str, Any], wandb_kwargs=None):
         run.finish()
 
 
-def main(wandb_kwargs: dict | None = None, koina_url: str | None = None):
+def main(wandb_kwargs: dict | None = None):
 
     fasta_file = Path.home() / "fasta/hela_gt20peps.fasta"
-    speclib_path = Path.home() / "fasta/asdad.msgpack.zstd"
+    speclib_path = Path.home() / "fasta/asdad.mzspeclib.txt.gz"
 
     prefix = Path.home() / "data/decompressed_timstof/"
     dotd_files = [
@@ -240,7 +236,6 @@ def main(wandb_kwargs: dict | None = None, koina_url: str | None = None):
             fasta_file_location=fasta_file,
             speclib_location=speclib_path,
             raw_file_location=file,
-            koina_url=koina_url,
         )
         runner.build_speclib()
         runner.run(wandb_kwargs=wandb_kwargs)
@@ -252,12 +247,6 @@ def build_parser():
         "--notes",
         type=str,
         help="The notes to add to the wandb run",
-    )
-    parser.add_argument(
-        "--koina-url",
-        type=str,
-        default=None,
-        help="Koina server URL (e.g. http://localhost:8501/v2/models for local)",
     )
     return parser
 
@@ -273,4 +262,4 @@ if __name__ == "__main__":
     if args.notes is not None:
         wandb_kwargs["notes"] = args.notes
 
-    main(wandb_kwargs=wandb_kwargs, koina_url=args.koina_url)
+    main(wandb_kwargs=wandb_kwargs)

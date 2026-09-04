@@ -1206,12 +1206,6 @@ checksum = "349f9b6a179ed607305526ca489b34ad0a41aed5f7980fa90eb03160b69598fb"
 
 [[package]]
 name = "bit-vec"
-version = "0.7.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d2c54ff287cfc0a34f38a6b832ea1bd8e448a330b3e40a50859e6488bee07f22"
-
-[[package]]
-name = "bit-vec"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "5e764a1d40d510daf35e07be9eb06e75770908c27d411ee6c92109c9840eaaf7"
@@ -1229,6 +1223,15 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b588b76d00fde79687d7646a9b5bdf3cc0f655e0bbd080335a95d7e96f3587da"
 dependencies = [
  "serde_core",
+]
+
+[[package]]
+name = "blake2"
+version = "0.10.6"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "46502ad458c9a52b69d4d4d32775c788b7a1b85e8bc9d482d92250fc0e3f8efe"
+dependencies = [
+ "digest 0.10.7",
 ]
 
 [[package]]
@@ -1284,17 +1287,6 @@ dependencies = [
  "futures-io",
  "futures-lite",
  "piper",
-]
-
-[[package]]
-name = "bloomfilter"
-version = "1.0.16"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c541c70a910b485670304fd420f0eab8f7bde68439db6a8d98819c3d2774d7e2"
-dependencies = [
- "bit-vec 0.7.0",
- "getrandom 0.2.17",
- "siphasher",
 ]
 
 [[package]]
@@ -3315,7 +3307,6 @@ dependencies = [
  "tokio",
  "tokio-rustls",
  "tower-service",
- "webpki-roots",
 ]
 
 [[package]]
@@ -4156,10 +4147,57 @@ dependencies = [
 ]
 
 [[package]]
+name = "msspeculator-core"
+version = "0.1.0"
+source = "git+https://github.com/TalusBio/msspeculator?rev=14634ad065ddcb9750d3c1bb0c817a2c3e332e07#14634ad065ddcb9750d3c1bb0c817a2c3e332e07"
+dependencies = [
+ "anyhow",
+ "blake2",
+ "libm",
+ "ndarray",
+ "pest",
+ "pest_derive",
+ "safetensors",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "msspeculator-inference"
+version = "0.1.0"
+source = "git+https://github.com/TalusBio/msspeculator?rev=14634ad065ddcb9750d3c1bb0c817a2c3e332e07#14634ad065ddcb9750d3c1bb0c817a2c3e332e07"
+dependencies = [
+ "anyhow",
+ "blake2",
+ "flate2",
+ "msspeculator-core",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
+name = "mzannotate"
+version = "0.2.0"
+source = "git+https://github.com/jspaezp/rustyms?rev=142c96ed1d31c56936c003af5f599d0c8f740005#142c96ed1d31c56936c003af5f599d0c8f740005"
+dependencies = [
+ "context_error",
+ "indexmap",
+ "itertools 0.14.0",
+ "mzcore",
+ "mzcv",
+ "mzdata",
+ "num-traits",
+ "ordered-float 5.3.0",
+ "serde",
+ "serde_json",
+ "thin-vec",
+ "uom",
+]
+
+[[package]]
 name = "mzcore"
 version = "0.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "bca74d59b7c73d9c705a25622c73a186a1bcbf62c0faaf2b97fac8968b4b8d45"
+source = "git+https://github.com/jspaezp/rustyms?rev=142c96ed1d31c56936c003af5f599d0c8f740005#142c96ed1d31c56936c003af5f599d0c8f740005"
 dependencies = [
  "bincode",
  "context_error",
@@ -4178,8 +4216,7 @@ dependencies = [
 [[package]]
 name = "mzcv"
 version = "0.3.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "d97dae61b4d9d35973769f286a138dc2ec55fc57ef06e5692c3ffc771427c5f7"
+source = "git+https://github.com/jspaezp/rustyms?rev=142c96ed1d31c56936c003af5f599d0c8f740005#142c96ed1d31c56936c003af5f599d0c8f740005"
 dependencies = [
  "bincode",
  "chrono",
@@ -4207,6 +4244,7 @@ dependencies = [
  "log",
  "memchr",
  "mzpeaks",
+ "mzsignal",
  "num-traits",
  "quick-xml 0.41.0",
  "regex",
@@ -4221,6 +4259,21 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "543be9eac70437bfc915b3339e6ae4f23dc034922f13eb2535dcc19e7e9e9481"
 dependencies = [
  "num-traits",
+]
+
+[[package]]
+name = "mzsignal"
+version = "1.1.12"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d2d173c6a381d85cec5fa8fc51259db0cbebb23c77a076070730cb531eb09fd"
+dependencies = [
+ "cfg-if",
+ "libm",
+ "log",
+ "mzpeaks",
+ "nalgebra",
+ "num-traits",
+ "thiserror 2.0.18",
 ]
 
 [[package]]
@@ -4247,6 +4300,33 @@ dependencies = [
  "spirv",
  "thiserror 2.0.18",
  "unicode-ident",
+]
+
+[[package]]
+name = "nalgebra"
+version = "0.33.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "9d43ddcacf343185dfd6de2ee786d9e8b1c2301622afab66b6c73baf9882abfd"
+dependencies = [
+ "approx",
+ "matrixmultiply",
+ "nalgebra-macros",
+ "num-complex",
+ "num-rational",
+ "num-traits",
+ "simba",
+ "typenum",
+]
+
+[[package]]
+name = "nalgebra-macros"
+version = "0.2.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "254a5372af8fc138e36684761d3c0cdb758a4410e938babcff1c860ce14ddbfc"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn 2.0.117",
 ]
 
 [[package]]
@@ -4395,6 +4475,7 @@ version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "f83d14da390562dca69fc84082e73e548e1ad308d24accdedd2720017cb37824"
 dependencies = [
+ "num-bigint 0.4.6",
  "num-integer",
  "num-traits",
  "serde",
@@ -5767,7 +5848,6 @@ dependencies = [
  "wasm-bindgen-futures",
  "wasm-streams",
  "web-sys",
- "webpki-roots",
 ]
 
 [[package]]
@@ -5815,25 +5895,6 @@ dependencies = [
  "libc",
  "untrusted",
  "windows-sys 0.52.0",
-]
-
-[[package]]
-name = "rmp"
-version = "0.8.15"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4ba8be72d372b2c9b35542551678538b562e7cf86c3315773cae48dfbfe7790c"
-dependencies = [
- "num-traits",
-]
-
-[[package]]
-name = "rmp-serde"
-version = "1.3.1"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "72f81bee8c8ef9b577d1681a70ebbc962c232461e397b22c208c43c04b67a155"
-dependencies = [
- "rmp",
- "serde",
 ]
 
 [[package]]
@@ -6060,6 +6121,25 @@ name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
+
+[[package]]
+name = "safe_arch"
+version = "0.7.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "96b02de82ddbe1b636e6170c21be622223aea188ef2e139be0a5b219ec215323"
+dependencies = [
+ "bytemuck",
+]
+
+[[package]]
+name = "safetensors"
+version = "0.4.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "44560c11236a6130a46ce36c836a62936dc81ebf8c36a37947423571be0e55b6"
+dependencies = [
+ "serde",
+ "serde_json",
+]
 
 [[package]]
 name = "same-file"
@@ -6294,6 +6374,19 @@ dependencies = [
 ]
 
 [[package]]
+name = "simba"
+version = "0.9.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c99284beb21666094ba2b75bbceda012e610f5479dfcc2d6e2426f53197ffd95"
+dependencies = [
+ "approx",
+ "num-complex",
+ "num-traits",
+ "paste",
+ "wide",
+]
+
+[[package]]
 name = "simd-adler32"
 version = "0.3.9"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -6446,27 +6539,6 @@ dependencies = [
  "num-traits",
  "robust",
  "smallvec",
-]
-
-[[package]]
-name = "speclib_build_cli"
-version = "0.34.0"
-dependencies = [
- "bloomfilter",
- "clap",
- "indicatif",
- "micromzpaf",
- "mzcore",
- "reqwest",
- "serde",
- "serde_json",
- "tempfile",
- "tims_stage",
- "timsseek",
- "tokio",
- "toml",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]
@@ -6846,9 +6918,13 @@ dependencies = [
  "arrow",
  "bon",
  "csv",
+ "flate2",
  "half",
  "memmap2",
  "micromzpaf",
+ "mzannotate",
+ "mzcore",
+ "mzcv",
  "parquet",
  "rayon",
  "serde",
@@ -6952,7 +7028,6 @@ dependencies = [
  "rand 0.9.3",
  "rayon",
  "regex",
- "rmp-serde",
  "rusqlite",
  "serde",
  "serde_json",
@@ -6963,7 +7038,6 @@ dependencies = [
  "timsrust",
  "timsseek_macros",
  "tracing",
- "zstd",
 ]
 
 [[package]]
@@ -6971,11 +7045,14 @@ name = "timsseek_cli"
 version = "0.34.0"
 dependencies = [
  "alloc_track",
+ "anyhow",
  "calib_dash",
  "chrono",
  "clap",
  "indicatif",
  "mimalloc",
+ "msspeculator-core",
+ "msspeculator-inference",
  "rayon",
  "regex",
  "rescore_dash",
@@ -7845,15 +7922,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "webpki-roots"
-version = "1.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "22cfaf3c063993ff62e73cb4311efde4db1efb31ab78a3e5c457939ad5cc0bed"
-dependencies = [
- "rustls-pki-types",
-]
-
-[[package]]
 name = "weezl"
 version = "0.1.12"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -8080,6 +8148,16 @@ dependencies = [
  "log",
  "thiserror 2.0.18",
  "web-sys",
+]
+
+[[package]]
+name = "wide"
+version = "0.7.33"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0ce5da8ecb62bcd8ec8b7ea19f69a51275e91299be594ea5cc6ef7819e16cd03"
+dependencies = [
+ "bytemuck",
+ "safe_arch",
 ]
 
 [[package]]

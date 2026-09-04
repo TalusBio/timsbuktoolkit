@@ -1,4 +1,10 @@
 use super::config::OutputConfig;
+use crate::artifacts::{
+    FEATURE_IMPORTANCE_TSV,
+    FEATURE_STATS_TSV,
+    PERFORMANCE_REPORT,
+    RESULTS_PARQUET,
+};
 use indicatif::ProgressIterator;
 use timsquery::models::tolerance::{
     MobilityTolerance,
@@ -13,7 +19,7 @@ use timsquery::{
     SpectralCollector,
     Tolerance,
 };
-use timsseek::data_sources::speclib::Speclib;
+use timsseek::data_sources::reference_library::ReferenceLibrary;
 use timsseek::errors::TimsSeekError;
 use timsseek::ml::qvalues::{
     ThresholdCounts,
@@ -259,8 +265,8 @@ mod calib_dash_hook {
 
 /// Check that two speclibs are on a compatible RT scale.
 /// Warns loudly if the RT ranges don't overlap, which would produce a useless calibration.
-fn check_rt_scale_compatibility(main_lib: &Speclib, calib_lib: &Speclib) {
-    fn rt_range(lib: &Speclib) -> (f32, f32) {
+fn check_rt_scale_compatibility(main_lib: &ReferenceLibrary, calib_lib: &ReferenceLibrary) {
+    fn rt_range(lib: &ReferenceLibrary) -> (f32, f32) {
         let mut min_rt = f32::INFINITY;
         let mut max_rt = f32::NEG_INFINITY;
         for q in lib.iter() {
@@ -314,9 +320,6 @@ fn check_rt_scale_compatibility(main_lib: &Speclib, calib_lib: &Speclib) {
     }
 }
 
-pub const FEATURE_STATS_FILENAME: &str = "results.feature_stats.tsv";
-pub const FEATURE_IMPORTANCE_FILENAME: &str = "results.feature_importance.tsv";
-
 fn write_tsv(
     path: &std::path::Path,
     header: &str,
@@ -340,7 +343,7 @@ fn write_feature_stats_sidecar(
     use std::fmt::Write as _;
 
     write_tsv(
-        &parquet_path.with_file_name(FEATURE_STATS_FILENAME),
+        &parquet_path.with_file_name(FEATURE_STATS_TSV),
         "name\tmean\tmissing\tfold",
         |buf| {
             for fold in stats.iter() {
@@ -358,7 +361,7 @@ fn write_feature_stats_sidecar(
     )?;
 
     write_tsv(
-        &parquet_path.with_file_name(FEATURE_IMPORTANCE_FILENAME),
+        &parquet_path.with_file_name(FEATURE_IMPORTANCE_TSV),
         "name\tgain\tfold",
         |buf| {
             for fold in stats.iter() {
@@ -377,17 +380,29 @@ fn write_feature_stats_sidecar(
     feature = "instrumentation",
     tracing::instrument(skip_all, level = "trace")
 )]
+pub struct PipelineOptions<'a> {
+    pub chunk_size: usize,
+    pub output: &'a OutputConfig,
+    pub max_qvalue: f32,
+    pub calibration: &'a CalibrationConfig,
+    pub no_feature_stats: bool,
+    pub rescore_model: RescoreModel,
+}
+
 pub fn execute_pipeline<I: ScorerQueriable>(
-    speclib: &Speclib,
-    calib_lib: Option<&Speclib>,
+    speclib: &ReferenceLibrary,
+    calib_lib: Option<&ReferenceLibrary>,
     pipeline: &Scorer<I>,
-    chunk_size: usize,
-    out_path: &OutputConfig,
-    max_qvalue: f32,
-    calib_config: &CalibrationConfig,
-    no_feature_stats: bool,
-    rescore_model: RescoreModel,
+    options: &PipelineOptions<'_>,
 ) -> std::result::Result<PipelineReport, TimsSeekError> {
+    let PipelineOptions {
+        chunk_size,
+        output: out_path,
+        max_qvalue,
+        calibration: calib_config,
+        no_feature_stats,
+        rescore_model,
+    } = *options;
     // === PHASE 1: Broad prescore -> collect top calibrants ===
     // Use calibration library if provided, otherwise fall back to main speclib
     let phase1_lib = calib_lib.unwrap_or(speclib);
@@ -597,8 +612,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
 
     // === PHASE 6: Write Parquet output ===
     let step = TimedStep::begin("Phase 6: Write output");
-    // ARTIFACT-LIST (per-sample): keep in sync with validate_inputs in main.rs.
-    let out_path_pq = std::path::Path::new(&out_path.uri).join("results.parquet");
+    let out_path_pq = std::path::Path::new(&out_path.uri).join(RESULTS_PARQUET);
     let mut pq_writer = timsseek::scoring::parquet_writer::ResultParquetWriter::new(
         &out_path_pq,
         20_000,
@@ -673,7 +687,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     tracing::instrument(skip_all, level = "trace")
 )]
 fn phase1_prescore<I: ScorerQueriable>(
-    speclib: &Speclib,
+    speclib: &ReferenceLibrary,
     pipeline: &Scorer<I>,
     chunk_size: usize,
     config: &CalibrationConfig,
@@ -732,7 +746,7 @@ const MIN_SHARED_FRAGMENTS: usize = 5;
 
 fn calibrate_from_phase1<I: ScorerQueriable>(
     candidates: Vec<CalibrantCandidate>,
-    phase1_lib: &Speclib,
+    phase1_lib: &ReferenceLibrary,
     main_lookup: Option<&PrecursorFragmentLookup>,
     pipeline: &Scorer<I>,
     config: &CalibrationConfig,
@@ -949,7 +963,7 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
     tracing::instrument(skip_all, level = "trace")
 )]
 fn phase3_score<I: ScorerQueriable>(
-    speclib: &Speclib,
+    speclib: &ReferenceLibrary,
     pipeline: &Scorer<I>,
     calibration: &CalibrationResult,
     chunk_size: usize,
@@ -1042,6 +1056,32 @@ fn dedup_by_sequence(results: &mut Vec<ScoredCandidate>) {
     });
 }
 
+/// Targets discarded because another target won their competition, which is the
+/// search-side symptom of a library whose groups hold more than one target per
+/// charge.
+///
+/// A target beaten by a *decoy* is ordinary target/decoy competition and is not
+/// counted -- that is the mechanism working. Every target past the first in one
+/// `(group, charge)` is counted whichever member won, since one of the two is
+/// gone either way.
+///
+/// Reads the vec the competition sort left behind, so competitors are adjacent
+/// and this is one pass with no allocation. It has to run after
+/// `dedup_by_sequence`: the rows that removes are one precursor listed twice,
+/// which is a duplicate rather than a mis-declared group, and counting them here
+/// would report a defect the library does not have.
+fn targets_beaten_by_targets(sorted: &[ScoredCandidate]) -> usize {
+    sorted
+        .chunk_by(|a, b| a.scoring.identity.competes_with(&b.scoring.identity))
+        .map(|run| {
+            run.iter()
+                .filter(|c| c.scoring.identity.is_target)
+                .count()
+                .saturating_sub(1)
+        })
+        .sum()
+}
+
 fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandidate> {
     // TODO: re-implement so we dont drop results but instead just flag them as rejected (maybe
     // a slice where we push rejected results to the end and keep the trailing slice as the "active")
@@ -1105,6 +1145,14 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
         "Number of results after t/d competition: {}",
         group_lens.len()
     );
+    let outcompeted_targets = targets_beaten_by_targets(&results);
+    if outcompeted_targets > 0 {
+        warn!(
+            "{outcompeted_targets} targets were discarded because another target won their \
+             competition, which is a real identification thrown away to keep another: the \
+             library declares competition groups holding more than one target per charge."
+        );
+    }
 
     let mut members = results.into_iter();
     group_lens
@@ -1129,31 +1177,16 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
 }
 
 pub fn run_pipeline(
-    speclib: &Speclib,
-    calib_lib: Option<&Speclib>,
+    speclib: &ReferenceLibrary,
+    calib_lib: Option<&ReferenceLibrary>,
     pipeline: &Scorer<IndexedTimstofPeaks>,
-    chunk_size: usize,
-    output: &OutputConfig,
-    max_qvalue: f32,
     load_index_ms: u64,
-    calib_config: &CalibrationConfig,
-    no_feature_stats: bool,
-    rescore_model: RescoreModel,
+    options: &PipelineOptions<'_>,
 ) -> std::result::Result<PipelineReport, TimsSeekError> {
-    // ARTIFACT-LIST (per-sample): keep in sync with validate_inputs in main.rs.
-    let performance_report_path = std::path::Path::new(&output.uri).join("performance_report.json");
+    let performance_report_path =
+        std::path::Path::new(&options.output.uri).join(PERFORMANCE_REPORT);
 
-    let mut timings = execute_pipeline(
-        speclib,
-        calib_lib,
-        pipeline,
-        chunk_size,
-        output,
-        max_qvalue,
-        calib_config,
-        no_feature_stats,
-        rescore_model,
-    )?;
+    let mut timings = execute_pipeline(speclib, calib_lib, pipeline, options)?;
     timings.load_index_ms = load_index_ms;
     // Write per-file report
     let perf_report =
@@ -1261,7 +1294,7 @@ mod tests {
         assert!((winner.delta_group_ln1p_ratio - runner_up_ln1p / best_ln1p).abs() < 1e-6);
     }
 
-    /// `LazyMassShift` with two decoys makes every group three members, so a
+    /// `MassShift` makes every group three members, so a
     /// two-member test never exercised the case that mattered: the margin has
     /// to come from the runner-up, not from the worst member.
     #[test]
@@ -1293,6 +1326,31 @@ mod tests {
         assert_eq!(competed.len(), 1);
         assert!(competed[0].delta_group_ln1p_diff.is_nan());
         assert!(competed[0].delta_group_ln1p_ratio.is_nan());
+    }
+
+    /// A target beaten by a decoy is what competition is for, so it counts as
+    /// nothing lost.
+    #[test]
+    fn a_target_losing_to_a_decoy_is_not_counted_as_an_outcompeted_target() {
+        let mut target = candidate("PEPTIDEK", 501.0, true, 7);
+        target.scoring.primary.main_score = 3.0;
+        let mut decoy = candidate("KEDITPEP", 502.0, false, 7);
+        decoy.scoring.primary.main_score = 8.0;
+
+        assert_eq!(targets_beaten_by_targets(&[decoy, target]), 0);
+    }
+
+    /// Two targets competing at one charge means one of them is discarded to
+    /// keep the other, which is the search-side symptom of a mis-declared
+    /// group and the number the log has to name.
+    #[test]
+    fn a_target_losing_to_another_target_is_counted() {
+        let mut winner = candidate("PEPTIDEK", 501.0, true, 7);
+        winner.scoring.primary.main_score = 8.0;
+        let mut loser = candidate("SAMPLERK", 502.0, true, 7);
+        loser.scoring.primary.main_score = 3.0;
+
+        assert_eq!(targets_beaten_by_targets(&[winner, loser]), 1);
     }
 
     /// Groups are found by walking runs of the sort order, so a result that

@@ -34,10 +34,12 @@ use crate::ion::{
     IonSeriesOrdinal,
     NeutralLoss,
 };
+use crate::models::capabilities::DecoyPolicy;
 use crate::models::{
     Row,
     TargetCapabilities,
     TargetColumns,
+    TargetColumnsBuilder,
 };
 use std::fs::File;
 use std::io::Read;
@@ -275,9 +277,13 @@ fn read_entry<'a>(
     let had_file_decoy = dc != 0;
     if had_file_decoy {
         // A whole second Peptide is embedded between `dc` and `entry_flags`.
-        // Read it (mandatory to stay byte-synced) then discard: a lone file
-        // decoy would land in its own singleton FDR group and always "win",
-        // silently breaking FDR. Mass-shift decoys are generated downstream.
+        // Read it (mandatory to stay byte-synced) then discard.
+        //
+        // Its position pairs it with the target, but this decoder recovers only
+        // the entry's single target name/sequence. Reusing that sequence for
+        // the second peptide would make composition-derived isotope metadata
+        // inconsistent with its precursor and fragments. Consume the payload
+        // without emitting a row; callers may derive mass-shift decoys instead.
         let _decoy = read_peptide(c, version)?;
     }
 
@@ -482,44 +488,49 @@ impl SpecLib {
         // slot is a per-worker dedup scratch buffer reused across every entry
         // that worker maps (see `map_entry`), so the hot loop allocates only the
         // persistent output, not a fresh dedup Vec per entry.
-        let (geom, frag_intens, stats, _scratch) = offsets
-            .par_iter()
-            .try_fold(
-                || {
-                    (
-                        TargetColumns::with_capabilities(TargetCapabilities::default_diann()),
-                        Vec::<f32>::new(),
-                        SpeclibDecodeStats::default(),
-                        Vec::new(),
-                    )
-                },
-                |(mut geom, mut frag_intens, mut stats, mut scratch),
-                 &off|
-                 -> Result<_, TargetReadingError> {
-                    let mut cur = Cursor::new(self.data.bytes());
-                    cur.pos = off;
-                    let view = read_entry(&mut cur, self.version, &self.pg_ids)?;
-                    map_entry(view, &mut geom, &mut frag_intens, &mut stats, &mut scratch)?;
-                    Ok((geom, frag_intens, stats, scratch))
-                },
-            )
-            .try_reduce(
-                || {
-                    (
-                        TargetColumns::with_capabilities(TargetCapabilities::default_diann()),
-                        Vec::<f32>::new(),
-                        SpeclibDecodeStats::default(),
-                        Vec::new(),
-                    )
-                },
-                |(mut a_geom, mut a_int, sa, scratch), (b_geom, b_int, sb, _)| {
-                    append_arena(&mut a_geom, b_geom);
-                    a_int.extend(b_int);
-                    let mut merged = sa;
-                    merged.merge(&sb);
-                    Ok((a_geom, a_int, merged, scratch))
-                },
-            )?;
+        let (geom, frag_intens, stats, _scratch) =
+            offsets
+                .par_iter()
+                .try_fold(
+                    || {
+                        (
+                            TargetColumnsBuilder::with_capabilities(
+                                TargetCapabilities::default_diann(),
+                            ),
+                            Vec::<f32>::new(),
+                            SpeclibDecodeStats::default(),
+                            Vec::new(),
+                        )
+                    },
+                    |(mut geom, mut frag_intens, mut stats, mut scratch),
+                     &off|
+                     -> Result<_, TargetReadingError> {
+                        let mut cur = Cursor::new(self.data.bytes());
+                        cur.pos = off;
+                        let view = read_entry(&mut cur, self.version, &self.pg_ids)?;
+                        map_entry(view, &mut geom, &mut frag_intens, &mut stats, &mut scratch)?;
+                        Ok((geom, frag_intens, stats, scratch))
+                    },
+                )
+                .try_reduce(
+                    || {
+                        (
+                            TargetColumnsBuilder::with_capabilities(
+                                TargetCapabilities::default_diann(),
+                            ),
+                            Vec::<f32>::new(),
+                            SpeclibDecodeStats::default(),
+                            Vec::new(),
+                        )
+                    },
+                    |(mut a_geom, mut a_int, sa, scratch), (b_geom, b_int, sb, _)| {
+                        append_arena(&mut a_geom, b_geom);
+                        a_int.extend(b_int);
+                        let mut merged = sa;
+                        merged.merge(&sb);
+                        Ok((a_geom, a_int, merged, scratch))
+                    },
+                )?;
 
         Ok((geom, frag_intens, stats, at_eof))
     }
@@ -633,7 +644,8 @@ fn residue_count(stripped: &str) -> usize {
 ///
 /// `dst.caps` is preserved (all shards share `default_diann`), so merging an
 /// empty identity in either position is a no-op on capabilities.
-fn append_arena(dst: &mut TargetColumns<IonAnnot>, mut src: TargetColumns<IonAnnot>) {
+fn append_arena(dst: &mut TargetColumnsBuilder<IonAnnot>, src: TargetColumnsBuilder<IonAnnot>) {
+    let (dst, mut src) = (&mut dst.inner, src.inner);
     // Bases captured BEFORE the backing arenas are appended.
     let frag_base = dst.frag_labels.len();
     let strip_base = dst.seq_strip_blob.len();
@@ -647,6 +659,7 @@ fn append_arena(dst: &mut TargetColumns<IonAnnot>, mut src: TargetColumns<IonAnn
     dst.mobility.append(&mut src.mobility);
     dst.is_decoy.append(&mut src.is_decoy);
     dst.pending_ids.append(&mut src.pending_ids);
+    dst.pending_groups.append(&mut src.pending_groups);
     dst.frag_labels.append(&mut src.frag_labels);
     dst.frag_mzs.append(&mut src.frag_mzs);
     dst.seq_strip_blob.push_str(&src.seq_strip_blob);
@@ -681,8 +694,8 @@ fn append_arena(dst: &mut TargetColumns<IonAnnot>, mut src: TargetColumns<IonAnn
 
     // Exhaustive on purpose: a column added to `TargetColumns` fails to compile
     // here instead of being silently dropped on every merge. `source_ids` and
-    // `decoy_groups` are built by `seal`, which runs on the merged arena, so a
-    // shard never holds either.
+    // `decoy_groups` are built by `seal` from the pending columns, which runs on
+    // the merged arena, so a shard never holds either.
     let TargetColumns {
         caps: _,
         precursor_mz: _,
@@ -691,6 +704,7 @@ fn append_arena(dst: &mut TargetColumns<IonAnnot>, mut src: TargetColumns<IonAnn
         mobility: _,
         is_decoy: _,
         pending_ids: _,
+        pending_groups: _,
         source_ids: _,
         decoy_groups: _,
         frag_off: _,
@@ -726,7 +740,7 @@ fn loss_from_code(code: u8) -> Option<NeutralLoss> {
 /// worker) so the per-entry dedup pass allocates nothing; it is cleared on entry.
 fn map_entry(
     entry: EntryView,
-    geom: &mut TargetColumns<IonAnnot>,
+    geom: &mut TargetColumnsBuilder<IonAnnot>,
     frag_intens: &mut Vec<f32>,
     stats: &mut SpeclibDecodeStats,
     scratch: &mut Vec<(IonAnnot, f64, f32)>,
@@ -906,7 +920,12 @@ fn map_entry(
 
 /// The built arena, its parallel reference-intensity sidecar, drop statistics,
 /// and whether parsing landed exactly on EOF.
-type ParsedSpeclib = (TargetColumns<IonAnnot>, Vec<f32>, SpeclibDecodeStats, bool);
+type ParsedSpeclib = (
+    TargetColumnsBuilder<IonAnnot>,
+    Vec<f32>,
+    SpeclibDecodeStats,
+    bool,
+);
 
 /// Parse a whole `.speclib`. A `false` in the returned EOF flag signals a
 /// structural desync.
@@ -948,13 +967,14 @@ pub fn sniff_diann_speclib_library_file<T: AsRef<Path>>(path: T) -> bool {
 /// returning [`TargetTable::Mzpaf`] with the reference-intensity sidecar.
 pub fn read_diann_speclib_library_file<T: AsRef<Path>>(
     path: T,
+    decoys: DecoyPolicy,
 ) -> Result<TargetTable, TargetReadingError> {
     let path = path.as_ref();
     info!("Reading DIA-NN .speclib binary from {}", path.display());
 
     // mmap the file (not an owned read) -- pages fault in on demand, no
     // file-sized resident buffer.
-    let (mut geom, frag_intens, stats, at_eof) = SpecLib::open_mmap(path)?.parse_parallel()?;
+    let (geom, frag_intens, stats, at_eof) = SpecLib::open_mmap(path)?.parse_parallel()?;
 
     if !at_eof {
         // A parse that doesn't land on EOF means the entries were misaligned
@@ -963,6 +983,15 @@ pub fn read_diann_speclib_library_file<T: AsRef<Path>>(
         return Err(TargetReadingError::SpeclibParse(format!(
             "parse did not land on EOF for {} -- structural desync",
             path.display()
+        )));
+    }
+    if decoys == DecoyPolicy::Never && stats.decoys_dropped > 0 {
+        return Err(TargetReadingError::SpeclibParse(format!(
+            "DIA-NN .speclib {} contains {} optional decoy peptide payloads, but this decoder \
+                 does not recover a separate sequence for them; decoy policy `never` cannot be \
+                 honored. Use `if-missing` or `force` to derive mass-shift decoys instead",
+            path.display(),
+            stats.decoys_dropped,
         )));
     }
     if stats.any_dropped() {
@@ -990,10 +1019,10 @@ pub fn read_diann_speclib_library_file<T: AsRef<Path>>(
 
     assert_eq!(
         frag_intens.len(),
-        geom.frag_labels.len(),
+        geom.n_fragments(),
         "reference-intensity sidecar must stay parallel to the fragment-label arena"
     );
-    geom.seal()?;
+    let geom = geom.seal(decoys)?;
     Ok(TargetTable::Mzpaf {
         geom,
         frag_intens: Some(frag_intens),
@@ -1043,7 +1072,7 @@ mod tests {
         assert_eq!(geom.n_rows(), 1064, "precursor count from reference parser");
         assert_eq!(
             frag_intens.len(),
-            geom.frag_labels.len(),
+            geom.n_fragments(),
             "intensity sidecar stays parallel to the fragment arena"
         );
     }
@@ -1055,9 +1084,11 @@ mod tests {
     #[test]
     fn every_source_id_stays_paired_with_its_own_row() {
         let file = std::fs::File::open(fixture_path()).unwrap();
-        let (mut geom, _frag_intens, _stats, _eof) =
+        let (geom, _frag_intens, _stats, _eof) =
             parse_speclib_reader(std::io::BufReader::new(file)).unwrap();
-        geom.seal().expect("the fixture's entry names are usable");
+        let geom = geom
+            .seal(DecoyPolicy::Never)
+            .expect("the fixture's entry names are usable");
 
         assert!(geom.n_rows() > 1, "one row would not catch a permutation");
         for row in geom.rows() {
@@ -1075,6 +1106,7 @@ mod tests {
         let file = std::fs::File::open(fixture_path()).unwrap();
         let (geom, frag_intens, _stats, _eof) =
             parse_speclib_reader(std::io::BufReader::new(file)).unwrap();
+        let geom = geom.seal(DecoyPolicy::Never).unwrap();
 
         assert_eq!(
             &geom.seq_mod_blob[geom.seq_mod_range(row(&geom, 0))],
@@ -1136,6 +1168,7 @@ mod tests {
         let file = std::fs::File::open(fixture_path()).unwrap();
         let (geom, _intens, _stats, _eof) =
             parse_speclib_reader(std::io::BufReader::new(file)).unwrap();
+        let geom = geom.seal(DecoyPolicy::Never).unwrap();
 
         assert_eq!(
             &geom.seq_mod_blob[geom.seq_mod_range(row(&geom, 532))],
@@ -1174,6 +1207,7 @@ mod tests {
         let file = std::fs::File::open(fixture_path()).unwrap();
         let (geom, _intens, stats, _eof) =
             parse_speclib_reader(std::io::BufReader::new(file)).unwrap();
+        let geom = geom.seal(DecoyPolicy::Never).unwrap();
         assert_eq!(stats.exclude_flagged, 8384);
         assert_eq!(stats.decoys_dropped, 0);
         assert_eq!(stats.loss_dropped, 0);

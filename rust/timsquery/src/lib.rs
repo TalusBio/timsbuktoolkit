@@ -39,6 +39,7 @@ pub use timscentroid::{
 };
 
 // Declare modules
+pub mod chemistry;
 pub mod errors;
 pub mod models;
 pub mod serde;

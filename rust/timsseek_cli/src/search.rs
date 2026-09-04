@@ -1,0 +1,721 @@
+//! The search command: validate, stage, and drive the pipeline once per raw
+//! input, writing one subdirectory per sample plus the run-level artifacts.
+
+use tims_stage::{
+    expand_local_uri,
+    is_remote_uri,
+};
+use timsquery::utils::TupleRange;
+use timsquery::{
+    IndexedTimstofPeaks,
+    IndexingCentroidingConfig,
+    load_index,
+};
+use timsseek::scoring::Scorer;
+use timsseek::scoring::timings::TimedStep;
+use tracing::{
+    error,
+    info,
+    info_span,
+};
+
+use crate::cli::SearchArgs;
+use crate::config::{
+    self,
+    Config,
+    OutputConfig,
+    load_config,
+};
+use crate::logging::init_tracing;
+use crate::output_sink::{
+    OutputSink,
+    sample_name_from_uri,
+};
+use crate::run_inputs::{
+    LibrarySource,
+    ResolvedInputs,
+    resolve_run_inputs,
+};
+use crate::{
+    artifacts,
+    build_library,
+    errors,
+    processing,
+};
+
+/// A library that is not there, and the two ways out of it: point at one that
+/// exists, or ask for it to be predicted.
+///
+/// Naming the flag here is what keeps a run from being a guessing game -- the
+/// alternative is a bare "does not exist" and a second failed run to find out
+/// there was a way to fix it.
+fn missing_library_error(uri: &str) -> errors::CliError {
+    errors::CliError::Io {
+        source: "Speclib file does not exist; pass --build-if-missing with --fasta to predict it \
+                 and write it there"
+            .to_string(),
+        path: Some(uri.to_string()),
+    }
+}
+
+/// The sequence database a run predicts from, probed here rather than left to
+/// msspeculator, which opens the FASTA after the model has loaded.
+fn validate_fasta(fasta: &std::path::Path) -> std::result::Result<(), errors::CliError> {
+    if !fasta.exists() {
+        return Err(errors::CliError::Io {
+            source: "Sequence database does not exist".to_string(),
+            path: Some(fasta.to_string_lossy().to_string()),
+        });
+    }
+    Ok(())
+}
+
+/// Probe the filesystem for everything the run is about to touch, so a missing
+/// input or a colliding artifact fails before the heavy analysis rather than
+/// after it. Every value it reads was resolved by [`resolve_run_inputs`].
+fn validate_inputs(resolved: &ResolvedInputs) -> std::result::Result<(), errors::CliError> {
+    info!("Validating inputs and outputs before processing...");
+
+    let ResolvedInputs {
+        raw_inputs,
+        library,
+        calib_lib_uri,
+        output_uri,
+        overwrite,
+    } = resolved;
+
+    match library {
+        // Local only: remote resolution happens at open.
+        LibrarySource::File(uri) => {
+            if !is_remote_uri(uri) && !std::path::Path::new(uri).exists() {
+                return Err(missing_library_error(uri));
+            }
+            info!("✓ Speclib URI: {}", uri);
+        }
+        LibrarySource::Fasta(fasta) => {
+            validate_fasta(fasta)?;
+            info!("✓ FASTA to predict a library from: {}", fasta.display());
+        }
+        LibrarySource::Build { out, fasta } => {
+            validate_fasta(fasta)?;
+            info!(
+                "✓ FASTA to build {} from: {}",
+                out.display(),
+                fasta.display()
+            );
+        }
+    }
+
+    if let Some(uri) = calib_lib_uri {
+        if !is_remote_uri(uri) && !std::path::Path::new(uri).exists() {
+            return Err(errors::CliError::Io {
+                source: "Calibration library file does not exist".to_string(),
+                path: Some(uri.clone()),
+            });
+        }
+        info!("✓ Calibration library URI: {}", uri);
+    }
+
+    // Local-path existence only; remote URIs are resolved by tims_stage at
+    // staging time.
+    for raw_uri in raw_inputs {
+        if !is_remote_uri(raw_uri) && !std::path::Path::new(raw_uri.as_str()).exists() {
+            return Err(errors::CliError::Io {
+                source: "Raw file does not exist".to_string(),
+                path: Some(raw_uri.clone()),
+            });
+        }
+    }
+    info!("✓ All {} raw input(s) validated", raw_inputs.len());
+
+    // Remote outputs skip the writability probe -- the upload is the write test.
+    if !is_remote_uri(output_uri) {
+        let output_dir_path = std::path::Path::new(output_uri);
+
+        match std::fs::create_dir_all(output_dir_path) {
+            Ok(_) => {
+                info!("✓ Output directory ready");
+            }
+            Err(e) => {
+                return Err(errors::CliError::Io {
+                    source: format!("Failed to create output directory: {}", e),
+                    path: Some(output_uri.clone()),
+                });
+            }
+        };
+
+        let test_file = output_dir_path.join(".write_test");
+        match std::fs::write(&test_file, "test") {
+            Ok(_) => {
+                let _ = std::fs::remove_file(&test_file);
+                info!("✓ Output directory is writable");
+            }
+            Err(e) => {
+                return Err(errors::CliError::Io {
+                    source: format!("Output directory is not writable: {}", e),
+                    path: Some(output_uri.clone()),
+                });
+            }
+        }
+    }
+
+    // Probe every artifact up-front so a collision fails before the heavy
+    // analysis rather than after it.
+    if !overwrite {
+        let built_library = match library {
+            LibrarySource::Build { out, .. } => Some(out.as_path()),
+            LibrarySource::File(_) | LibrarySource::Fasta(_) => None,
+        };
+        let collisions = artifacts::probe_collisions(output_uri, raw_inputs, built_library)?;
+        if !collisions.is_empty() {
+            let list = collisions
+                .iter()
+                .take(8)
+                .map(|s| format!("  - {s}"))
+                .collect::<Vec<_>>()
+                .join("\n");
+            let more = if collisions.len() > 8 {
+                format!("\n  ... and {} more", collisions.len() - 8)
+            } else {
+                String::new()
+            };
+            return Err(errors::CliError::Config {
+                source: format!(
+                    "{} output artifact(s) already exist; pass --overwrite/-O to replace or remove them:\n{list}{more}",
+                    collisions.len()
+                ),
+            });
+        }
+        info!("✓ No output collisions (checked local + remote artifacts)");
+    } else {
+        info!("✓ --overwrite set; existing output artifacts will be replaced");
+    }
+
+    info!("All validations passed! Starting processing...");
+
+    Ok(())
+}
+
+/// Record what the run resolved to, at the path the collision probe reserved.
+fn write_config_used(
+    config: &Config,
+    path: &std::path::Path,
+) -> std::result::Result<(), errors::CliError> {
+    let json = serde_json::to_string_pretty(config).map_err(|e| errors::CliError::ParseError {
+        msg: format!("Failed to serialize config: {}", e),
+    })?;
+    std::fs::write(path, json).map_err(|e| errors::CliError::Io {
+        source: e.to_string(),
+        path: Some(path.to_string_lossy().to_string()),
+    })?;
+    info!("Wrote final configuration to {:?}", path);
+    Ok(())
+}
+
+fn get_frag_range_from_index(
+    index: &IndexedTimstofPeaks,
+) -> Result<TupleRange<f64>, errors::CliError> {
+    // `fragmented_range` panics only when there are no ms2 window groups --
+    // catch it and surface a readable "not a DIA run" error instead.
+    let result =
+        std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| index.fragmented_range()));
+    match result {
+        Ok(r) => Ok(r),
+        Err(_) => Err(errors::CliError::DataReading {
+            source: "Index has no MS2 window groups -- is this a DIA run?".to_string(),
+        }),
+    }
+}
+
+struct SearchRun<'a> {
+    backend: &'a tims_stage::PerRunTempdir,
+    save_sidecar: bool,
+    speclib: &'a timsseek::data_sources::reference_library::ReferenceLibrary,
+    calib_lib: Option<&'a timsseek::data_sources::reference_library::ReferenceLibrary>,
+    config: &'a Config,
+    sink: &'a OutputSink,
+    overwrite: bool,
+    max_qvalue: f32,
+    no_feature_stats: bool,
+}
+
+impl SearchRun<'_> {
+    fn process_file(
+        &self,
+        raw_uri: &str,
+    ) -> std::result::Result<timsseek::scoring::PipelineReport, errors::CliError> {
+        let file_name = std::path::Path::new(raw_uri)
+            .file_name()
+            .and_then(|s| s.to_str())
+            .unwrap_or(raw_uri);
+        let _file_span = info_span!("file", name = file_name).entered();
+        info!("Processing raw input: {}", raw_uri);
+
+        let step = TimedStep::begin("Loading index");
+        let (index, index_source) = load_index(
+            raw_uri,
+            self.backend,
+            self.save_sidecar,
+            IndexingCentroidingConfig::default(),
+        )
+        .map_err(|e| errors::CliError::Io {
+            source: format!("load_index({raw_uri}): {e}"),
+            path: Some(raw_uri.to_string()),
+        })?;
+        // Cache reuse vs raw build is otherwise invisible to the user.
+        let load_index_ms = step.finish_with(format_args!("{index_source}")).as_millis() as u64;
+        match index.mobility_kind() {
+            timscentroid::MobilityKind::Ook0 => info!("Mobility axis: TIMS 1/K0 (searchable)"),
+            timscentroid::MobilityKind::Absent => {
+                info!("Mobility axis: none -- mobility filter + score features disabled")
+            }
+            timscentroid::MobilityKind::Unsupported(label) => info!(
+                "Mobility axis: unsupported [{label}] -- mobility filter + score features disabled"
+            ),
+        }
+        alloc_track::snap!("Loading index");
+
+        // On-disk caches use `bucket_size=4096`, too large for the tight mz
+        // tolerances of Phase 1 / Phase 3 (measured: ~−24% wall at 256).
+        const REBUCKET_LEN: usize = 256;
+        let step = TimedStep::begin(format_args!("Rebucket at {}", REBUCKET_LEN));
+        let index = index.rebucket(REBUCKET_LEN);
+        step.finish();
+
+        let fragmented_range = get_frag_range_from_index(&index)?;
+
+        let pipeline = Scorer {
+            index,
+            broad_tolerance: self.config.analysis.tolerance.clone(),
+            fragmented_range,
+        };
+
+        let file_stem = sample_name_from_uri(raw_uri).ok_or_else(|| errors::CliError::Io {
+            source: "Unable to derive sample name from URI".to_string(),
+            path: Some(raw_uri.to_string()),
+        })?;
+        let file_output_dir = self.sink.sample_dir(&file_stem);
+
+        std::fs::create_dir_all(&file_output_dir).map_err(|e| errors::CliError::Io {
+            source: format!("Failed to create output subdirectory: {}", e),
+            path: Some(file_output_dir.to_string_lossy().to_string()),
+        })?;
+
+        if self.overwrite {
+            self.sink.clear_existing(&file_stem)?;
+        }
+
+        let file_output_config = OutputConfig {
+            uri: file_output_dir.to_string_lossy().to_string(),
+        };
+
+        let options = processing::PipelineOptions {
+            chunk_size: self.config.analysis.chunk_size,
+            output: &file_output_config,
+            max_qvalue: self.max_qvalue,
+            calibration: &self.config.calibration,
+            no_feature_stats: self.no_feature_stats,
+            rescore_model: self.config.analysis.rescore_model,
+        };
+        let report = processing::run_pipeline(
+            self.speclib,
+            self.calib_lib,
+            &pipeline,
+            load_index_ms,
+            &options,
+        )
+        .map_err(|e| errors::CliError::DataReading {
+            source: format!("{}", e),
+        })?;
+
+        info!("Successfully processed {}", raw_uri);
+        Ok(report)
+    }
+}
+
+/// Load a library from a local path or remote URI.
+///
+/// Remote URIs are streamed (not buffered -- speclibs can be multi-GB) to a
+/// tempfile keeping the original basename, because `ReferenceLibrary::from_file`
+/// sniffs the format by extension.
+struct LoadedSpeclib {
+    library: timsseek::data_sources::reference_library::ReferenceLibrary,
+    local_path: std::path::PathBuf,
+    tempdir: Option<tempfile::TempDir>,
+}
+
+fn speclib_from_uri(
+    uri: &str,
+    policy: timsseek::LoadPolicy,
+    stage_provenance: bool,
+) -> Result<LoadedSpeclib, errors::CliError> {
+    if !is_remote_uri(uri) {
+        let path = std::path::Path::new(uri);
+        let lib =
+            timsseek::data_sources::reference_library::ReferenceLibrary::from_file(path, policy)
+                .map_err(|e| errors::CliError::Config {
+                    source: format!("Failed to load speclib {uri}: {:?}", e),
+                })?;
+        return Ok(LoadedSpeclib {
+            library: lib,
+            local_path: path.to_path_buf(),
+            tempdir: None,
+        });
+    }
+
+    let trimmed = uri.trim_end_matches('/');
+    let fname = trimmed
+        .rsplit('/')
+        .next()
+        .filter(|s| !s.is_empty())
+        .unwrap_or("speclib.bin");
+    let td = tempfile::Builder::new()
+        .prefix("timsseek-speclib-")
+        .tempdir()
+        .map_err(|e| errors::CliError::Io {
+            source: format!("speclib tempdir: {e}"),
+            path: None,
+        })?;
+    let local = td.path().join(fname);
+    tims_stage::download_to_file(uri, &local).map_err(|e| errors::CliError::Io {
+        source: format!("download speclib {uri}: {e}"),
+        path: Some(uri.to_string()),
+    })?;
+    if stage_provenance {
+        let sidecar_uri = format!("{uri}.config.json");
+        if crate::output_sink::probe_uri_exists(&sidecar_uri)? {
+            let local_sidecar = build_library::default_sidecar(&local);
+            tims_stage::download_to_file(&sidecar_uri, &local_sidecar).map_err(|e| {
+                errors::CliError::Io {
+                    source: format!("download library provenance {sidecar_uri}: {e}"),
+                    path: Some(sidecar_uri),
+                }
+            })?;
+        }
+    }
+    let lib =
+        timsseek::data_sources::reference_library::ReferenceLibrary::from_file(&local, policy)
+            .map_err(|e| errors::CliError::Config {
+                source: format!("Failed to load speclib {uri}: {:?}", e),
+            })?;
+    Ok(LoadedSpeclib {
+        library: lib,
+        local_path: local,
+        tempdir: Some(td),
+    })
+}
+
+pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliError> {
+    if args.print_default_config {
+        print!("{}", config::DEFAULT_CONFIG_TOML);
+        return Ok(());
+    }
+    if let Some(ref path) = args.write_default_config {
+        std::fs::write(path, config::DEFAULT_CONFIG_TOML).map_err(|e| errors::CliError::Io {
+            source: e.to_string(),
+            path: Some(path.to_string_lossy().to_string()),
+        })?;
+        eprintln!("Wrote default config to {}", path.display());
+        return Ok(());
+    }
+
+    let config = load_config(args.config.as_deref())?;
+    let (mut config, validated) = resolve_run_inputs(args, config)?;
+
+    // Held in `search()`'s scope so the instrumentation flush guard drops after
+    // all work completes.
+    let _tracing = init_tracing(args, &validated);
+
+    info!("Parsed configuration: {:#?}", config.clone());
+    alloc_track::snap!("start");
+
+    validate_inputs(&validated)?;
+
+    // The stale-tempdir sweep runs inside `PerRunTempdir::new`.
+    let staging_cfg = config.staging.clone().unwrap_or_default();
+    let save_sidecar_flag = staging_cfg.save_sidecar;
+    let backend = tims_stage::PerRunTempdir::new(tims_stage::StagingConfig {
+        tempdir_root: staging_cfg.tempdir_root.clone(),
+        max_prefix_keys: staging_cfg.max_prefix_keys,
+        stale_sweep_age_hours: staging_cfg.stale_sweep_age_hours,
+    })
+    .map_err(|e| errors::CliError::Io {
+        source: format!("staging backend: {e}"),
+        path: None,
+    })?;
+
+    let sink = OutputSink::new(&validated.output_uri)?;
+
+    let config_output_path = sink.root().join(artifacts::CONFIG_USED);
+
+    // Local-only; a remote destination just overwrites on upload.
+    if validated.overwrite && config_output_path.exists() {
+        std::fs::remove_file(&config_output_path).map_err(|e| errors::CliError::Io {
+            source: format!("Failed to remove existing config file: {}", e),
+            path: Some(config_output_path.to_string_lossy().to_string()),
+        })?;
+    }
+
+    // Written before the library is touched, so a run that dies loading or
+    // predicting one still says what it was asked to do. Predicting fills in the
+    // provenance and writes it again; there is nothing to record until then.
+    write_config_used(&config, &config_output_path)?;
+
+    let mut run_report = timsseek::scoring::RunReport {
+        overwrite: validated.overwrite,
+        ..Default::default()
+    };
+    let mut failed_files: Vec<(String, errors::CliError)> = Vec::new();
+    let mut successful_files: Vec<String> = Vec::new();
+
+    // Obtained once, shared across all files.
+    info!(
+        "Decoy generation strategy: {}",
+        config.analysis.decoy_strategy
+    );
+    info!("Unannotated peaks: {}", config.analysis.unannotated_peaks);
+    let load_policy = timsseek::LoadPolicy {
+        decoys: config.analysis.decoy_strategy,
+        unannotated: config.analysis.unannotated_peaks,
+    };
+    // Predicting draws its own progress bars, and a bar cannot share a line with
+    // an open `TimedStep` label, so those routes hold the label back to the end.
+    let step = match &validated.library {
+        LibrarySource::File(_) => TimedStep::begin("Loading speclib"),
+        LibrarySource::Fasta(_) => TimedStep::begin_deferred("Predicting speclib"),
+        LibrarySource::Build { .. } => TimedStep::begin_deferred("Building speclib"),
+    };
+    let (speclib, _speclib_td, provenance) = match &validated.library {
+        LibrarySource::File(uri) => {
+            info!("Building database from speclib URI {uri}");
+            let loaded = speclib_from_uri(uri, load_policy, config.sequences.is_some())?;
+            if let Some(sequences) = config.sequences.as_ref() {
+                let fasta =
+                    std::path::PathBuf::from(expand_local_uri(&sequences.fasta.to_string_lossy()));
+                let prediction =
+                    build_library::resolve_search_prediction(fasta, config.library.as_ref());
+                build_library::check_search_library(&loaded.local_path, uri, &prediction)?;
+            }
+            (loaded.library, loaded.tempdir, None)
+        }
+        LibrarySource::Fasta(fasta) => {
+            let prediction =
+                build_library::resolve_search_prediction(fasta.clone(), config.library.as_ref());
+            let predicted =
+                build_library::predict_in_memory(&prediction, config.analysis.decoy_strategy)?;
+            (predicted.library, None, Some(predicted.provenance))
+        }
+        // Written and then read back rather than kept in the arena, so the
+        // library the next run opens is the one this run searched.
+        LibrarySource::Build { out, fasta } => {
+            build_library::run(&build_library::resolve_search_build(
+                out.clone(),
+                fasta.clone(),
+                config.library.as_ref(),
+                validated.overwrite,
+            ))?;
+            let loaded = speclib_from_uri(&out.to_string_lossy(), load_policy, false)?;
+            (loaded.library, loaded.tempdir, None)
+        }
+    };
+    let load_speclib_ms = step
+        .finish_with(format_args!(
+            "{} entries, {:.1} frags/entry",
+            speclib.len(),
+            speclib.avg_fragments()
+        ))
+        .as_millis() as u64;
+    alloc_track::snap!("Loading speclib");
+
+    let (calib_lib, _calib_td, load_calib_lib_ms) = match &validated.calib_lib_uri {
+        Some(uri) => {
+            let step = TimedStep::begin("Loading calib lib");
+            info!("Loading calibration library from {}", uri);
+            let loaded = speclib_from_uri(uri, load_policy, false)?;
+            let ms = step
+                .finish_with(format_args!(
+                    "{} entries, {:.1} frags/entry",
+                    loaded.library.len(),
+                    loaded.library.avg_fragments()
+                ))
+                .as_millis() as u64;
+            alloc_track::snap!("Loading calib lib");
+            (Some(loaded.library), loaded.tempdir, ms)
+        }
+        None => (None, None, 0),
+    };
+
+    run_report.load_speclib_ms = load_speclib_ms;
+    run_report.load_calib_lib_ms = load_calib_lib_ms;
+    run_report.speclib_entries = speclib.len();
+    run_report.calib_lib_entries = calib_lib.as_ref().map_or(0, |l| l.len());
+
+    // A run with no library file is traceable only through the provenance of
+    // what it predicted, so the record is rewritten once there is one to add.
+    if provenance.is_some() {
+        config.library_provenance = provenance;
+        write_config_used(&config, &config_output_path)?;
+    }
+
+    let total_files = validated.raw_inputs.len();
+    info!("Processing {} raw input(s)", total_files);
+    let search_run = SearchRun {
+        backend: &backend,
+        save_sidecar: save_sidecar_flag,
+        speclib: &speclib,
+        calib_lib: calib_lib.as_ref(),
+        config: &config,
+        sink: &sink,
+        overwrite: validated.overwrite,
+        max_qvalue: args.max_qvalue,
+        no_feature_stats: args.no_feature_stats,
+    };
+
+    for (idx, raw_uri) in validated.raw_inputs.iter().enumerate() {
+        info!(
+            "Processing input {} of {}: {}",
+            idx + 1,
+            total_files,
+            raw_uri
+        );
+
+        let sample_name = match sample_name_from_uri(raw_uri) {
+            Some(s) => s,
+            None => {
+                let e = errors::CliError::Io {
+                    source: "Unable to derive sample name from URI".to_string(),
+                    path: Some(raw_uri.clone()),
+                };
+                error!("Failed to process {}: {}", raw_uri, e);
+                failed_files.push((raw_uri.clone(), e));
+                continue;
+            }
+        };
+
+        // Header/footer pair; `processing::run_pipeline` phase output lands
+        // between them, so batched runs still show per-input wall time.
+        println!("=== [{}/{}] {} ===", idx + 1, total_files, sample_name);
+        let file_start = std::time::Instant::now();
+        let sample_dest = sink.dest_uri_for(&sample_name);
+
+        match search_run.process_file(raw_uri) {
+            Ok(report) => {
+                if let Err(e) = sink.finalize_sample(&sample_name) {
+                    error!("Failed to finalize sample {}: {}", sample_name, e);
+                    println!(
+                        "=== [{}/{}] {} failed upload after {:?} ===",
+                        idx + 1,
+                        total_files,
+                        sample_name,
+                        file_start.elapsed()
+                    );
+                    run_report.status = timsseek::scoring::timings::RunStatus::Aborted;
+                    run_report.abort_reason =
+                        Some(format!("upload failure on sample {sample_name}: {e}"));
+                    failed_files.push((raw_uri.clone(), e));
+                    error!("Aborting batch due to upload failure");
+                    break;
+                }
+                println!("Output: {sample_dest}");
+                println!(
+                    "=== [{}/{}] {} done in {:?} ===",
+                    idx + 1,
+                    total_files,
+                    sample_name,
+                    file_start.elapsed()
+                );
+                successful_files.push(raw_uri.clone());
+                let mut outputs = vec![format!("{sample_dest}/{}", artifacts::RESULTS_PARQUET)];
+                if !args.no_feature_stats {
+                    outputs.push(format!("{sample_dest}/{}", artifacts::FEATURE_STATS_TSV));
+                    outputs.push(format!(
+                        "{sample_dest}/{}",
+                        artifacts::FEATURE_IMPORTANCE_TSV
+                    ));
+                }
+                run_report.files.push(timsseek::scoring::FileReport {
+                    file_name: raw_uri.clone(),
+                    pipeline: report,
+                    outputs,
+                });
+            }
+            Err(e) => {
+                error!("Failed to process {}: {}", raw_uri, e);
+                println!(
+                    "=== [{}/{}] {} FAILED after {:?}: {} ===",
+                    idx + 1,
+                    total_files,
+                    sample_name,
+                    file_start.elapsed(),
+                    e
+                );
+                // I/O errors are likely systemic (disk full, permissions) --
+                // abort the batch instead of failing every remaining file.
+                if matches!(e, errors::CliError::Io { .. }) {
+                    run_report.status = timsseek::scoring::timings::RunStatus::Aborted;
+                    run_report.abort_reason = Some(format!("I/O error on {raw_uri}: {e}"));
+                    failed_files.push((raw_uri.clone(), e));
+                    error!("Aborting batch due to I/O error");
+                    break;
+                }
+                failed_files.push((raw_uri.clone(), e));
+            }
+        }
+    }
+
+    let finalize_step = TimedStep::begin("Finalize run");
+    // Must happen before serialization so the report self-describes where to
+    // fetch everything.
+    run_report.artifacts = artifacts::RUN_ARTIFACTS
+        .iter()
+        .map(|artifact| sink.dest_uri_for(artifact))
+        .collect();
+    let run_report_path = sink.root().join(artifacts::RUN_REPORT);
+    if let Ok(json) = serde_json::to_string_pretty(&run_report) {
+        let _ = std::fs::write(&run_report_path, json);
+        info!("Wrote run report to {:?}", run_report_path);
+    }
+
+    sink.finalize_run(artifacts::RUN_ARTIFACTS)?;
+    finalize_step.finish();
+
+    info!("Successfully processed {} file(s)", successful_files.len());
+    if !failed_files.is_empty() {
+        error!("Failed to process {} file(s):", failed_files.len());
+        for (file, err) in &failed_files {
+            error!("  {}: {}", file, err);
+        }
+        return Err(errors::CliError::Config {
+            source: format!("Failed to process {} file(s)", failed_files.len()),
+        });
+    }
+
+    Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// The first run of a script that names a library it has not built yet, and
+    /// what it is told: the file is missing, and here is what would produce it.
+    #[test]
+    fn a_missing_library_names_the_flag_that_would_have_built_it() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let missing = dir.path().join("absent.mzspeclib.txt.gz");
+        let resolved = ResolvedInputs {
+            raw_inputs: Vec::new(),
+            library: LibrarySource::File(missing.to_string_lossy().to_string()),
+            calib_lib_uri: None,
+            output_uri: dir.path().to_string_lossy().to_string(),
+            overwrite: false,
+        };
+
+        let err = validate_inputs(&resolved)
+            .expect_err("a library that is not there stops the run")
+            .to_string();
+        assert!(err.contains("--build-if-missing"), "got: {err}");
+        assert!(err.contains("--fasta"), "got: {err}");
+        assert!(err.contains("absent.mzspeclib.txt.gz"), "got: {err}");
+    }
+}

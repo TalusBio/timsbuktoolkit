@@ -66,8 +66,8 @@ impl<Lib: Deref<Target = TargetColumns<L>>, L: KeyLike + DecoyShift> Query<Lib, 
     /// 0.0 for the target; ±offset for the ± decoy variants.
     fn variant_shift(&self) -> f64 {
         let offset = match self.geom().caps.decoys {
-            DecoyStrategy::LazyMassShift { offset, .. } => offset,
-            _ => 0.0,
+            DecoyStrategy::MassShift { offset } => offset,
+            DecoyStrategy::Stored => 0.0,
         };
         match self.variant() {
             0 => 0.0,
@@ -164,10 +164,13 @@ impl<Lib: Deref<Target = TargetColumns<L>>, L: KeyLike + DecoyShift> QueryGeom f
 mod tests {
     use super::*;
     use crate::IonAnnot;
-    use crate::models::TargetColumns;
     use crate::models::capabilities::*;
     use crate::models::source_id::SourceId;
     use crate::models::target_columns::Row;
+    use crate::models::{
+        TargetColumns,
+        TargetColumnsBuilder,
+    };
     use crate::traits::QueryGeom;
 
     /// Rows come from the arena; there is no constructor from an integer.
@@ -189,16 +192,10 @@ mod tests {
         );
     }
 
+    /// One target row, sealed `IfMissing`, which with no shipped decoy resolves
+    /// to `MassShift` -- so the ± variants below exist.
     fn one_target_lib() -> TargetColumns<IonAnnot> {
-        let mut c = TargetColumns::with_capabilities(TargetCapabilities {
-            sequence_features: SeqFeatureState::Available,
-            fragment_features: FragmentFeatureState::Available,
-            isotopes: IsotopeStrategy::FromComposition { n_isotopes: 3 },
-            decoys: DecoyStrategy::LazyMassShift {
-                offset: 14.0,
-                n_decoys: 2,
-            },
-        });
+        let mut c = TargetColumnsBuilder::with_capabilities(TargetCapabilities::default_diann());
         c.push_row(Row {
             precursor_mz: 654.855,
             charge: 2,
@@ -212,8 +209,8 @@ mod tests {
             seq_mod: "PEPTIDEK",
             ..Default::default()
         });
-        c.seal().expect("fixture ids are usable");
-        c
+        c.seal(DecoyPolicy::IfMissing)
+            .expect("fixture ids are usable")
     }
 
     #[test]
@@ -230,20 +227,41 @@ mod tests {
     fn plus_decoy_shifts_precursor_and_high_ordinal_only() {
         let lib = one_target_lib();
         let q = Query::new(&lib, lib.flat_for(first_row(&lib), 1)); // +shift
-        // precursor: +14.0/2
-        assert!((q.mono_precursor_mz() - (654.855 + 14.0 / 2.0)).abs() < 1e-9);
+        // precursor: +offset/2
+        assert!((q.mono_precursor_mz() - (654.855 + DECOY_CH2_OFFSET_DA / 2.0)).abs() < 1e-9);
         let frags: Vec<_> = q.iter_fragments_refs().collect();
         // y1 ordinal 1 -> unshifted
         assert!((frags[0].1 - 200.0).abs() < 1e-9);
-        // y8 ordinal 8, charge 1 -> +14.0/1
-        assert!((frags[1].1 - (896.5 + 14.0 / 1.0)).abs() < 1e-9);
+        // y8 ordinal 8, charge 1 -> +offset/1
+        assert!((frags[1].1 - (896.5 + DECOY_CH2_OFFSET_DA / 1.0)).abs() < 1e-9);
+    }
+
+    /// Every slot `MASS_SHIFT_VARIANTS` mints must land somewhere `variant_shift`
+    /// actually shifts to. A count above 3 mints slots at variant >= 3, which
+    /// falls through to `0.0` -- the target's own m/z, scored as a decoy.
+    #[test]
+    fn every_minted_variant_slot_gets_its_own_m_over_z() {
+        let lib = one_target_lib();
+        let row = first_row(&lib);
+        assert_eq!(lib.variants_per_row(), MASS_SHIFT_VARIANTS);
+        let mzs: Vec<f64> = (0..MASS_SHIFT_VARIANTS as u8)
+            .map(|v| Query::new(&lib, lib.flat_for(row, v)).mono_precursor_mz())
+            .collect();
+        for (i, a) in mzs.iter().enumerate() {
+            for b in &mzs[i + 1..] {
+                assert!(
+                    (a - b).abs() > 1e-9,
+                    "two scored slots share m/z {a}, so one is the target scored as a decoy"
+                );
+            }
+        }
     }
 
     #[test]
     fn minus_decoy_shifts_negative() {
         let lib = one_target_lib();
         let q = Query::new(&lib, lib.flat_for(first_row(&lib), 2)); // -shift
-        assert!((q.mono_precursor_mz() - (654.855 - 14.0 / 2.0)).abs() < 1e-9);
+        assert!((q.mono_precursor_mz() - (654.855 - DECOY_CH2_OFFSET_DA / 2.0)).abs() < 1e-9);
     }
 
     #[test]
@@ -269,12 +287,8 @@ mod tests {
     #[test]
     fn string_flyweight_never_shifts() {
         use std::sync::Arc;
-        let mut c: TargetColumns<Arc<str>> = TargetColumns::with_capabilities(TargetCapabilities {
-            sequence_features: SeqFeatureState::Available,
-            fragment_features: FragmentFeatureState::Available,
-            isotopes: IsotopeStrategy::FromComposition { n_isotopes: 3 },
-            decoys: DecoyStrategy::None,
-        });
+        let mut c: TargetColumnsBuilder<Arc<str>> =
+            TargetColumnsBuilder::with_capabilities(TargetCapabilities::default_unlabeled());
         c.push_row(Row {
             precursor_mz: 500.0,
             charge: 2,
@@ -285,8 +299,12 @@ mod tests {
             seq_mod: "PEP",
             ..Default::default()
         });
-        c.seal().expect("fixture ids are usable");
-        let q = Query::new(&c, c.flat_for(first_row(&c), 0));
+        // Sealed `IfMissing` with no shipped decoy, so the arena derives ±
+        // variants -- and variant 1 is where an ion-annotated label would shift.
+        let c = c
+            .seal(DecoyPolicy::IfMissing)
+            .expect("fixture ids are usable");
+        let q = Query::new(&c, c.flat_for(first_row(&c), 1));
         let frags: Vec<_> = q.iter_fragments_refs().collect();
         assert!((frags[0].1 - 300.0).abs() < 1e-9);
     }
@@ -298,7 +316,7 @@ mod tests {
         let lib = one_target_lib();
         let q = Query::new(&lib, lib.flat_for(first_row(&lib), 1));
         let step = C13_C12_MASS_DIFF / 2.0;
-        let mono = 654.855 + 14.0 / 2.0;
+        let mono = 654.855 + DECOY_CH2_OFFSET_DA / 2.0;
         let (lo, hi) = q.precursor_mz_limits();
         assert!((lo - mono).abs() < 1e-9);
         assert!((hi - (mono + 2.0 * step)).abs() < 1e-9);

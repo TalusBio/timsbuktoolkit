@@ -3,9 +3,15 @@ use serde::{
     Serialize,
 };
 use timsquery::Tolerance;
-use timsseek::DecoyPolicy;
 use timsseek::ml::RescoreModel;
 use timsseek::scoring::CalibrationConfig;
+use timsseek::{
+    DecoyPolicy,
+    UnannotatedPeaks,
+};
+use tracing::info;
+
+use crate::errors;
 
 /// Hand-authored default configuration template, and the SINGLE source of the
 /// built-in defaults: `Config::default_config()` parses this string, and
@@ -17,12 +23,94 @@ pub const DEFAULT_CONFIG_TOML: &str = include_str!("../assets/default_config.tom
 #[serde(deny_unknown_fields)]
 pub struct Config {
     pub input: Option<InputConfig>,
+    /// Optional library used only to fit retention-time calibration.
+    /// Independent of whether the searched library is loaded or predicted.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub calibration_library: Option<LibraryInputConfig>,
     pub analysis: AnalysisConfig,
     #[serde(default = "CalibrationConfig::default")]
     pub calibration: CalibrationConfig,
     pub output: Option<OutputConfig>,
     #[serde(default)]
     pub staging: Option<StagingConfig>,
+    #[serde(default)]
+    pub library: Option<LibraryConfig>,
+    #[serde(default)]
+    pub sequences: Option<SequencesConfig>,
+    /// What produced the library a run predicted, as msspeculator reports it:
+    /// the model and the digests of what went into it.
+    ///
+    /// A record rather than a setting. Nothing reads it back and no
+    /// configuration file needs to carry it, but `config_used.json` is
+    /// serialized `Config`, so a run whose library exists only in memory has
+    /// nowhere else to leave its provenance -- and this type denies unknown
+    /// fields, so the artifact would not parse again without the field being
+    /// declared.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub library_provenance: Option<serde_json::Value>,
+}
+
+/// The slice of a configuration file `build-library` reads.
+///
+/// A separate type from [`Config`], which requires `[analysis]`: a build has no
+/// analysis, so a library-only file has to parse without one.
+///
+/// Unknown top-level keys are tolerated, which is what lets one file serve both
+/// a build and the searches that read what it built. `[input]`, `[analysis]` and
+/// the rest describe a search and are ignored. [`LibraryConfig`] still denies
+/// unknown fields, so a typo *inside* `[library]` is an error.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct BuildConfig {
+    #[serde(default)]
+    pub library: Option<LibraryConfig>,
+}
+
+/// How to predict a library.
+///
+/// Every field is optional and falls through to msspeculator's own default, so
+/// the section can be omitted entirely and a build flag can beat any single
+/// field without the others having to be spelled. This project owns the flag
+/// surface and none of the digestion, modification or prediction logic.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct LibraryConfig {
+    #[serde(default)]
+    pub model: Option<String>,
+    #[serde(default)]
+    pub missed_cleavages: Option<usize>,
+    #[serde(default)]
+    pub min_length: Option<usize>,
+    #[serde(default)]
+    pub max_length: Option<usize>,
+    #[serde(default)]
+    pub min_charge: Option<i64>,
+    #[serde(default)]
+    pub max_charge: Option<i64>,
+    #[serde(default)]
+    pub fixed_mods: Option<Vec<String>>,
+    #[serde(default)]
+    pub variable_mods: Option<Vec<String>>,
+    #[serde(default)]
+    pub max_variable_mods: Option<usize>,
+    #[serde(default)]
+    pub min_intensity: Option<f64>,
+    #[serde(default)]
+    pub max_fragments: Option<usize>,
+    #[serde(default)]
+    pub decoys: Option<bool>,
+}
+
+/// The sequence database a run was given.
+///
+/// Its own section rather than a field of [`LibraryConfig`], which says how to
+/// predict a library: a run that predicts nothing still wants the sequences, and
+/// a library is not a substitute for the database it was digested from.
+///
+/// A path rather than a URI, because nothing stages a FASTA from a remote store.
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct SequencesConfig {
+    pub fasta: std::path::PathBuf,
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -66,6 +154,13 @@ pub enum InputConfig {
     },
 }
 
+#[derive(Debug, Serialize, Deserialize, Clone, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct LibraryInputConfig {
+    #[serde(alias = "path")]
+    pub uri: String,
+}
+
 #[derive(Debug, Serialize, Deserialize, Clone)]
 #[serde(deny_unknown_fields)]
 pub struct AnalysisConfig {
@@ -76,6 +171,9 @@ pub struct AnalysisConfig {
 
     #[serde(default)]
     pub decoy_strategy: DecoyPolicy,
+
+    #[serde(default)]
+    pub unannotated_peaks: UnannotatedPeaks,
 
     #[serde(default)]
     pub rescore_model: RescoreModel,
@@ -99,6 +197,51 @@ impl Config {
     pub fn default_config() -> Self {
         toml::from_str(DEFAULT_CONFIG_TOML).expect("embedded default template must parse")
     }
+}
+
+/// Read a configuration file, or the built-in defaults when none was named.
+///
+/// TOML and JSON are both accepted, sniffed by extension.
+pub(crate) fn load_config(path: Option<&std::path::Path>) -> Result<Config, errors::CliError> {
+    let Some(config_path) = path else {
+        info!("No config file provided, using default configuration");
+        return Ok(Config::default_config());
+    };
+    parse_config_file(config_path)
+}
+
+/// Parse a configuration file into whichever view the caller needs.
+///
+/// TOML and JSON are both accepted, sniffed by extension. Generic over the
+/// target so a build reads only `[library]` while a search reads the whole
+/// thing; see [`BuildConfig`].
+pub(crate) fn parse_config_file<T: serde::de::DeserializeOwned>(
+    config_path: &std::path::Path,
+) -> Result<T, errors::CliError> {
+    let text = std::fs::read_to_string(config_path).map_err(|e| errors::CliError::Io {
+        source: e.to_string(),
+        path: Some(config_path.to_string_lossy().to_string()),
+    })?;
+    let is_toml = config_path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| e.eq_ignore_ascii_case("toml"))
+        .unwrap_or(false);
+    let parsed: Result<T, String> = if is_toml {
+        toml::from_str(&text).map_err(|e| e.to_string())
+    } else {
+        serde_json::from_str(&text).map_err(|e| e.to_string())
+    };
+    parsed.map_err(|e| errors::CliError::ParseError {
+        msg: format!(
+            "Failed to parse config file {}: {e}\n\n\
+             Run `timsseek --print-default-config` for a reference template, \
+             or `--write-default-config <path>` to drop one to disk.\n\n\
+             Reference default:\n```toml\n{}```\n",
+            config_path.display(),
+            DEFAULT_CONFIG_TOML,
+        ),
+    })
 }
 
 #[cfg(test)]
@@ -149,6 +292,26 @@ rt = "Unrestricted"
         let s = toml::to_string(&a).unwrap();
         let b: Config = toml::from_str(&s).unwrap();
         assert_eq!(b.analysis.chunk_size, a.analysis.chunk_size);
+    }
+
+    /// A run that predicted its library leaves the provenance in
+    /// `config_used.json`; a run that loaded one from a file predicted nothing,
+    /// and an empty key would say it had.
+    #[test]
+    fn the_provenance_is_serialized_when_a_run_has_one_and_the_key_is_absent_otherwise() {
+        let mut c: Config = toml::from_str(MINIMAL_TOML).unwrap();
+        let without = serde_json::to_string(&c).unwrap();
+        assert!(!without.contains("library_provenance"), "got: {without}");
+
+        c.library_provenance = Some(serde_json::json!({
+            "generator": { "tool": "msspeculator", "model": "builtin:small-v0" },
+        }));
+        let with = serde_json::to_string(&c).unwrap();
+        assert!(with.contains("builtin:small-v0"), "got: {with}");
+
+        let reread: Config =
+            serde_json::from_str(&with).expect("config_used.json has to parse as a Config");
+        assert_eq!(reread.library_provenance, c.library_provenance);
     }
 
     /// Serde and clap derive names independently, so verify their spellings.
@@ -205,6 +368,12 @@ rt = "Unrestricted"
         assert!(c.input.is_none(), "[input] must be commented out");
         assert!(c.output.is_none(), "[output] must be commented out");
         assert!(c.staging.is_none(), "[staging] must be commented out");
+        assert!(c.library.is_none(), "[library] must be commented out");
+        assert!(c.sequences.is_none(), "[sequences] must be commented out");
+        assert!(
+            c.library_provenance.is_none(),
+            "provenance is recorded by a run, so the template must not mention it"
+        );
         assert!(c.analysis.raw_inputs.is_none());
 
         assert_eq!(

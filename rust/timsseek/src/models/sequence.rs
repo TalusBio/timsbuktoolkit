@@ -5,41 +5,20 @@
 use crate::models::decoy::DecoyMarking;
 use serde::Serialize;
 use smallvec::SmallVec;
-use std::sync::{
-    Arc,
-    OnceLock,
-};
+use std::sync::Arc;
+use timsquery::chemistry::ontologies;
 
-/// Ontologies used by the fallback ProForma parser. GNOme is omitted because
-/// it adds 191,529 entries and 26.4 MB to initialization. Loading the other four
-/// indexes takes about 48 ms instead of 2.6 s for all six.
-///
-/// A GNO modification already produces no usable `ParsedSequence`.
-/// [`count_carbon_sulphur_in_sequence`](crate::fragment_mass::elution_group_converter::count_carbon_sulphur_in_sequence)
-/// rejects it during formula counting. `isotope_dist_or_averagine` receives a
-/// mod-stripped sequence, so this change does not affect its GNO handling.
-/// PSI-MOD, XL-MOD, and RESID remain loaded for formula counts.
-///
-/// DIA-NN writes `(UniMod:n)`. [`normalize_to_proforma`] changes that to
-/// `[UNIMOD:n]`, which the byte-walk parser handles without an ontology. A
-/// hand-written `[GNO:...]` input is the case that reaches this fallback.
-fn ontologies() -> &'static mzcore::ontology::Ontologies {
-    static ONTOLOGIES: OnceLock<mzcore::ontology::Ontologies> = OnceLock::new();
-    ONTOLOGIES.get_or_init(|| {
-        let mut ontologies = mzcore::ontology::Ontologies::empty();
-        *ontologies.unimod_mut() = mzcv::CVIndex::init_static();
-        *ontologies.psimod_mut() = mzcv::CVIndex::init_static();
-        *ontologies.xlmod_mut() = mzcv::CVIndex::init_static();
-        *ontologies.resid_mut() = mzcv::CVIndex::init_static();
-        ontologies
-    })
-}
-
-/// Parse a ProForma string with this module's cached ontologies.
+/// Parse a ProForma string with the process-wide ontologies.
 ///
 /// This handles input that the byte-walk parser in [`parse_sequence`] does not
-/// recognize. Build the indexes on first use. Inputs that match the fast grammar
-/// do not load them.
+/// recognize. The indexes are built on first use, so input that matches the fast
+/// grammar never loads them. They live in timsquery because the mzSpecLib reader
+/// needs the same set and cannot depend on this crate; see
+/// [`timsquery::chemistry`].
+///
+/// DIA-NN writes `(UniMod:n)`. [`normalize_to_proforma`] changes that to
+/// `[UNIMOD:n]`, which the byte-walk parser handles without an ontology, so a
+/// hand-written `[GNO:...]` input is the case that reaches this fallback.
 ///
 /// mzcore returns parse warnings with the peptidoform. Callers only need the
 /// success or failure result, so this function drops the warnings.
@@ -370,6 +349,31 @@ fn modification_to_mod(m: &mzcore::sequence::Modification) -> Option<Mod> {
     }
 }
 
+/// Rewrite `[U:<digits>]` to `[UNIMOD:<digits>]`, leaving `[U:<name>]` alone.
+///
+/// ProForma 2.1 pairs a name with the one-letter prefix (§6.2.1) and an
+/// accession with the long one (§6.2.2), and calls the short-prefix accession
+/// `[U:35]` incorrect outright. So this canonicalizes a spelling the spec
+/// rejects into the one it wants, which is also the one `classify_mod` reads --
+/// and leaves a name alone, since moving it to the long prefix would produce a
+/// form the spec does not define.
+fn expand_unimod_accessions(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(at) = rest.to_ascii_lowercase().find("[u:") {
+        let body = &rest[at + 3..];
+        let numeric = body
+            .split(']')
+            .next()
+            .is_some_and(|tag| !tag.is_empty() && tag.bytes().all(|b| b.is_ascii_digit()));
+        out.push_str(&rest[..at]);
+        out.push_str(if numeric { "[UNIMOD:" } else { "[U:" });
+        rest = body;
+    }
+    out.push_str(rest);
+    out
+}
+
 /// Replace every occurrence of `needle` in `haystack`, matching ignoring ASCII
 /// case, with `replacement`. `needle` must be ASCII (UNIMOD tags are). ASCII-only
 /// lowercasing preserves byte length, so match indices stay aligned with the
@@ -461,7 +465,17 @@ pub fn normalize_to_proforma(raw: &str) -> String {
 
     // Normalize any pre-existing bracket casing likewise.
     let mut s = replace_ascii_ci(&s, "[unimod:", "[UNIMOD:");
-    s = replace_ascii_ci(&s, "[u:", "[UNIMOD:");
+    // Expanded only for an accession, which is the form `classify_mod`'s fast
+    // path reads. A NAME is left alone, because ProForma 2.1 keeps the two in
+    // separate namespaces: §6.2.1 gives names a ONE-LETTER prefix, and §6.2.2
+    // requires accessions to use the long one ("full accession numbers MUST be
+    // used in all cases"). So `[UNIMOD:Carbamidomethyl]` is in neither, and
+    // expanding a name produced a string no parser owes us an answer for.
+    //
+    // That is what made it a bug rather than a nicety: mzSpecLib names its
+    // modifications, the gate is library-wide, and one unparsable row turned
+    // sequence features off for a whole library.
+    s = expand_unimod_accessions(&s);
 
     // A mod at the very start is N-terminal: ProForma wants `[UNIMOD:n]-SEQ`.
     if s.starts_with('[')
@@ -624,6 +638,109 @@ mod tests {
     #[test]
     fn normalize_plain_unchanged() {
         assert_eq!(normalize_to_proforma("PEPTIDEK"), "PEPTIDEK");
+    }
+
+    /// A UNIMOD accession is expanded, because that is the spelling the byte-walk
+    /// parser reads; a UNIMOD *name* is not, because mzcore resolves `U:<name>`
+    /// and rejects `UNIMOD:<name>`.
+    #[test]
+    fn normalize_expands_a_unimod_accession_and_leaves_a_name_alone() {
+        assert_eq!(
+            normalize_to_proforma("PEPTC[U:4]IDEK"),
+            "PEPTC[UNIMOD:4]IDEK"
+        );
+        assert_eq!(
+            normalize_to_proforma("PEPTC[u:4]IDEK"),
+            "PEPTC[UNIMOD:4]IDEK"
+        );
+        assert_eq!(
+            normalize_to_proforma("PEPTC[U:Carbamidomethyl]IDEK"),
+            "PEPTC[U:Carbamidomethyl]IDEK"
+        );
+    }
+
+    /// The regression. mzSpecLib names its modifications, so this is the spelling
+    /// every mzSpecLib library arrives in. Expanding `U:` unconditionally made
+    /// these unparsable -- and because the parse gate is library-wide, one such
+    /// modification turned sequence features off for the entire file.
+    #[test]
+    fn a_named_modification_from_mzspeclib_parses() {
+        for raw in [
+            "FAC[U:Carbamidomethyl]HSASLTVR/3",
+            "FAC[U:Carbamidomethyl]HSASLTVR",
+            "AVC[U:Carbamidomethyl]ASFSLTHR/3",
+        ] {
+            let normalized = normalize_to_proforma(raw);
+            assert!(
+                parse_sequence(&normalized).is_some(),
+                "{raw:?} normalized to {normalized:?}, which does not parse"
+            );
+        }
+    }
+
+    /// What a modification may be spelled, and what it may not.
+    ///
+    /// Pinned as a table because the failures are the valuable half, and because
+    /// each is a plausible "fix" someone could add on seeing a library rejected.
+    /// Accepting any of them would be worse than rejecting it: a spelling that
+    /// works here and nowhere else teaches a user that their file is fine, and
+    /// the next tool disagrees. `[UNIMOD:Carbamidomethyl]` is the trap that
+    /// matters -- it looks like the accession form and would imply
+    /// `[UNIMOD:CAM]` works too, which no reading of the spec allows.
+    #[test]
+    fn only_the_spelled_out_proforma_forms_are_accepted() {
+        let accepted = [
+            // §6.2.1: a name takes the one-letter prefix, or none at all.
+            "PEPTC[U:Carbamidomethyl]IDEK",
+            "PEPTC[Carbamidomethyl]IDEK",
+            // §6.2.2: an accession takes the long prefix.
+            "PEPTC[UNIMOD:4]IDEK",
+            // Not §6.2.2-conformant -- it calls `[U:35]` incorrect outright --
+            // but accepted, because this reads libraries other tools wrote and
+            // repairing an input is not the same as blessing it. Nothing here
+            // ever emits this spelling.
+            "PEPTC[U:4]IDEK",
+        ];
+        for raw in accepted {
+            let normalized = normalize_to_proforma(raw);
+            assert!(
+                parse_sequence(&normalized).is_some(),
+                "{raw:?} should parse (normalized to {normalized:?})"
+            );
+        }
+
+        let rejected = [
+            // A name under the long prefix: §6.2.1 gives names a letter and
+            // §6.2.2 governs accessions, so this is in neither.
+            "PEPTC[UNIMOD:Carbamidomethyl]IDEK",
+            // Synonyms and abbreviations, which §6.2.1.2 excludes: the Unimod
+            // OBO `name` tag is the only accepted spelling.
+            "PEPTC[U:CAM]IDEK",
+            "PEPTC[CAM]IDEK",
+            "PEPTC[UNIMOD:CAM]IDEK",
+            // An accession that does not exist.
+            "PEPTC[UNIMOD:999999]IDEK",
+        ];
+        for raw in rejected {
+            let normalized = normalize_to_proforma(raw);
+            assert!(
+                parse_sequence(&normalized).is_none(),
+                "{raw:?} should NOT parse (normalized to {normalized:?})"
+            );
+        }
+    }
+
+    /// Two spellings of one modification agree on the residue and the count.
+    /// Names go through mzcore and accessions through the byte walk, so this is
+    /// the one place the two parsers are compared on the same input.
+    #[test]
+    fn a_named_and_an_accession_modification_agree() {
+        let by_name =
+            parse_sequence(&normalize_to_proforma("PEPTC[U:Carbamidomethyl]IDEK")).expect("name");
+        let by_accession =
+            parse_sequence(&normalize_to_proforma("PEPTC[U:4]IDEK")).expect("accession");
+        assert_eq!(by_name.residues, by_accession.residues);
+        assert_eq!(by_name.mods.len(), by_accession.mods.len());
     }
 
     #[test]

@@ -58,8 +58,8 @@ impl FragmentLabel for IonAnnot {
 
 /// Arbitrary string labels carry no ion chemistry: the fragment decoy m/z shift
 /// is identity. This impl exists so the generic flyweight `Query<_, Arc<str>>`
-/// compiles; the readers only ever build string arenas with `None`/`Passthrough`
-/// decoy strategies, so an ordinal-based fragment shift is never requested here.
+/// compiles; the readers only ever build string arenas with the `Stored` decoy
+/// strategy, so an ordinal-based fragment shift is never requested here.
 impl DecoyShift for Arc<str> {
     fn decoy_shift_mz(&self, mz: f64, _shift: f64) -> f64 {
         mz

@@ -144,12 +144,13 @@ pub enum SourceIds {
 
 #[derive(Debug, Clone, PartialEq, Eq, Error)]
 pub enum SourceIdError {
+    #[error(
+        "decoy policy `force` requires readers to exclude shipped decoys before sealing, but \
+         {count} shipped decoy row(s) remain"
+    )]
+    ForceWithStoredDecoys { count: usize },
     #[error("{ids} source ids for {rows} rows")]
     LengthMismatch { ids: usize, rows: usize },
-    /// Its own variant so the message says "groups" when the caller supplied
-    /// groups; `LengthMismatch` rendered them as "source ids".
-    #[error("{groups} decoy groups for {rows} rows")]
-    GroupLengthMismatch { groups: usize, rows: usize },
     /// Callers key results by this id, so a repeat makes one row unreachable.
     #[error("duplicate source id {id}; ids must be unique per row")]
     Duplicate { id: String },
@@ -170,6 +171,25 @@ pub enum SourceIdError {
         row: usize,
         value: String,
         first_numeric_row: usize,
+    },
+    /// A competition group holding two targets at one charge. Competition keeps
+    /// one result per group and charge, so the second target is a real
+    /// identification discarded to keep the first, and the only symptom is a
+    /// lower target count -- no output says a row was dropped.
+    ///
+    /// Names the group and both rows: the label is shared by every row in the
+    /// group, so there is nothing else to locate the collision by in a library
+    /// of a million rows.
+    #[error(
+        "competition group {group} declares a target on row {first_row} and another on row \
+         {row}, both at charge {charge}; a group holds at most one target per charge, since \
+         competition keeps one result per group and charge"
+    )]
+    GroupHasTwoTargets {
+        group: String,
+        first_row: usize,
+        row: usize,
+        charge: u8,
     },
 }
 

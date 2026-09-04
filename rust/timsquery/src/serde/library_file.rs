@@ -1,4 +1,3 @@
-pub use super::diann_io::DiannPrecursorExtras;
 use super::diann_io::{
     read_parquet_library_file as read_diann_parquet,
     read_targets as read_diann_tsv,
@@ -13,23 +12,31 @@ use super::elution_group_inputs::{
     ElutionGroupInput,
     ElutionGroupInputError,
 };
-pub use super::skyline_io::SkylinePrecursorExtras;
+use super::mzspeclib_io::{
+    read_mzspeclib_library_file,
+    sniff_mzspeclib_library_file,
+};
+use super::precursor_extras::PrecursorExtras;
 use super::skyline_io::{
     read_targets as read_skyline_csv,
     sniff_skyline_library_file,
 };
-pub use super::spectronaut_io::SpectronautPrecursorExtras;
 use super::spectronaut_io::{
     read_targets as read_spectronaut_tsv,
     sniff_spectronaut_library_file,
 };
 use crate::Target;
 use crate::ion::IonAnnot;
+use crate::models::capabilities::{
+    DecoyPolicy,
+    LoadPolicy,
+};
 use crate::models::{
     Row,
     SourceIdError,
     TargetCapabilities,
     TargetColumns,
+    TargetColumnsBuilder,
 };
 use std::path::Path;
 use std::sync::Arc;
@@ -72,18 +79,9 @@ impl From<ElutionGroupInputError> for TargetReadingError {
 }
 
 #[derive(Debug)]
-pub enum FileReadingExtras {
-    Diann(Vec<DiannPrecursorExtras>),
-    Spectronaut(Vec<SpectronautPrecursorExtras>),
-    Skyline(Vec<SkylinePrecursorExtras>),
-}
-
-#[derive(Debug)]
 pub enum ElutionGroupCollection {
-    StringLabels(Vec<Target<String>>, Option<FileReadingExtras>),
-    MzpafLabels(Vec<Target<IonAnnot>>, Option<FileReadingExtras>),
-    TinyIntLabels(Vec<Target<u8>>, Option<FileReadingExtras>),
-    IntLabels(Vec<Target<u32>>, Option<FileReadingExtras>),
+    StringLabels(Vec<Target<String>>, Option<Vec<PrecursorExtras>>),
+    MzpafLabels(Vec<Target<IonAnnot>>, Option<Vec<PrecursorExtras>>),
 }
 
 impl ElutionGroupCollection {
@@ -91,8 +89,6 @@ impl ElutionGroupCollection {
         match self {
             ElutionGroupCollection::StringLabels(egs, _) => egs.len(),
             ElutionGroupCollection::MzpafLabels(egs, _) => egs.len(),
-            ElutionGroupCollection::TinyIntLabels(egs, _) => egs.len(),
-            ElutionGroupCollection::IntLabels(egs, _) => egs.len(),
         }
     }
 
@@ -115,36 +111,26 @@ impl ElutionGroupCollection {
     }
 
     fn try_deser_inputed(content: &str) -> Result<Self, TargetReadingError> {
-        // We can try from smallest to largest overhead
-        // Here we try to do the deser into ElutionGroupInput variants first
         debug!("Attempting deserialization of elution group inputs");
-        debug!("Attempting to deserialize elution group inputs with tiny int labels");
-        if let Ok(eg_inputs) = serde_json::from_str::<Vec<ElutionGroupInput<u8>>>(content) {
-            // Here we can handle filling the inputs if they are needed...
-            let eg_inputs = if eg_inputs.first().is_some_and(|x| x.needs_fragment_labels()) {
-                debug!("Filling missing fragment labels with tiny int labels");
-                eg_inputs
-                    .into_iter()
-                    .map(|x| x.try_fill_labels_u8())
-                    .collect::<Result<_, _>>()
-            } else {
-                Ok(eg_inputs)
-            };
-
-            let out: Result<Vec<Target<u8>>, ElutionGroupInputError> = eg_inputs?
-                .into_iter()
-                .map(<ElutionGroupInput<u8> as TryInto<Target<u8>>>::try_into)
-                .collect();
-            return Ok(ElutionGroupCollection::TinyIntLabels(out?, None));
-        }
-        debug!("Attempting to deserialize elution group inputs with int labels");
-        if let Ok(eg_inputs) = serde_json::from_str::<Vec<ElutionGroupInput<u32>>>(content) {
-            let out: Result<Vec<Target<u32>>, ElutionGroupInputError> =
-                eg_inputs.into_iter().map(|x| x.try_into()).collect();
-            return Ok(ElutionGroupCollection::IntLabels(out?, None));
-        }
-        debug!("Attempting to deserialize elution group inputs with mzpaf labels");
+        // Fragments with no labels at all. Minted as unknown-ion annotations
+        // (`?1`, `?2`, ...) rather than as integers: the arena has no
+        // integer-labelled variant, so integer labels were built and then
+        // thrown away, which made this input unloadable.
+        //
+        // Tried first because `fragment_labels: null` deserializes against
+        // every label type, so a later arm would claim it and mint the wrong
+        // kind.
         if let Ok(eg_inputs) = serde_json::from_str::<Vec<ElutionGroupInput<IonAnnot>>>(content) {
+            if eg_inputs.first().is_some_and(|x| x.needs_fragment_labels()) {
+                debug!("Filling missing fragment labels with unknown-ion annotations");
+                let filled: Result<Vec<_>, _> = eg_inputs
+                    .into_iter()
+                    .map(|x| x.try_fill_labels_annot())
+                    .collect();
+                let out: Result<Vec<Target<IonAnnot>>, ElutionGroupInputError> =
+                    filled?.into_iter().map(|x| x.try_into()).collect();
+                return Ok(ElutionGroupCollection::MzpafLabels(out?, None));
+            }
             let out: Result<Vec<Target<IonAnnot>>, ElutionGroupInputError> =
                 eg_inputs.into_iter().map(|x| x.try_into()).collect();
             return Ok(ElutionGroupCollection::MzpafLabels(out?, None));
@@ -159,18 +145,10 @@ impl ElutionGroupCollection {
     }
 
     fn try_deser_direct(content: &str) -> Result<Self, TargetReadingError> {
-        // We can try from smallest to largest overhead
-        // Here we try to do the direct deser into ElutionGroupCollection variants
-        // u8 -> u32 -> IonAnnot -> String
+        // Ion annotations first, then opaque strings. Integer label types are
+        // not tried: the arena has no variant for them, so claiming the input
+        // here only turned a loadable file into a rejection.
         debug!("Attempting direct deserialization of elution groups");
-        debug!("Attempting to deserialize elution groups with tiny int labels");
-        if let Ok(egs) = serde_json::from_str::<Vec<Target<u8>>>(content) {
-            return Ok(ElutionGroupCollection::TinyIntLabels(egs, None));
-        }
-        debug!("Attempting to deserialize elution groups with int labels");
-        if let Ok(egs) = serde_json::from_str::<Vec<Target<u32>>>(content) {
-            return Ok(ElutionGroupCollection::IntLabels(egs, None));
-        }
         debug!("Attempting to deserialize elution groups with mzpaf labels");
         if let Ok(egs) = serde_json::from_str::<Vec<Target<IonAnnot>>>(content) {
             return Ok(ElutionGroupCollection::MzpafLabels(egs, None));
@@ -206,48 +184,6 @@ pub enum TargetTable {
     },
 }
 
-/// The reader-extras fields the arena consumes, flattened out of the
-/// otherwise-identical DIA-NN/Skyline/Spectronaut `*PrecursorExtras` structs.
-struct PrecursorExtrasRow {
-    modified: String,
-    stripped: String,
-    is_decoy: bool,
-    relative_intensities: Vec<(IonAnnot, f32)>,
-}
-
-impl From<DiannPrecursorExtras> for PrecursorExtrasRow {
-    fn from(e: DiannPrecursorExtras) -> Self {
-        Self {
-            modified: e.modified_peptide,
-            stripped: e.stripped_peptide,
-            is_decoy: e.is_decoy,
-            relative_intensities: e.relative_intensities,
-        }
-    }
-}
-
-impl From<SkylinePrecursorExtras> for PrecursorExtrasRow {
-    fn from(e: SkylinePrecursorExtras) -> Self {
-        Self {
-            modified: e.modified_peptide,
-            stripped: e.stripped_peptide,
-            is_decoy: e.is_decoy,
-            relative_intensities: e.relative_intensities,
-        }
-    }
-}
-
-impl From<SpectronautPrecursorExtras> for PrecursorExtrasRow {
-    fn from(e: SpectronautPrecursorExtras) -> Self {
-        Self {
-            modified: e.modified_peptide,
-            stripped: e.stripped_peptide,
-            is_decoy: e.is_decoy,
-            relative_intensities: e.relative_intensities,
-        }
-    }
-}
-
 impl TargetTable {
     /// Build an `Mzpaf` arena WITH the reference-intensity sidecar from
     /// `IonAnnot`-labelled groups plus their reader extras.
@@ -262,17 +198,10 @@ impl TargetTable {
     /// too, so `seal()` sees shipped decoys and the timsseek parse gate sees the
     /// modified sequence.
     fn mzpaf_with_intensities(
+        decoys: DecoyPolicy,
         egs: Vec<Target<IonAnnot>>,
-        extras: FileReadingExtras,
+        rows: Vec<PrecursorExtras>,
     ) -> Result<Self, TargetReadingError> {
-        let rows: Vec<PrecursorExtrasRow> = match extras {
-            FileReadingExtras::Diann(v) => v.into_iter().map(PrecursorExtrasRow::from).collect(),
-            FileReadingExtras::Skyline(v) => v.into_iter().map(PrecursorExtrasRow::from).collect(),
-            FileReadingExtras::Spectronaut(v) => {
-                v.into_iter().map(PrecursorExtrasRow::from).collect()
-            }
-        };
-
         if egs.len() != rows.len() {
             return Err(TargetReadingError::SpeclibParse(format!(
                 "elution groups ({}) and reader extras ({}) length mismatch",
@@ -281,10 +210,17 @@ impl TargetTable {
             )));
         }
 
-        let mut geom = TargetColumns::with_capabilities(TargetCapabilities::default_diann());
+        let mut geom = TargetColumnsBuilder::with_capabilities(TargetCapabilities::default_diann());
         let mut frag_intens: Vec<f32> = Vec::new();
 
         for (eg, row) in egs.iter().zip(rows) {
+            // The one filter point for every format that reaches the arena
+            // through this adapter. Dropping a shipped decoy here rather than
+            // after sealing means its fragments are never parsed and the
+            // arena's own `MassShift` downgrade never sees it.
+            if !decoys.accepts(row.is_decoy) {
+                continue;
+            }
             // Reference intensities keyed by fragment label (see fn docs).
             let lookup: std::collections::HashMap<IonAnnot, f32> =
                 row.relative_intensities.into_iter().collect();
@@ -293,7 +229,7 @@ impl TargetTable {
                 let intensity = lookup.get(label).ok_or_else(|| {
                     TargetReadingError::SpeclibParse(format!(
                         "fragment {label:?} of precursor {:?} has no reference intensity",
-                        row.modified
+                        row.modified_peptide
                     ))
                 })?;
                 frag_intens.push(*intensity);
@@ -304,23 +240,23 @@ impl TargetTable {
                 rt_seconds: eg.rt_seconds(),
                 mobility: eg.mobility_ook0(),
                 frags: &frags,
-                seq_strip: &row.stripped,
-                seq_mod: &row.modified,
+                seq_strip: &row.stripped_peptide,
+                seq_mod: &row.modified_peptide,
                 is_decoy: row.is_decoy,
                 id: Some(eg.id().to_owned_id()),
                 ..Default::default()
             });
         }
 
-        if frag_intens.len() != geom.frag_labels.len() {
+        if frag_intens.len() != geom.n_fragments() {
             return Err(TargetReadingError::SpeclibParse(format!(
                 "reference-intensity sidecar ({}) must stay parallel to the fragment-label arena ({})",
                 frag_intens.len(),
-                geom.frag_labels.len(),
+                geom.n_fragments(),
             )));
         }
 
-        geom.seal()?;
+        let geom = geom.seal(decoys)?;
         Ok(TargetTable::Mzpaf {
             geom,
             frag_intens: Some(frag_intens),
@@ -341,14 +277,17 @@ impl TargetTable {
     /// no extras were supplied (e.g. plain `IonAnnot` JSON, which only exercises
     /// the extraction/geometry path), `frag_intens` stays `None` -- matching the
     /// historical behavior where timsseek rejected that shape.
-    fn from_elution_groups(egc: ElutionGroupCollection) -> Result<Self, TargetReadingError> {
+    fn from_elution_groups(
+        egc: ElutionGroupCollection,
+        decoys: DecoyPolicy,
+    ) -> Result<Self, TargetReadingError> {
         match egc {
             ElutionGroupCollection::MzpafLabels(egs, Some(extras)) => {
-                Self::mzpaf_with_intensities(egs, extras)
+                Self::mzpaf_with_intensities(decoys, egs, extras)
             }
             ElutionGroupCollection::MzpafLabels(egs, None) => {
                 let mut geom =
-                    TargetColumns::with_capabilities(TargetCapabilities::default_diann());
+                    TargetColumnsBuilder::with_capabilities(TargetCapabilities::default_diann());
                 for eg in &egs {
                     let frags: Vec<(IonAnnot, f64)> =
                         eg.iter_fragments().map(|(l, mz)| (*l, mz)).collect();
@@ -362,7 +301,7 @@ impl TargetTable {
                         ..Default::default()
                     });
                 }
-                geom.seal()?;
+                let geom = geom.seal(decoys)?;
                 Ok(TargetTable::Mzpaf {
                     geom,
                     frag_intens: None,
@@ -371,8 +310,14 @@ impl TargetTable {
             ElutionGroupCollection::StringLabels(egs, _) => {
                 // String-labelled arenas carry no ion chemistry and ship no
                 // decoys: sequence/fragment features unavailable, decoys off.
-                let mut geom =
-                    TargetColumns::with_capabilities(TargetCapabilities::default_unlabeled());
+                // Sealed `Never` regardless of what the caller asked for -- a
+                // derived decoy shifts the precursor but leaves an opaque
+                // fragment label untouched (`DecoyShift for Arc<str>` is the
+                // identity), so the variants would be scored against the
+                // target's own fragments.
+                let mut geom = TargetColumnsBuilder::with_capabilities(
+                    TargetCapabilities::default_unlabeled(),
+                );
                 for eg in &egs {
                     let frags: Vec<(Arc<str>, f64)> = eg
                         .iter_fragments()
@@ -388,33 +333,34 @@ impl TargetTable {
                         ..Default::default()
                     });
                 }
-                geom.seal()?;
+                let geom = geom.seal(DecoyPolicy::Never)?;
                 Ok(TargetTable::Str { geom })
-            }
-            ElutionGroupCollection::TinyIntLabels(..) | ElutionGroupCollection::IntLabels(..) => {
-                warn!("integer-labelled libraries have no TargetTable variant; rejecting");
-                Err(TargetReadingError::UnableToParseElutionGroups)
             }
         }
     }
 }
 
-/// A single spectral-library format reader. Adding a format = one struct + one
-/// line in [`registry`], instead of editing an enum, a method, and an ordered
+/// A single spectral-library format reader. Adding a format is one struct and
+/// one line in [`registry`], rather than an enum, a method and an ordered
 /// try-chain.
+///
+/// `read` returns the arena, not an intermediate. Formats that declare decoy
+/// groups have no way to express them through
+/// [`ElutionGroupCollection`], so returning that instead forced two of them to
+/// bypass the registry through hardcoded `if sniff(..)` blocks; the ones that
+/// do go through it call [`TargetTable::from_elution_groups`] themselves.
 pub trait LibraryReader: Send + Sync {
     fn name(&self) -> &'static str;
     /// Cheap probe: header bytes / extension / first data row. Must not read the
     /// whole file.
     fn sniff(&self, path: &Path) -> bool;
-    fn read(&self, path: &Path) -> Result<ElutionGroupCollection, TargetReadingError>;
+    fn read(&self, path: &Path, policy: LoadPolicy) -> Result<TargetTable, TargetReadingError>;
 }
 
 struct DiannParquetReader;
 struct DiannTsvReader;
 struct SpectronautReader;
 struct SkylineReader;
-struct JsonReader;
 
 impl LibraryReader for DiannParquetReader {
     fn name(&self) -> &'static str {
@@ -425,16 +371,16 @@ impl LibraryReader for DiannParquetReader {
         sniff_diann_parquet_library_file(path)
     }
 
-    fn read(&self, path: &Path) -> Result<ElutionGroupCollection, TargetReadingError> {
+    fn read(&self, path: &Path, policy: LoadPolicy) -> Result<TargetTable, TargetReadingError> {
         let egs = read_diann_parquet(path).map_err(|e| {
             warn!("Failed to read DIA-NN parquet library file: {:?}", e);
             TargetReadingError::UnableToParseElutionGroups
         })?;
         let (egs, extras): (Vec<_>, Vec<_>) = egs.into_iter().unzip();
-        Ok(ElutionGroupCollection::MzpafLabels(
-            egs,
-            Some(FileReadingExtras::Diann(extras)),
-        ))
+        TargetTable::from_elution_groups(
+            ElutionGroupCollection::MzpafLabels(egs, Some(extras)),
+            policy.decoys,
+        )
     }
 }
 
@@ -447,16 +393,16 @@ impl LibraryReader for DiannTsvReader {
         sniff_diann_library_file(path)
     }
 
-    fn read(&self, path: &Path) -> Result<ElutionGroupCollection, TargetReadingError> {
+    fn read(&self, path: &Path, policy: LoadPolicy) -> Result<TargetTable, TargetReadingError> {
         let egs = read_diann_tsv(path).map_err(|e| {
             warn!("Failed to read DIA-NN TSV library file: {:?}", e);
             TargetReadingError::UnableToParseElutionGroups
         })?;
         let (egs, extras): (Vec<_>, Vec<_>) = egs.into_iter().unzip();
-        Ok(ElutionGroupCollection::MzpafLabels(
-            egs,
-            Some(FileReadingExtras::Diann(extras)),
-        ))
+        TargetTable::from_elution_groups(
+            ElutionGroupCollection::MzpafLabels(egs, Some(extras)),
+            policy.decoys,
+        )
     }
 }
 
@@ -469,16 +415,16 @@ impl LibraryReader for SpectronautReader {
         sniff_spectronaut_library_file(path).is_ok()
     }
 
-    fn read(&self, path: &Path) -> Result<ElutionGroupCollection, TargetReadingError> {
+    fn read(&self, path: &Path, policy: LoadPolicy) -> Result<TargetTable, TargetReadingError> {
         let egs = read_spectronaut_tsv(path).map_err(|e| {
             warn!("Failed to read Spectronaut TSV library file: {:?}", e);
             TargetReadingError::UnableToParseElutionGroups
         })?;
         let (egs, extras): (Vec<_>, Vec<_>) = egs.into_iter().unzip();
-        Ok(ElutionGroupCollection::MzpafLabels(
-            egs,
-            Some(FileReadingExtras::Spectronaut(extras)),
-        ))
+        TargetTable::from_elution_groups(
+            ElutionGroupCollection::MzpafLabels(egs, Some(extras)),
+            policy.decoys,
+        )
     }
 }
 
@@ -491,69 +437,108 @@ impl LibraryReader for SkylineReader {
         sniff_skyline_library_file(path).is_ok()
     }
 
-    fn read(&self, path: &Path) -> Result<ElutionGroupCollection, TargetReadingError> {
+    fn read(&self, path: &Path, policy: LoadPolicy) -> Result<TargetTable, TargetReadingError> {
         let egs = read_skyline_csv(path).map_err(|e| {
             warn!("Failed to read Skyline transition list: {:?}", e);
             TargetReadingError::UnableToParseElutionGroups
         })?;
         let (egs, extras): (Vec<_>, Vec<_>) = egs.into_iter().unzip();
-        Ok(ElutionGroupCollection::MzpafLabels(
-            egs,
-            Some(FileReadingExtras::Skyline(extras)),
-        ))
+        TargetTable::from_elution_groups(
+            ElutionGroupCollection::MzpafLabels(egs, Some(extras)),
+            policy.decoys,
+        )
     }
 }
 
-impl LibraryReader for JsonReader {
+struct DiannSpeclibReader;
+struct MzSpecLibReader;
+
+impl LibraryReader for DiannSpeclibReader {
     fn name(&self) -> &'static str {
-        "json"
+        "diann-speclib"
     }
 
-    /// Terminal fallback: always sniffs true so JSON is tried when nothing else
-    /// matched. Must be last in the registry.
-    fn sniff(&self, _path: &Path) -> bool {
-        true
+    fn sniff(&self, path: &Path) -> bool {
+        sniff_diann_speclib_library_file(path)
     }
 
-    fn read(&self, path: &Path) -> Result<ElutionGroupCollection, TargetReadingError> {
-        ElutionGroupCollection::try_read_json(path)
+    fn read(&self, path: &Path, policy: LoadPolicy) -> Result<TargetTable, TargetReadingError> {
+        read_diann_speclib_library_file(path, policy.decoys)
     }
 }
 
+impl LibraryReader for MzSpecLibReader {
+    fn name(&self) -> &'static str {
+        "mzspeclib"
+    }
+
+    fn sniff(&self, path: &Path) -> bool {
+        sniff_mzspeclib_library_file(path)
+    }
+
+    fn read(&self, path: &Path, policy: LoadPolicy) -> Result<TargetTable, TargetReadingError> {
+        read_mzspeclib_library_file(path, policy)
+    }
+}
+
+// JSON is deliberately not in the registry: it has no sniff, being what a file
+// that matched nothing else is tried as. It is the terminal arm of
+// `read_targets_with`.
+
+/// Every format, in sniff order.
+///
+/// Order matters where sniffs overlap, and the array is the only thing that
+/// states it. `diann-speclib` is first because its `read` is the one that can
+/// surface an `UnsupportedSpeclibVersion`, which its sniff cannot; `mzspeclib`
+/// precedes nothing in particular but must follow the binary formats, since its
+/// fallback probe reads a line of text.
 fn registry() -> &'static [&'static dyn LibraryReader] {
     &[
+        &DiannSpeclibReader,
         &DiannParquetReader,
+        &MzSpecLibReader,
         &DiannTsvReader,
         &SpectronautReader,
         &SkylineReader,
-        &JsonReader,
     ]
 }
 
+/// Read a library, keeping whatever decoy rows it ships.
+///
+/// The common case, and the one every caller wanted before decoy handling
+/// became a parameter. Use [`read_targets_with`] to drop them at read time.
 pub fn read_targets<T: AsRef<Path>>(path: T) -> Result<TargetTable, TargetReadingError> {
+    read_targets_with(
+        path,
+        LoadPolicy {
+            decoys: DecoyPolicy::Never,
+            ..Default::default()
+        },
+    )
+}
+
+/// Read a library, deciding up front what a load does with what the file ships.
+///
+/// [`DecoyPolicy::Force`] drops shipped decoys before they reach the arena, so a
+/// caller regenerating its own never pays to parse the file's and the arena
+/// never sees a shipped decoy to downgrade `MassShift` over.
+pub fn read_targets_with<T: AsRef<Path>>(
+    path: T,
+    policy: LoadPolicy,
+) -> Result<TargetTable, TargetReadingError> {
     let path = path.as_ref();
-    // The DIA-NN `.speclib` reader builds the columnar arena directly (with the
-    // reference-intensity sidecar); every other format still produces the legacy
-    // `ElutionGroupCollection`, adapted into the arena here. `.speclib` is
-    // sniffed first because its `read` path is the only one that can surface an
-    // `UnsupportedSpeclibVersion` diagnostic (the sniff has no version gate).
-    if sniff_diann_speclib_library_file(path) {
-        info!("Dispatching library read to diann-speclib (direct arena build)");
-        return read_diann_speclib_library_file(path);
-    }
     let mut last_err = None;
     for reader in registry() {
         if reader.sniff(path) {
             info!("Dispatching library read to {}", reader.name());
-            match reader.read(path) {
-                Ok(egs) => return TargetTable::from_elution_groups(egs),
+            match reader.read(path, policy) {
+                Ok(arena) => return Ok(arena),
                 // A sniff can fire on a file the reader then fails to parse
                 // (overlapping sniffs). Fall through to the next candidate
                 // instead of committing to the first sniff. Keep the FIRST
                 // error: readers run specific -> generic, so the earliest
-                // sniff-and-fail carries the most useful diagnostic (e.g. a
-                // `.speclib` desync), which the always-true JSON fallback's
-                // generic error would otherwise clobber.
+                // sniff-and-fail carries the most useful diagnostic, such as a
+                // `.speclib` desync, which JSON's generic error would clobber.
                 Err(e) => {
                     warn!("{} sniffed but failed to read: {:?}", reader.name(), e);
                     last_err.get_or_insert(e);
@@ -561,9 +546,14 @@ pub fn read_targets<T: AsRef<Path>>(path: T) -> Result<TargetTable, TargetReadin
             }
         }
     }
-    // Dead default in practice (JsonReader always sniffs true) -- a harmless
-    // defensive fallback.
-    Err(last_err.unwrap_or(TargetReadingError::UnableToParseElutionGroups))
+    // Nothing sniffed, or everything that sniffed failed to parse. Either way
+    // JSON is what is left to try; its own error is reported only if no reader
+    // got further, since a `.speclib` desync says more than "not valid JSON".
+    info!("Dispatching library read to json (terminal)");
+    match ElutionGroupCollection::try_read_json(path) {
+        Ok(egs) => TargetTable::from_elution_groups(egs, policy.decoys),
+        Err(e) => Err(last_err.unwrap_or(e)),
+    }
 }
 
 #[cfg(test)]
@@ -591,6 +581,66 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/diann_io_files")
             .join(name)
+    }
+
+    /// JSON naming no fragment labels loads, with labels minted.
+    ///
+    /// The arena has no integer-labelled variant, so minting `u8` labels for
+    /// this input built something that was then rejected -- and
+    /// `try_fill_labels_annot`, which mints the loadable kind, had no callers at
+    /// all. Unknown-ion annotations are what a fragment with no stated identity
+    /// gets everywhere else in the tree.
+    #[test]
+    fn json_without_fragment_labels_loads_with_minted_ones() {
+        let arena = super::read_targets(fixture("labelless_targets.json"))
+            .expect("label-less JSON is a supported input");
+        let super::TargetTable::Mzpaf { geom, .. } = arena else {
+            panic!("minted labels carry ion chemistry, so this is the Mzpaf arena");
+        };
+        assert_eq!(geom.n_rows(), 1);
+        let row = geom.rows().next().unwrap();
+        let labels: Vec<String> = geom
+            .frag_labels(row)
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        assert_eq!(labels, ["?1", "?2"], "one unknown ion per fragment");
+    }
+
+    /// Every format goes through `registry()`. Two of them used to be
+    /// hardcoded `if sniff(..)` blocks ahead of the loop, because the trait
+    /// returned an intermediate they could not express decoy groups through.
+    /// A third bypass is the failure mode this guards.
+    #[test]
+    fn every_format_is_in_the_registry() {
+        let names: Vec<_> = super::registry().iter().map(|r| r.name()).collect();
+        assert_eq!(
+            names,
+            [
+                "diann-speclib",
+                "diann-parquet",
+                "mzspeclib",
+                "diann-tsv",
+                "spectronaut-tsv",
+                "skyline-csv",
+            ],
+            "a format outside this list is dispatched somewhere else"
+        );
+    }
+
+    /// Sniff order is what the array says. `mzspeclib` falls back to reading a
+    /// line of text when the name is unfamiliar, so it has to follow the binary
+    /// formats or it probes a parquet file as text.
+    #[test]
+    fn binary_formats_are_sniffed_before_the_text_probe() {
+        let position = |name: &str| {
+            super::registry()
+                .iter()
+                .position(|r| r.name() == name)
+                .expect("registered")
+        };
+        assert!(position("diann-parquet") < position("mzspeclib"));
+        assert!(position("diann-speclib") < position("mzspeclib"));
     }
 
     /// `sample_lib.tsv` carries `transition_group_id`; `sample_lib.txt` does

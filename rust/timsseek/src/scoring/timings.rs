@@ -186,6 +186,14 @@ pub struct RunReport {
     /// successful runs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub abort_reason: Option<String>,
+    /// Whether the run was allowed to replace existing outputs.
+    ///
+    /// Recorded here rather than in `config_used.json` because it is a decision
+    /// about one invocation and not about how to search -- but recorded, because
+    /// "the outputs were already there" is otherwise unrecoverable from the
+    /// artifacts.
+    #[serde(default)]
+    pub overwrite: bool,
     pub load_speclib_ms: u64,
     pub load_calib_lib_ms: u64,
     pub speclib_entries: usize,

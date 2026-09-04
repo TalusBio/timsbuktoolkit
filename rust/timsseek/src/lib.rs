@@ -16,12 +16,13 @@ pub use data_sources::{
     ExpectedIntensity,
     RefQuery,
     ReferenceLibrary,
-    Speclib,
 };
 pub use models::{
     DecoyPolicy,
     ExpectedIntensities,
+    LoadPolicy,
     ProteinSlice,
+    UnannotatedPeaks,
 };
 pub use scoring::{
     CompetedCandidate,

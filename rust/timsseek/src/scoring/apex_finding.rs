@@ -27,6 +27,7 @@
 use std::fmt::Display;
 
 use crate::data_sources::reference_library::RowHandles;
+use timsquery::models::OwnedSourceId;
 
 use super::apex::ApexConfig;
 use super::{
@@ -95,6 +96,9 @@ pub struct PeptideMetadata {
     /// wants are resolved from these at the writer, so a scored candidate never
     /// carries a copy.
     pub handles: RowHandles,
+
+    /// Stable library identity, independent of arena storage order.
+    pub source_id: OwnedSourceId,
 
     /// Retention time from spectral library (unit-agnostic: iRT, minutes, or seconds).
     pub library_rt: f32,

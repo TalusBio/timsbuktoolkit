@@ -13,7 +13,6 @@ members = [
     "rust/timsquery_cli",
     "rust/timsquery_viewer",
     "rust/apex_sim",
-    "rust/speclib_build_cli",
     "rust/tims_stage",
     "rust/timsseek_macros",
     "rust/rescore_dash",
@@ -33,7 +32,6 @@ default-members = [
     "rust/timsquery_cli",
     "rust/timsquery_viewer",
     "rust/apex_sim",
-    "rust/speclib_build_cli",
     "rust/tims_stage",
     "rust/timsseek_macros"
 ]
@@ -83,8 +81,18 @@ insta = { version = "1.34.0" }
 bon = "3.8.1"
 tinyvec = { features = ["alloc", "serde"], version = "1.10.0" }
 smallvec = { version = "1.13", features = ["const_generics", "union"] }
-mzcore = { version = "0.2.0" }
-mzcv = { version = "0.3.0" }
+# `mzannotate` carries the mzSpecLib reader. Two fixes are not in a release yet:
+# named attribute sets were never applied, so every decoy in a target/decoy
+# library read back as a target, and retention time was dropped for any spectrum
+# whose writer grouped other attributes with it. `mzcore` and `mzcv` come from
+# the same source so the graph holds one copy of each and the ontology types
+# unify.
+#
+# Pinned by revision, not by branch: a branch can be force-pushed or deleted.
+# All three become version numbers once the fixes ship.
+mzannotate = { git = "https://github.com/jspaezp/rustyms", rev = "142c96ed1d31c56936c003af5f599d0c8f740005" }
+mzcore = { git = "https://github.com/jspaezp/rustyms", rev = "142c96ed1d31c56936c003af5f599d0c8f740005" }
+mzcv = { git = "https://github.com/jspaezp/rustyms", rev = "142c96ed1d31c56936c003af5f599d0c8f740005" }
 csv = "1.3"
 
 tempfile = "3.23.0"

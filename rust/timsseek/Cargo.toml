@@ -6,8 +6,6 @@ license.workspace = true
 
 [dependencies]
 regex = "1.10.6"
-rmp-serde = "1.1"
-zstd = "0.13"
 
 # Gradient boosted tree
 forust-ml = "0.5.0"

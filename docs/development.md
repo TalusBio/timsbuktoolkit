@@ -7,9 +7,7 @@ Reference for working on timsbuktoolkit. All binaries ship `--help` for CLI flag
 | Binary | Crate | Purpose |
 |--------|-------|---------|
 | `timsseek` | `timsseek_cli` | Peptide-centric search |
-| `timsseek_sample_speclib` | `timsseek_cli` | Speclib sampling utility |
 | `timsquery_cli` | `timsquery_cli` | Low-level timsTOF query |
-| `speclib_build` | `speclib_build_cli` | Build speclib from FASTA via Koina |
 | `timsquery_viewer` | `timsquery_viewer` | GUI viewer for query results |
 | `calib_dash` | `calib_dash` | Replay a saved `calibration.json` in the RT-calibration dashboard |
 
@@ -45,8 +43,6 @@ Not shown by `--help`. Read directly via `std::env::var` / `var_os`.
 `task --list-all` enumerates everything. Non-obvious ones:
 
 - `task test`, `task fmt`, `task clippy` -- `task fmt` runs nightly rustfmt + ruff. Do not use `cargo fmt` (stable silently drops nightly-only opts).
-- `task speclib:build -- <args>` -- wrapper around `speclib_build`.
-- `task speclib:local-koina` / `task speclib:stop-koina` -- local Koina docker. First run downloads all models (~10-30 min).
 - `task docker` -- cross-builds linux/amd64 images.
 - `task license_check`, `task todos`, `task bumpver`, `task build_python`.
 

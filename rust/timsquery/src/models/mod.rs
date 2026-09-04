@@ -41,5 +41,6 @@ pub use target_columns::{
     Row,
     RowIdx,
     TargetColumns,
+    TargetColumnsBuilder,
 };
 pub use tolerance::Tolerance;

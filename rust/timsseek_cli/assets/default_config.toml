@@ -13,7 +13,7 @@
 ## Input spectral library (optional -- `--speclib-uri` overrides this).
 # [input]
 # type = "speclib"
-# uri = "path/to/library.msgpack.zst"
+# uri = "path/to/library.mzspeclib.txt.gz"
 
 
 [analysis]
@@ -26,6 +26,21 @@ chunk_size = 20000
 ## "never"       -- trust the library's decoy labels, generating none even when
 ##                 the library ships none, which leaves FDR estimated from no decoys
 decoy_strategy = "if_missing"
+
+## What to do with a library peak that carries no annotation, and so no
+## theoretical m/z. Read only for a library that annotates nothing at all,
+## "keep_all" aside: a bare peak beside annotated ones is mzPAF's "?", which is
+## the writer calling it noise, and those are always dropped.
+## "keep"     -- store it at the m/z the file measured, under a "?N" label
+## "skip"     -- drop it; a library that annotates nothing then has no fragments
+##               left and is refused as unsearchable
+## "fail"     -- refuse the library at the first one
+## "keep_all" -- store every peak that way, annotated or not, discarding the
+##               annotations the file did carry
+##
+## A kept peak is at an observed mass where an annotated one is at a theoretical
+## mass, and calibration fits its m/z offsets assuming the latter.
+unannotated_peaks = "keep"
 
 ## Rescore model applied in Phase 5 (`--rescore-model` overrides this).
 ## "gbm"        -- cross-validated gradient-boosted trees
@@ -81,9 +96,38 @@ min_rt_tolerance_minutes = 0.5
 calibration_query_rt_window_minutes = 0.083333336   # 5 seconds (5 / 60)
 
 
+## Sequence database this run belongs to (optional -- `--fasta` overrides this).
+## Separate from `[library]` below, which says how to predict a library: the
+## sequences are wanted on runs that predict nothing, and a library does not
+## stand in for the database it was digested from. Local paths only.
+# [sequences]
+# fasta = "path/to/proteome.fasta"
+
+
 ## Output directory (optional -- `--output-uri` overrides this).
 # [output]
 # uri = "./results"
+
+
+## How to predict a library, consulted by `timsseek build-library`. Every field
+## is optional and falls through to msspeculator's own default, so the section
+## can be omitted entirely; a build flag beats whatever is set here.
+# [library]
+# model = "builtin:small-v0"
+# missed_cleavages = 2
+# min_length = 7
+# max_length = 30
+# min_charge = 2
+# max_charge = 4
+# fixed_mods = ["C[UNIMOD:4]"]
+# variable_mods = ["M[UNIMOD:35]"]
+# max_variable_mods = 1
+# min_intensity = 0.01
+# max_fragments = 20
+# decoys = true
+## Acquisition and chromatography context are not settable: a build uses the
+## model artifact's own defaults. Choosing a different one is a decision about
+## the model, made by `model` above.
 
 
 ## Staging controls for S3/remote raw inputs (all optional).

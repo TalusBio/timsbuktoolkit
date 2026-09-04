@@ -1,3 +1,4 @@
+use super::precursor_extras::PrecursorExtras;
 use crate::Target;
 use crate::ion::{
     IonAnnot,
@@ -104,15 +105,6 @@ impl From<std::io::Error> for DiannReadingError {
         error!("IO error: {:?}", err);
         DiannReadingError::Io
     }
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct DiannPrecursorExtras {
-    pub modified_peptide: String,
-    pub stripped_peptide: String,
-    pub protein_id: String,
-    pub is_decoy: bool,
-    pub relative_intensities: Vec<(IonAnnot, f32)>,
 }
 
 /// Represents a single row from a DIA-NN library TSV file
@@ -299,7 +291,7 @@ struct ParquetColumnData<'a> {
 
 pub fn read_targets<T: AsRef<Path>>(
     file: T,
-) -> Result<Vec<(Target<IonAnnot>, DiannPrecursorExtras)>, DiannReadingError> {
+) -> Result<Vec<(Target<IonAnnot>, PrecursorExtras)>, DiannReadingError> {
     let file_handle = std::fs::File::open(file.as_ref())?;
 
     let mut rdr = csv::ReaderBuilder::new()
@@ -407,7 +399,7 @@ fn parse_precursor_group(
     naming: Naming,
     rows: &[DiannLibraryRow],
     buffers: &mut ParsingBuffers,
-) -> Result<(Target<IonAnnot>, DiannPrecursorExtras), DiannPrecursorParsingError> {
+) -> Result<(Target<IonAnnot>, PrecursorExtras), DiannPrecursorParsingError> {
     if rows.is_empty() {
         error!("Empty precursor group encountered on {id}");
         return Err(DiannPrecursorParsingError::Other);
@@ -496,7 +488,7 @@ fn parse_precursor_group(
         }
     };
 
-    let precursor_extras = DiannPrecursorExtras {
+    let precursor_extras = PrecursorExtras {
         modified_peptide: first_row.modified_peptide.clone(),
         stripped_peptide: first_row.stripped_peptide.clone(),
         protein_id: first_row.protein_id.clone(),
@@ -525,7 +517,7 @@ fn parse_precursor_group(
 /// Read a DIA-NN spectral library from a parquet file (DiaNN 2.2+ format)
 pub fn read_parquet_library_file<T: AsRef<Path>>(
     file: T,
-) -> Result<Vec<(Target<IonAnnot>, DiannPrecursorExtras)>, DiannReadingError> {
+) -> Result<Vec<(Target<IonAnnot>, PrecursorExtras)>, DiannReadingError> {
     use arrow::record_batch::RecordBatch;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
@@ -743,7 +735,7 @@ fn parse_precursor_group_from_parquet(
     indices: &[usize],
     columns: &ParquetColumnData,
     buffers: &mut ParsingBuffers,
-) -> Result<(Target<IonAnnot>, DiannPrecursorExtras), DiannPrecursorParsingError> {
+) -> Result<(Target<IonAnnot>, PrecursorExtras), DiannPrecursorParsingError> {
     if indices.is_empty() {
         error!("Empty precursor group encountered on {id}");
         return Err(DiannPrecursorParsingError::Other);
@@ -830,7 +822,7 @@ fn parse_precursor_group_from_parquet(
         }
     };
 
-    let precursor_extras = DiannPrecursorExtras {
+    let precursor_extras = PrecursorExtras {
         modified_peptide: columns.modified_sequences[first_idx].clone(),
         stripped_peptide: columns.stripped_sequences[first_idx].clone(),
         protein_id: columns.protein_groups[first_idx].clone(),
