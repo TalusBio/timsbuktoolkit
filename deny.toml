@@ -72,7 +72,37 @@ db-urls = ["https://github.com/rustsec/advisory-db"]
 yanked = "warn"
 # A list of advisory IDs to ignore. Note that ignored advisories will still
 # output a note when they are encountered.
-ignore = []
+#
+# Every entry below is here because no fixed version is reachable from this
+# tree, not because the finding was judged unimportant. Re-check them whenever
+# arrow-rs, egui or mzcore move; deleting an entry that has become fixable is
+# the point of writing the blocker down.
+ignore = [
+  # No fixed version exists: the authors stopped maintaining these crates.
+  # bincode arrives via mzcore/mzcv, paste via nalgebra -> mzsignal -> mzdata
+  # and via egui_dock, ttf-parser via ab_glyph -> epaint. All three are
+  # upstream migrations (postcard/bitcode/rkyv, and skrifa for the font
+  # parser), none of them ours to make.
+  { id = "RUSTSEC-2025-0141", reason = "bincode unmaintained; no fixed version, reached via mzcore/mzcv" },
+  { id = "RUSTSEC-2024-0436", reason = "paste unmaintained; no fixed version, build-time proc-macro under nalgebra and egui_dock" },
+  { id = "RUSTSEC-2026-0192", reason = "ttf-parser unmaintained; no fixed version, reached via ab_glyph -> epaint" },
+
+  # Both need quick-xml >= 0.41, which nothing here can pull:
+  #
+  #  - quick-xml 0.39.2 <- object_store 0.13.2 <- parquet 59.2. object_store
+  #    0.14 is fixed, but parquet still requires 0.13, so bumping our direct
+  #    dependency only adds a second copy and breaks the parquet boundary.
+  #  - quick-xml 0.39.2 <- wayland-scanner, a build-time proc-macro reading
+  #    protocol XML shipped in the crate. Not attacker-reachable at all.
+  #  - quick-xml 0.38.4 <- zbus_xml 5.1 <- atspi <- accesskit <- eframe.
+  #    zbus_xml 5.2.1 is fixed but zbus-lockstep 0.5.2 pins ^5.1. Upgrading
+  #    eframe does not help: 0.36.1 resolves to the same zbus_xml 5.1.0.
+  #
+  # Both are DoS-class and the reachable XML is S3/GCS list responses and the
+  # Linux accessibility bus -- not spectra, not library files.
+  { id = "RUSTSEC-2026-0194", reason = "quick-xml < 0.41 quadratic duplicate-attribute check; blocked on arrow-rs and accesskit" },
+  { id = "RUSTSEC-2026-0195", reason = "quick-xml < 0.41 unbounded namespace allocation; blocked on arrow-rs and accesskit" },
+]
 # Threshold for security vulnerabilities, any vulnerability with a CVSS score
 # lower than the range specified will be ignored. Note that ignored advisories
 # will still output a note when they are encountered.

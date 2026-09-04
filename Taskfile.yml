@@ -6,12 +6,11 @@ includes:
   timsseek: ./rust/timsseek
 
 tasks:
-  # Mirrors the blocking half of the `cargo-deny` CI job. `advisories` is left
-  # out here for the same reason it is non-fatal there; run `cargo deny check
-  # advisories` directly to see it.
+  # Mirrors the `cargo-deny` CI job. Needs cargo-deny >= 0.16: older builds
+  # cannot parse CVSS 4.0 entries and die on the advisory database itself.
   license_check:
     cmds:
-      - cargo deny check bans licenses sources
+      - cargo deny check
 
   test:
     cmds:
