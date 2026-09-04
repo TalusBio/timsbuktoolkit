@@ -17,7 +17,7 @@ use serde::{
 };
 
 /// Utilities to convert quad windows to geometries.
-use timsrust::QuadrupoleSettings;
+use timsrust::core::QuadrupoleSettings;
 
 /// Holds the information of the quadrupole isolation windows.
 /// Internally stored as a list of pre-classified `RingShape` entries so
@@ -415,19 +415,15 @@ fn quad_to_xxyy(
     ims_converter: impl Fn(f64) -> f64,
 ) -> Vec<(f64, f64, f64, f64)> {
     assert!(quad.scan_starts.len() == quad.scan_ends.len());
-    assert!(quad.scan_starts.len() == quad.isolation_mz.len());
-    assert!(quad.scan_starts.len() == quad.isolation_width.len());
-    assert!(quad.scan_starts.len() == quad.collision_energy.len());
+    assert!(quad.scan_starts.len() == quad.isolation_windows.len());
     let mut result = Vec::new();
     for i in 0..quad.scan_starts.len() {
         let scan_start = quad.scan_starts[i];
         let scan_end = quad.scan_ends[i];
         let im_start = ims_converter(scan_start as f64);
         let im_end = ims_converter(scan_end as f64);
-        let mz_center = quad.isolation_mz[i];
-        let mz_width = quad.isolation_width[i];
-        let mz_start = mz_center - mz_width / 2.0;
-        let mz_end = mz_center + mz_width / 2.0;
+        let mz_start = f64::from(quad.isolation_windows[i].lower());
+        let mz_end = f64::from(quad.isolation_windows[i].upper());
         result.push((mz_start, mz_end, im_start, im_end));
     }
     result
@@ -500,6 +496,10 @@ fn xxyys_to_geometry(xxyys: &[(f64, f64, f64, f64)]) -> MultiPolygon<f64> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use timsrust::core::{
+        IsolationWindow,
+        Mz,
+    };
 
     /// A query box for intersection tests: `((mz_low, mz_high), (im_low, im_high))`.
     type MzImQuery = ((f64, f64), (f64, f64));
@@ -508,6 +508,10 @@ mod tests {
         // They go in inverted order from 0 == 1.5
         // to 708 == 0.5
         1.5 - (x / 708.0)
+    }
+
+    fn isolation(center: f64, width: f64, collision_energy: f64) -> IsolationWindow {
+        IsolationWindow::new_from_center(Mz::from(center), Mz::from(width), collision_energy)
     }
 
     #[test]
@@ -519,9 +523,7 @@ mod tests {
             // (if window 1 is 1-100, window 2 cannot start before 101)
             scan_starts: vec![0, 220],
             scan_ends: vec![200, 300],
-            isolation_mz: vec![900.0, 500.0],
-            isolation_width: vec![40.0, 40.0],
-            collision_energy: vec![20.0, 22.0],
+            isolation_windows: vec![isolation(900.0, 40.0, 20.0), isolation(500.0, 40.0, 22.0)],
         };
         let quad = QuadrupoleIsolationScheme::from_quad(&dia_pasef_window, dummy_ims_converter);
         assert_eq!(quad.ring_shapes.len(), 2);
@@ -535,9 +537,11 @@ mod tests {
             scan_ends: vec![1, 2, 3, 4, 5, 6],
             // We start isolating the 90-110mz window ar 1.5 ims
             // end in the 85-105mz window a bit under that
-            isolation_mz: vec![100., 99., 98., 97., 96., 95.],
-            isolation_width: vec![20., 20., 20., 20., 20., 20.],
-            collision_energy: vec![20.0, 22.0, 24.0, 26.0, 28.0, 30.0],
+            isolation_windows: [100., 99., 98., 97., 96., 95.]
+                .into_iter()
+                .zip([20.0, 22.0, 24.0, 26.0, 28.0, 30.0])
+                .map(|(center, ce)| isolation(center, 20.0, ce))
+                .collect(),
         };
         let quad = QuadrupoleIsolationScheme::from_quad(&dia_pasef_window, dummy_ims_converter);
         assert_eq!(quad.ring_shapes.len(), 1);
@@ -562,9 +566,7 @@ mod tests {
             index: 0,
             scan_starts: vec![0, 220],
             scan_ends: vec![200, 300],
-            isolation_mz: vec![900.0, 500.0],
-            isolation_width: vec![40.0, 40.0],
-            collision_energy: vec![20.0, 22.0],
+            isolation_windows: vec![isolation(900.0, 40.0, 20.0), isolation(500.0, 40.0, 22.0)],
         };
         let quad_polys =
             QuadrupoleIsolationScheme::from_quad(&dia_pasef_window, dummy_ims_converter);

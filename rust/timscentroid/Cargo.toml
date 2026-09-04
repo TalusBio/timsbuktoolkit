@@ -10,6 +10,7 @@ geo-types = { version = "0.7", features = ["serde"] }
 
 # Workspace
 timsrust = { workspace = true }
+timsrust-calibration = { workspace = true }
 half = { workspace = true, features = ["serde"]}
 rayon = { workspace = true }
 serde = { workspace = true, features = ["derive"] }

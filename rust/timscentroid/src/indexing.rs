@@ -1,18 +1,22 @@
 use half::f16;
 use rayon::prelude::*;
-use timsrust::converters::{
-    ConvertableDomain,
-    Tof2MzConverter2,
+use timsrust::core::{
+    Converter as CalibrationConverter,
+    FrameInfo,
+    Im as CalibrationIm,
+    MSLevel,
+    Mz as CalibrationMz,
+    ScanIndex as CalibrationScanIndex,
+    TofIndex as CalibrationTofIndex,
 };
-use timsrust::readers::{
-    FrameReader,
-    FrameReaderError,
-    TdfBlob,
-};
-use timsrust::{
-    FrameMeta,
-    FramePeaks,
+use timsrust::tdf::{
     Metadata,
+    TdfFrameReader,
+};
+use timsrust_calibration::{
+    CalibratedScan2ImConverter,
+    CalibratedTof2MzConverter,
+    RunCalibration,
 };
 use tracing::{
     info,
@@ -41,6 +45,7 @@ pub use timsrust::TimsTofPath;
 use crate::centroiding::{
     AggregatedClusteringSummary,
     CentroidingConfig,
+    ConvertableDomain,
     IndexingCentroidingConfig,
     PeakCentroider,
 };
@@ -52,6 +57,34 @@ type Ms2WindowGroups = Vec<(
     QuadrupoleIsolationScheme,
     IndexedPeakGroup<WindowCycleIndex>,
 )>;
+
+impl ConvertableDomain for CalibratedTof2MzConverter {
+    fn convert(&self, value: f64) -> f64 {
+        let index = CalibrationTofIndex::try_from(value.round().max(0.0) as u32)
+            .expect("TOF index must fit in calibration coordinate");
+        f64::from(CalibrationConverter::convert(self, index))
+    }
+
+    fn invert(&self, value: f64) -> f64 {
+        let index: CalibrationTofIndex =
+            CalibrationConverter::convert(self, CalibrationMz::from(value));
+        u32::from(index) as f64
+    }
+}
+
+impl ConvertableDomain for CalibratedScan2ImConverter {
+    fn convert(&self, value: f64) -> f64 {
+        let index = CalibrationScanIndex::try_from(value.round().max(0.0) as u32)
+            .expect("scan index must fit in calibration coordinate");
+        f64::from(CalibrationConverter::convert(self, index))
+    }
+
+    fn invert(&self, value: f64) -> f64 {
+        let index: CalibrationScanIndex =
+            CalibrationConverter::convert(self, CalibrationIm::from(value));
+        u32::from(index) as f64
+    }
+}
 
 // Context numbers:
 // 15_241 - number of frames in a 22 min run
@@ -170,31 +203,37 @@ impl IndexedTimstofPeaks {
         file: &TimsTofPath,
         centroiding_config: IndexingCentroidingConfig,
     ) -> (Self, IndexBuildingStats) {
-        let frame_reader = file.load_frame_reader().unwrap();
-        let metadata = file.load_metadata().unwrap();
-        let mz_range = (metadata.lower_mz, metadata.upper_mz);
+        let frame_reader = file.frame_reader().unwrap();
+        let metadata = Metadata::new(file.as_ref()).unwrap();
+        let calibration = RunCalibration::from_path(file).unwrap();
+        let mz_converter = calibration.mz_converter_median().unwrap();
+        let mz_range = (
+            f64::from(metadata.lower_mz()),
+            f64::from(metadata.upper_mz()),
+        );
         info!(
             "centroiding m/z tolerance: MS1 {}; MS2 {}",
             centroiding_config
                 .ms1
                 .mz_tol
-                .describe(&metadata.mz_converter, mz_range),
+                .describe(&mz_converter, mz_range),
             centroiding_config
                 .ms2
                 .mz_tol
-                .describe(&metadata.mz_converter, mz_range),
+                .describe(&mz_converter, mz_range),
         );
 
         // Read MS1 peaks (MS1-specific centroiding config)
         let st = std::time::Instant::now();
         let (ms1_peaks, ms1_summ) =
-            Self::read_ms1(&frame_reader, &metadata, centroiding_config.ms1);
+            Self::read_ms1(&frame_reader, &calibration, centroiding_config.ms1);
         let read_time_ms1 = st.elapsed();
 
         // Read MS2 peaks organized by window groups (MS2-specific config)
         let st = std::time::Instant::now();
         let (ms2_window_groups, ms2_summ) =
-            Self::read_ms2_window_groups(&frame_reader, &metadata, centroiding_config.ms2).unwrap();
+            Self::read_ms2_window_groups(&frame_reader, &calibration, centroiding_config.ms2)
+                .unwrap();
         let read_time_ms2 = st.elapsed();
 
         let out = Self {
@@ -371,8 +410,8 @@ impl IndexedTimstofPeaks {
     ///
     /// To use this outside of the indexing use []
     fn read_ms1(
-        frame_reader: &FrameReader,
-        metadata: &Metadata,
+        frame_reader: &TdfFrameReader,
+        calibration: &RunCalibration,
         centroiding_config: CentroidingConfig,
     ) -> (
         IndexedPeakGroup<MS1CycleIndex>,
@@ -380,41 +419,48 @@ impl IndexedTimstofPeaks {
     ) {
         IndexedPeakGroup::read_with_filter(
             frame_reader,
-            metadata,
-            |meta| matches!(meta.ms_level, timsrust::MSLevel::MS1),
+            calibration,
+            |meta| matches!(meta.ms_level(), MSLevel::MS1),
             centroiding_config,
         )
     }
 
     fn read_ms2_window_groups(
-        frame_reader: &FrameReader,
-        metadata: &Metadata,
+        frame_reader: &TdfFrameReader,
+        calibration: &RunCalibration,
         centroiding_config: CentroidingConfig,
     ) -> Result<(Ms2WindowGroups, IndexedPeakGroupBuildingStats), ()> {
-        let windows = frame_reader.dia_windows.as_ref().ok_or(())?;
+        let mut windows = std::collections::BTreeMap::new();
+        for index in frame_reader.iter_indices() {
+            let meta = frame_reader.get_info(index).map_err(|_| ())?;
+            if meta.ms_level() == MSLevel::MS2 {
+                windows
+                    .entry(meta.window_group())
+                    .or_insert_with(|| meta.quadrupole_settings().clone());
+            }
+        }
+        if windows.is_empty() {
+            return Err(());
+        }
         let mut out = Vec::with_capacity(windows.len());
         let mut out_stats: Option<IndexedPeakGroupBuildingStats> = None;
 
-        windows.iter().for_each(|quad_query| {
-            let filter = |meta: &FrameMeta| match (meta.ms_level, &meta.window_group) {
-                (timsrust::MSLevel::MS1, _) => false,
-                (timsrust::MSLevel::MS2, Some(wg)) => &wg.quadrupole_settings == quad_query,
-                (timsrust::MSLevel::MS2, None) => unreachable!(),
-                (timsrust::MSLevel::Unknown, _) => unreachable!(),
+        windows.values().for_each(|quad_query| {
+            let filter = |meta: &FrameInfo| match meta.ms_level() {
+                MSLevel::MS1 => false,
+                MSLevel::MS2 => meta.quadrupole_settings().as_ref() == quad_query.as_ref(),
+                MSLevel::Unknown => unreachable!(),
             };
             let (indexed_peaks, building_stats) = IndexedPeakGroup::read_with_filter(
                 frame_reader,
-                metadata,
+                calibration,
                 filter,
                 centroiding_config,
             );
 
-            let (_mz_calibrations, ims_calibrations) = metadata.get_calibration().unwrap();
+            let im_converter = calibration.im_converter_median().unwrap();
             let out_wg = QuadrupoleIsolationScheme::from_quad(quad_query, |x| {
-                ims_calibrations
-                    .get_by_id(1)
-                    .unwrap()
-                    .get_conversion_function()(x)
+                ConvertableDomain::convert(&im_converter, x)
             });
 
             if let Some(stats) = out_stats.as_mut() {
@@ -1400,18 +1446,21 @@ impl<T: RTIndex> IndexedPeakGroup<T> {
     /// TODO: consider if we want to assign the index to the "closest" MS1 frame
     ///      instead of the previous one.
     fn get_frame_indices_matching(
-        frame_reader: &FrameReader,
-        filter: impl Fn(&FrameMeta) -> bool + Sync,
+        frame_reader: &TdfFrameReader,
+        filter: impl Fn(&FrameInfo) -> bool + Sync,
     ) -> Vec<(usize, u32, u32)> {
         let mut out = Vec::new();
         let mut cycle_index = 0;
         let mut last_pushed_cycle = None;
 
-        for (i, meta) in frame_reader.frame_metas.iter().enumerate() {
-            if matches!(meta.ms_level, timsrust::MSLevel::MS1) {
+        let mut indices: Vec<_> = frame_reader.iter_indices().collect();
+        indices.sort_unstable();
+        for i in indices {
+            let meta = frame_reader.get_info(i).unwrap();
+            if matches!(meta.ms_level(), MSLevel::MS1) {
                 cycle_index += 1;
             }
-            if filter(meta) {
+            if filter(&meta) {
                 if let Some(last_cycle) = last_pushed_cycle
                     && last_cycle == cycle_index
                 {
@@ -1421,11 +1470,12 @@ impl<T: RTIndex> IndexedPeakGroup<T> {
                         this might point to an error when collecting the data
                         (missing ms1 frame)
                         ",
-                        last_cycle, meta.rt_in_seconds,
+                        last_cycle,
+                        meta.rt_in_seconds(),
                     );
                     continue;
                 }
-                let rt_ms = (meta.rt_in_seconds * 1000.0).round() as u32;
+                let rt_ms = (meta.rt_in_seconds() * 1000.0).round() as u32;
                 out.push((i, cycle_index, rt_ms));
                 last_pushed_cycle = Some(cycle_index);
             }
@@ -1465,9 +1515,9 @@ impl<T: RTIndex> IndexedPeakGroup<T> {
     /// Read frames from a FrameReader that match a given filter function.
     #[tracing::instrument(level = "debug", skip_all)]
     fn read_with_filter(
-        frame_reader: &FrameReader,
-        metadata: &Metadata,
-        filter: impl Fn(&FrameMeta) -> bool + Sync,
+        frame_reader: &TdfFrameReader,
+        calibration: &RunCalibration,
+        filter: impl Fn(&FrameInfo) -> bool + Sync,
         centroiding_config: CentroidingConfig,
     ) -> (Self, IndexedPeakGroupBuildingStats) {
         // I dont like this allocation but its not that big of a deal RN ...
@@ -1481,56 +1531,35 @@ impl<T: RTIndex> IndexedPeakGroup<T> {
         // let total_peaks_estimate = indices.len() * 20_000; // assuming max 20k peaks per frame post-centroid
         // let all_peaks = Arc::new(Mutex::new(Vec::with_capacity(total_peaks_estimate)));
 
-        let (mz_calibrations, ims_calibrations) = metadata.get_calibration().unwrap();
+        let mz_median = calibration.mz_converter_median().unwrap();
+        let im_median = calibration.im_converter_median().unwrap();
         let st = std::time::Instant::now();
         let _x = indices
             .par_iter()
             .with_min_len(200)
             .map_init(
-                || {
-                    (
-                        PeakCentroider::with_capacity(
-                            500_000,
-                            centroiding_config,
-                            metadata.mz_converter,
-                            metadata.im_converter,
-                        ),
-                        TdfBlob::with_capacity(500_000),
-                        timsrust::Frame {
-                            meta: Default::default(),
-                            peaks: FramePeaks::with_capacity(1000, 500_000),
-                        },
-                    )
-                },
-                |(centroider, blob_buffer, frame_buffer), idx_tpl| {
+                || PeakCentroider::with_capacity(500_000, centroiding_config, mz_median, im_median),
+                |centroider, idx_tpl| {
                     let (idx, cycle_index, _rt_ms) = *idx_tpl;
-                    match frame_reader.get_buffered(idx, frame_buffer, blob_buffer) {
-                        Ok(_) => {}
-                        Err(FrameReaderError::CorruptFrame) => {
-                            eprintln!("Corrupt frame found at index {}", idx);
-                            return Err(FrameReaderError::CorruptFrame);
+                    let frame = match frame_reader.get_frame(idx) {
+                        Ok(frame) => frame,
+                        Err(error) => {
+                            warn!(frame_index = idx, %error, "Skipping unreadable frame");
+                            return Err(());
                         }
-                        Err(e) => panic!("Unhandled Error reading frame at index {}: {:?}", idx, e),
                     };
+                    let frame_id = frame.info().index();
+                    let mz_converter = calibration.mz_converter(frame_id).unwrap();
+                    let im_converter = calibration.im_converter(frame_id).unwrap();
 
-                    let calibration = mz_calibrations
-                        .get_by_id(frame_buffer.meta.calibration.calibration_id)
-                        .unwrap();
-                    let mz_converter = Tof2MzConverter2::try_from_calibration(
-                        calibration,
-                        frame_buffer.meta.calibration.t1,
-                        frame_buffer.meta.calibration.t2,
-                    )
-                    .unwrap(); // TODO: make this an error instead of an option...
-                    let im_converter = ims_calibrations
-                        .get_by_id(frame_buffer.meta.calibration.calibration_id)
-                        .unwrap()
-                        .get_conversion_function();
-
-                    let (reason, peaks_iter) = centroider.centroid_frame(frame_buffer);
+                    let (reason, peaks_iter) = centroider.centroid_frame(&frame);
                     let tmp = peaks_iter.map(|peak| {
-                        let mz = mz_converter.convert(peak.tof_index as f64) as f32;
-                        let mobility_ook0 = f16::from_f64(im_converter(peak.scan_index as f64));
+                        let mz =
+                            ConvertableDomain::convert(&mz_converter, peak.tof_index as f64) as f32;
+                        let mobility_ook0 = f16::from_f64(ConvertableDomain::convert(
+                            &im_converter,
+                            peak.scan_index as f64,
+                        ));
                         let intensity = peak.corrected_intensity as f32;
                         IndexedPeak {
                             mz,

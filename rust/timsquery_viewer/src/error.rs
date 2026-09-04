@@ -1,5 +1,5 @@
 use thiserror::Error;
-use timsrust::readers::FrameReaderError;
+use timsrust::tdf::FrameReaderError;
 
 #[derive(Error, Debug)]
 pub enum ViewerError {
