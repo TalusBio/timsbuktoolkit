@@ -38,10 +38,12 @@ use super::results::FinalResult;
 ///   DIA-NN names its precursors with a string (`transition_group_id`). A
 ///   numeric id is written as its digits.
 ///
-/// `decoy_group_id` equals `library_id` on every row until a library format
-/// declares competition groups: no reader parses them today, so a row competes
-/// only with its own decoy variants and is its own group. The duplication is
-/// expected, not a bug.
+/// `decoy_group_id` equals `library_id` on a row whose library declared no
+/// competition group: the row competes only with its own mass-shift variants
+/// and is its own group. mzSpecLib can declare a group (`related spectrum
+/// keys`), and then a target and its shipped decoy share one `decoy_group_id`
+/// across two `library_id`s. Other formats declare nothing, so for them the
+/// duplication is expected, not a bug.
 pub const RESULTS_FORMAT_VERSION: u32 = 3;
 
 // ---------------------------------------------------------------------------
