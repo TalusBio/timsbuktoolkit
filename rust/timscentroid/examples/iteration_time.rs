@@ -81,9 +81,11 @@ fn main() {
         50_000,
         CentroidingConfig {
             max_peaks: MAX_PEAKS,
-            im_pct_tol: 3.0,
-            mz_ppm_tol: 5.0,
+            im_tol: timscentroid::centroiding::ImTolerance::Pct(3.0),
+            mz_tol: timscentroid::centroiding::MzTolerance::Ppm(5.0),
             early_stop_iterations: 200,
+            window_cap: None,
+            transitive: true,
         },
         metadata.mz_converter,
         metadata.im_converter,

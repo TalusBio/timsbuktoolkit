@@ -8,7 +8,6 @@ use tims_stage::{
 use timsquery::utils::TupleRange;
 use timsquery::{
     IndexedTimstofPeaks,
-    IndexingCentroidingConfig,
     load_index,
 };
 use timsseek::scoring::Scorer;
@@ -252,18 +251,32 @@ impl SearchRun<'_> {
         info!("Processing raw input: {}", raw_uri);
 
         let step = TimedStep::begin("Loading index");
-        let (index, index_source) = load_index(
-            raw_uri,
-            self.backend,
-            self.save_sidecar,
-            IndexingCentroidingConfig::default(),
-        )
-        .map_err(|e| errors::CliError::Io {
-            source: format!("load_index({raw_uri}): {e}"),
-            path: Some(raw_uri.to_string()),
-        })?;
+        let centroiding = self
+            .config
+            .indexing
+            .as_ref()
+            .map(|c| c.resolve())
+            .unwrap_or_default();
+        let (index, index_source) =
+            load_index(raw_uri, self.backend, self.save_sidecar, centroiding).map_err(|e| {
+                errors::CliError::Io {
+                    source: format!("load_index({raw_uri}): {e}"),
+                    path: Some(raw_uri.to_string()),
+                }
+            })?;
         // Cache reuse vs raw build is otherwise invisible to the user.
         let load_index_ms = step.finish_with(format_args!("{index_source}")).as_millis() as u64;
+        let ignore_mobility = self
+            .config
+            .indexing
+            .as_ref()
+            .is_some_and(|c| c.ignore_mobility);
+        let index = if ignore_mobility {
+            info!("indexing.ignore_mobility: mobility axis treated as absent for this search");
+            index.with_mobility_kind(timscentroid::MobilityKind::Absent)
+        } else {
+            index
+        };
         match index.mobility_kind() {
             timscentroid::MobilityKind::Ook0 => info!("Mobility axis: TIMS 1/K0 (searchable)"),
             timscentroid::MobilityKind::Absent => {

@@ -171,17 +171,29 @@ impl IndexedTimstofPeaks {
     ) -> (Self, IndexBuildingStats) {
         let frame_reader = file.load_frame_reader().unwrap();
         let metadata = file.load_metadata().unwrap();
+        let cycle_window = centroiding_config
+            .rt_range_seconds
+            .map(|range| Self::cycle_window_for_rt(&frame_reader, range));
 
         // Read MS1 peaks (MS1-specific centroiding config)
         let st = std::time::Instant::now();
-        let (ms1_peaks, ms1_summ) =
-            Self::read_ms1(&frame_reader, &metadata, centroiding_config.ms1);
+        let (ms1_peaks, ms1_summ) = Self::read_ms1(
+            &frame_reader,
+            &metadata,
+            centroiding_config.ms1,
+            cycle_window,
+        );
         let read_time_ms1 = st.elapsed();
 
         // Read MS2 peaks organized by window groups (MS2-specific config)
         let st = std::time::Instant::now();
-        let (ms2_window_groups, ms2_summ) =
-            Self::read_ms2_window_groups(&frame_reader, &metadata, centroiding_config.ms2).unwrap();
+        let (ms2_window_groups, ms2_summ) = Self::read_ms2_window_groups(
+            &frame_reader,
+            &metadata,
+            centroiding_config.ms2,
+            cycle_window,
+        )
+        .unwrap();
         let read_time_ms2 = st.elapsed();
 
         let out = Self {
@@ -357,10 +369,37 @@ impl IndexedTimstofPeaks {
     /// Read MS1 frames and return an IndexedPeakGroup along with building stats.
     ///
     /// To use this outside of the indexing use []
+    /// The inclusive range of raw cycle indices whose MS1 frame falls in
+    /// `rt_range` (seconds). Cycle indices count MS1 frames the same way
+    /// [`IndexedPeakGroup::get_frame_indices_matching`] does, so the two agree.
+    ///
+    /// Panics when no MS1 frame is in range: a slice that selects nothing is a
+    /// mis-typed benchmark range, not a state to search.
+    fn cycle_window_for_rt(frame_reader: &FrameReader, rt_range: (f64, f64)) -> (u32, u32) {
+        let (lo_s, hi_s) = rt_range;
+        let mut cycle_index: u32 = 0;
+        let mut lo: Option<u32> = None;
+        let mut hi: Option<u32> = None;
+        for meta in &frame_reader.frame_metas {
+            if matches!(meta.ms_level, timsrust::MSLevel::MS1) {
+                cycle_index += 1;
+                if meta.rt_in_seconds >= lo_s && meta.rt_in_seconds <= hi_s {
+                    lo.get_or_insert(cycle_index);
+                    hi = Some(cycle_index);
+                }
+            }
+        }
+        match (lo, hi) {
+            (Some(lo), Some(hi)) => (lo, hi),
+            _ => panic!("rt_range_seconds {lo_s}..{hi_s} selects no MS1 frame"),
+        }
+    }
+
     fn read_ms1(
         frame_reader: &FrameReader,
         metadata: &Metadata,
         centroiding_config: CentroidingConfig,
+        cycle_window: Option<(u32, u32)>,
     ) -> (
         IndexedPeakGroup<MS1CycleIndex>,
         IndexedPeakGroupBuildingStats,
@@ -370,6 +409,7 @@ impl IndexedTimstofPeaks {
             metadata,
             |meta| matches!(meta.ms_level, timsrust::MSLevel::MS1),
             centroiding_config,
+            cycle_window,
         )
     }
 
@@ -377,6 +417,7 @@ impl IndexedTimstofPeaks {
         frame_reader: &FrameReader,
         metadata: &Metadata,
         centroiding_config: CentroidingConfig,
+        cycle_window: Option<(u32, u32)>,
     ) -> Result<(Ms2WindowGroups, IndexedPeakGroupBuildingStats), ()> {
         let windows = frame_reader.dia_windows.as_ref().ok_or(())?;
         let mut out = Vec::with_capacity(windows.len());
@@ -394,6 +435,7 @@ impl IndexedTimstofPeaks {
                 metadata,
                 filter,
                 centroiding_config,
+                cycle_window,
             );
 
             let (_mz_calibrations, ims_calibrations) = metadata.get_calibration().unwrap();
@@ -1386,17 +1428,29 @@ impl<T: RTIndex> IndexedPeakGroup<T> {
     /// the cycle indices would be [  0,   1,   1,   1,   2,   2]
     /// TODO: consider if we want to assign the index to the "closest" MS1 frame
     ///      instead of the previous one.
+    /// `(frame index, cycle index, rt ms)` for every frame passing `filter`.
+    /// With a `cycle_window`, only cycles inside it are kept and cycle indices
+    /// are renumbered so the first one in the window is 0, which keeps the
+    /// cycle-to-RT mapping dense and the same across MS1 and every window
+    /// group.
     fn get_frame_indices_matching(
         frame_reader: &FrameReader,
         filter: impl Fn(&FrameMeta) -> bool + Sync,
+        cycle_window: Option<(u32, u32)>,
     ) -> Vec<(usize, u32, u32)> {
         let mut out = Vec::new();
         let mut cycle_index = 0;
         let mut last_pushed_cycle = None;
+        let base = cycle_window.map(|(lo, _)| lo).unwrap_or(0);
 
         for (i, meta) in frame_reader.frame_metas.iter().enumerate() {
             if matches!(meta.ms_level, timsrust::MSLevel::MS1) {
                 cycle_index += 1;
+            }
+            if let Some((lo, hi)) = cycle_window
+                && (cycle_index < lo || cycle_index > hi)
+            {
+                continue;
             }
             if filter(meta) {
                 if let Some(last_cycle) = last_pushed_cycle
@@ -1413,7 +1467,7 @@ impl<T: RTIndex> IndexedPeakGroup<T> {
                     continue;
                 }
                 let rt_ms = (meta.rt_in_seconds * 1000.0).round() as u32;
-                out.push((i, cycle_index, rt_ms));
+                out.push((i, cycle_index - base, rt_ms));
                 last_pushed_cycle = Some(cycle_index);
             }
         }
@@ -1456,9 +1510,10 @@ impl<T: RTIndex> IndexedPeakGroup<T> {
         metadata: &Metadata,
         filter: impl Fn(&FrameMeta) -> bool + Sync,
         centroiding_config: CentroidingConfig,
+        cycle_window: Option<(u32, u32)>,
     ) -> (Self, IndexedPeakGroupBuildingStats) {
         // I dont like this allocation but its not that big of a deal RN ...
-        let indices = Self::get_frame_indices_matching(frame_reader, filter);
+        let indices = Self::get_frame_indices_matching(frame_reader, filter, cycle_window);
 
         // I am still not sure what I prefer here ...
         // On the greater schme of things allocating a vec for every frame is not thaaaat bad

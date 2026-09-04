@@ -80,7 +80,9 @@ pub fn load_raw(
         return Ok(RawRead {
             index,
             reader_name: reader.name(),
-            caches_to_idx: reader.caches_to_idx(),
+            // A sliced index describes part of the run; caching it as the
+            // run's `.idx` would silently shadow the full build later.
+            caches_to_idx: reader.caches_to_idx() && cfg.rt_range_seconds.is_none(),
         });
     }
 
@@ -97,7 +99,7 @@ pub fn load_raw(
     Ok(RawRead {
         index,
         reader_name: reader.name(),
-        caches_to_idx: reader.caches_to_idx(),
+        caches_to_idx: reader.caches_to_idx() && cfg.rt_range_seconds.is_none(),
     })
 }
 

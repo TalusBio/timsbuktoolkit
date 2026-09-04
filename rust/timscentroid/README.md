@@ -2,6 +2,9 @@
 
 Efficient indexing and lazy loading for timsTOF mass spectrometry data.
 
+[DATA_MODEL.md](DATA_MODEL.md) describes the raw frame layout, the TOF and scan
+axes and their units, what the centroider does, and what the index keeps.
+
 ## Quick Start
 
 ### Basic Usage (Local Files)
@@ -183,15 +186,27 @@ Smaller row groups = more granular queries but more overhead.
 
 ```rust
 use timscentroid::{CentroidingConfig, IndexingCentroidingConfig};
+use timscentroid::centroiding::{ImTolerance, MzTolerance, WindowCap};
 
 // MS1 and MS2 are centroided independently. Override per level:
 let config = IndexingCentroidingConfig {
-    ms1: CentroidingConfig { mz_ppm_tol: 0.5, im_pct_tol: 2.0, ..Default::default() },
+    ms1: CentroidingConfig {
+        mz_tol: MzTolerance::Ppm(0.5),
+        im_tol: ImTolerance::Pct(2.0),
+        ..Default::default()
+    },
     ms2: CentroidingConfig {
-        mz_ppm_tol: 1.0,
-        im_pct_tol: 3.0,
+        // One raw TOF bin either side: merges an ion that two scans
+        // quantized to neighboring bins. Sub-bin ppm values cannot.
+        mz_tol: MzTolerance::Bins(1),
+        im_tol: ImTolerance::Pct(3.0),
+        // Bound each cluster to the parent's tolerance box; see the
+        // `transitive` docs for what chaining does with a one-bin tolerance.
+        transitive: false,
         max_peaks: 50_000,
         early_stop_iterations: 0, // disable early-stop
+        // Keep the 500 most intense centroids per 50 Da per frame (the default).
+        window_cap: Some(WindowCap { max_peaks: 500, window_da: 50.0 }),
     },
 };
 

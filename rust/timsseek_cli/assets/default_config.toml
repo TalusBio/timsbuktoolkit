@@ -130,6 +130,55 @@ calibration_query_rt_window_minutes = 0.083333336   # 5 seconds (5 / 60)
 ## the model, made by `model` above.
 
 
+## Centroiding overrides for the index built from a raw file (all optional).
+## Each MS level starts from the library default and takes only the fields
+## named here. Two caps bound stored centroids per frame, and so index memory
+## at 16 bytes per peak:
+##   max_peaks   -- whole-frame cap; the most intense centroids anywhere win,
+##                  so a dense m/z region can starve a sparse one.
+##   window_cap  -- per-window cap; the `max_peaks` most intense centroids in
+##                  each `window_da` slice survive, so coverage is even across
+##                  the spectrum and the bound is `windows * max_peaks`.
+## A cached `.idx` was built with whatever config it records and ignores this
+## section.
+## Tolerances take one of two units each. Raw peaks are line spectra with one
+## integer TOF index per ion per scan, and a TOF bin is 2.4-7 ppm wide, so an
+## m/z tolerance is most naturally a bin count. `{ Bins = 0 }` merges identical
+## indices only and is the default; `{ Bins = 1 }` also merges the same ion when
+## two scans quantized it to neighboring bins, which measured worse for both
+## IDs and isotope-envelope fidelity on the runs tried so far. A `{ Ppm = x }`
+## value is converted per peak and rounded, so anything under half a bin is
+## `Bins = 0` spelled expensively. Mobility is a true profile across scans;
+## `{ Pct = 3.0 }` of 1/K0 or `{ Scans = 20 }`.
+## `rt_range_seconds` indexes only that slice of the run, for fast benchmark
+## iteration; a sliced index is never cached as the run's `.idx`.
+# [indexing]
+# rt_range_seconds = [600.0, 720.0]
+## `ignore_mobility` treats the run as having no mobility axis: no mobility
+## filter in any phase and no mobility score features. An ablation knob.
+# ignore_mobility = false
+## Values shown are the defaults. MS1 has no window cap by default (capping it
+## cost identifications); MS2 does, and it is what bounds index memory.
+# [indexing.ms1]
+# max_peaks = 20000
+# mz_tol = { Bins = 0 }
+# im_tol = { Pct = 2.0 }
+# early_stop_iterations = 200
+# [indexing.ms2]
+# max_peaks = 50000
+# mz_tol = { Bins = 0 }
+# im_tol = { Pct = 3.0 }
+# early_stop_iterations = 0
+# window_cap = { max_peaks = 500, window_da = 50.0 }
+## Measured on one run and worth a second sample before becoming defaults:
+## `transitive = false` with `im_tol = { Pct = 1.0 }` on both levels gave
+## +3-4 % identifications over the defaults above.
+## Whether a peak already absorbed into a cluster may recruit its own
+## neighbors (transitive growth). `false` bounds a cluster to the parent's
+## tolerance box, which matters once `mz_tol` reaches a whole bin.
+# transitive = true
+
+
 ## Staging controls for S3/remote raw inputs (all optional).
 ## Tempdirs are created under `tempdir_root` (system temp when unset);
 ## remote prefixes are capped at `max_prefix_keys` keys; `save_sidecar`

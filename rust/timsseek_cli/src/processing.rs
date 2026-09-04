@@ -744,6 +744,70 @@ fn count_shared_fragments(a: &[i64], b: &[i64]) -> usize {
 
 const MIN_SHARED_FRAGMENTS: usize = 5;
 
+/// Clamp a derived m/z window to the first-pass search window.
+///
+/// The calibrants were all found inside the first-pass window, so a derived
+/// window wider than it cannot describe them; it describes contamination of
+/// the per-calibrant offset (an intensity-weighted mean over a 50 ppm query
+/// box, in a crowded MS1 frame). On a 21-min HeLa diaPASEF run the unclamped
+/// derivation gave 60 ppm and Phase 3 at 10 ppm found 34% more peptides,
+/// four fifths of them verified by their isotope envelopes. Returns the bound
+/// applied when clamping happened, `None` when the window was already inside.
+fn clamp_mz_window_to_first_pass(
+    mz_ppm: &mut (f64, f64),
+    first_pass: &Tolerance,
+) -> Option<(f64, f64)> {
+    let MzTolerance::Ppm((lo, hi)) = first_pass.ms else {
+        return None;
+    };
+    if mz_ppm.0 <= lo && mz_ppm.1 <= hi {
+        return None;
+    }
+    *mz_ppm = (mz_ppm.0.min(lo), mz_ppm.1.min(hi));
+    Some((lo, hi))
+}
+
+#[cfg(test)]
+mod clamp_tests {
+    use super::*;
+
+    fn first_pass(lo: f64, hi: f64) -> Tolerance {
+        Tolerance {
+            ms: MzTolerance::Ppm((lo, hi)),
+            rt: RtTolerance::Unrestricted,
+            mobility: MobilityTolerance::Unrestricted,
+            quad: QuadTolerance::Absolute((0.1, 0.1)),
+        }
+    }
+
+    #[test]
+    fn wider_than_first_pass_is_clamped_and_reported() {
+        let mut w = (59.1, 61.3);
+        assert_eq!(
+            clamp_mz_window_to_first_pass(&mut w, &first_pass(15.0, 15.0)),
+            Some((15.0, 15.0))
+        );
+        assert_eq!(w, (15.0, 15.0));
+    }
+
+    #[test]
+    fn one_side_over_clamps_only_that_side() {
+        let mut w = (8.0, 20.0);
+        assert!(clamp_mz_window_to_first_pass(&mut w, &first_pass(15.0, 15.0)).is_some());
+        assert_eq!(w, (8.0, 15.0));
+    }
+
+    #[test]
+    fn inside_first_pass_is_untouched() {
+        let mut w = (8.9, 11.1);
+        assert_eq!(
+            clamp_mz_window_to_first_pass(&mut w, &first_pass(15.0, 15.0)),
+            None
+        );
+        assert_eq!(w, (8.9, 11.1));
+    }
+}
+
 fn calibrate_from_phase1<I: ScorerQueriable>(
     candidates: Vec<CalibrantCandidate>,
     phase1_lib: &ReferenceLibrary,
@@ -934,7 +998,17 @@ fn calibrate_from_phase1<I: ScorerQueriable>(
     derivation.sigma.rt = config.rt_sigma_factor;
     derivation.floors.rt_minutes = config.min_rt_tolerance_minutes;
 
-    let windows = errors.derive_windows(&derivation);
+    let mut windows = errors.derive_windows(&derivation);
+    if let Some((lo, hi)) =
+        clamp_mz_window_to_first_pass(&mut windows.mz_ppm, &pipeline.broad_tolerance)
+    {
+        warn!(
+            "Derived m/z window exceeded the first-pass window ({lo:.1}, {hi:.1}) ppm and was \
+             clamped to it. Every calibrant was found inside that window, so a residual MAD of \
+             {:.1} ppm is contamination of the box-mean offset, not the instrument.",
+            errors.mz_ppm.mad
+        );
+    }
     info!(
         "RT residuals: MAD={:.1}s, n={}",
         errors.rt_seconds.mad, errors.rt_seconds.n

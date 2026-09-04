@@ -2,7 +2,16 @@ use serde::{
     Deserialize,
     Serialize,
 };
-use timsquery::Tolerance;
+use timscentroid::centroiding::{
+    ImTolerance,
+    MzTolerance,
+    WindowCap,
+};
+use timsquery::{
+    CentroidingConfig,
+    IndexingCentroidingConfig,
+    Tolerance,
+};
 use timsseek::ml::RescoreModel;
 use timsseek::scoring::CalibrationConfig;
 use timsseek::{
@@ -37,6 +46,10 @@ pub struct Config {
     pub library: Option<LibraryConfig>,
     #[serde(default)]
     pub sequences: Option<SequencesConfig>,
+    /// Centroiding overrides for the index built from a raw file. Absent means
+    /// the library defaults; a cached `.idx` ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexing: Option<IndexingConfig>,
     /// What produced the library a run predicted, as msspeculator reports it:
     /// the model and the digests of what went into it.
     ///
@@ -63,6 +76,95 @@ pub struct Config {
 pub struct BuildConfig {
     #[serde(default)]
     pub library: Option<LibraryConfig>,
+}
+
+/// Per-MS-level centroiding overrides, applied on top of
+/// [`IndexingCentroidingConfig::default`].
+///
+/// Every field is optional so a file can set one number, typically the MS2
+/// `max_peaks` that bounds index memory, without spelling the rest. Only read
+/// when the index is built from raw; a cached `.idx` carries the config it was
+/// built with.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct IndexingConfig {
+    #[serde(default)]
+    pub ms1: CentroidingOverride,
+    #[serde(default)]
+    pub ms2: CentroidingOverride,
+    /// Index only this retention-time slice, `[start, end]` in seconds. A
+    /// benchmarking knob: a two-minute slice mid-gradient runs in seconds. The
+    /// sliced index is never cached as the run's `.idx`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub rt_range_seconds: Option<[f64; 2]>,
+    /// Treat the run as having no mobility axis: no mobility filter in any
+    /// query, calibration's mobility window unused, mobility score features
+    /// neutralized. An ablation knob. Library 1/K0 has no theoretical anchor
+    /// the way m/z does, so a mobility window can fit itself to whatever the
+    /// centroiding produced; switching it off isolates the m/z effect.
+    #[serde(default)]
+    pub ignore_mobility: bool,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CentroidingOverride {
+    #[serde(default)]
+    pub max_peaks: Option<usize>,
+    /// `{ Ppm = 1.0 }` or `{ Bins = 1 }`. A TOF bin is 2.4 to 7 ppm wide, so
+    /// a ppm value under half a bin merges only identical TOF indices.
+    #[serde(default)]
+    pub mz_tol: Option<MzTolerance>,
+    /// `{ Pct = 3.0 }` or `{ Scans = 20 }`.
+    #[serde(default)]
+    pub im_tol: Option<ImTolerance>,
+    #[serde(default)]
+    pub early_stop_iterations: Option<u32>,
+    /// `{ max_peaks = N, window_da = W }`: keep the N most intense centroids
+    /// per W Da per frame. Bounds stored peaks per frame at `windows * N`
+    /// wherever the signal sits, where `max_peaks` alone ranks the whole frame.
+    #[serde(default)]
+    pub window_cap: Option<WindowCap>,
+    /// Whether an absorbed peak may recruit its own neighbors into its
+    /// cluster. `false` bounds a cluster's radius to the tolerance.
+    #[serde(default)]
+    pub transitive: Option<bool>,
+}
+
+impl CentroidingOverride {
+    fn apply(&self, mut base: CentroidingConfig) -> CentroidingConfig {
+        if let Some(v) = self.window_cap {
+            base.window_cap = Some(v);
+        }
+        if let Some(v) = self.transitive {
+            base.transitive = v;
+        }
+        if let Some(v) = self.max_peaks {
+            base.max_peaks = v;
+        }
+        if let Some(v) = self.mz_tol {
+            base.mz_tol = v;
+        }
+        if let Some(v) = self.im_tol {
+            base.im_tol = v;
+        }
+        if let Some(v) = self.early_stop_iterations {
+            base.early_stop_iterations = v;
+        }
+        base
+    }
+}
+
+impl IndexingConfig {
+    /// The defaults with this section's overrides applied.
+    pub fn resolve(&self) -> IndexingCentroidingConfig {
+        let base = IndexingCentroidingConfig::default();
+        IndexingCentroidingConfig {
+            ms1: self.ms1.apply(base.ms1),
+            ms2: self.ms2.apply(base.ms2),
+            rt_range_seconds: self.rt_range_seconds.map(|[a, b]| (a, b)),
+        }
+    }
 }
 
 /// How to predict a library.
@@ -263,6 +365,81 @@ rt = "Unrestricted"
     fn parses_minimal_toml() {
         let c: Config = toml::from_str(MINIMAL_TOML).unwrap();
         assert_eq!(c.analysis.chunk_size, 20000);
+    }
+
+    #[test]
+    fn indexing_override_touches_only_the_named_field() {
+        let toml = format!("{MINIMAL_TOML}\n[indexing.ms2]\nmax_peaks = 20000\n");
+        let cfg: Config = toml::from_str(&toml).unwrap();
+        let resolved = cfg.indexing.as_ref().unwrap().resolve();
+        let default = IndexingCentroidingConfig::default();
+        assert_eq!(resolved.ms2.max_peaks, 20_000);
+        assert_eq!(resolved.ms2.mz_tol, default.ms2.mz_tol);
+        assert_eq!(
+            resolved.ms2.early_stop_iterations,
+            default.ms2.early_stop_iterations
+        );
+        assert_eq!(resolved.ms1.max_peaks, default.ms1.max_peaks);
+        assert_eq!(resolved.ms1.mz_tol, default.ms1.mz_tol);
+    }
+
+    #[test]
+    fn indexing_tolerances_parse_as_tagged_enums() {
+        let toml = format!(
+            "{MINIMAL_TOML}\n[indexing.ms2]\nmz_tol = {{ Bins = 1 }}\nim_tol = {{ Scans = 20 }}\n"
+        );
+        let cfg: Config = toml::from_str(&toml).unwrap();
+        let resolved = cfg.indexing.as_ref().unwrap().resolve();
+        assert_eq!(resolved.ms2.mz_tol, MzTolerance::Bins(1));
+        assert_eq!(resolved.ms2.im_tol, ImTolerance::Scans(20));
+        assert_eq!(
+            resolved.ms1.mz_tol,
+            IndexingCentroidingConfig::default().ms1.mz_tol
+        );
+    }
+
+    #[test]
+    fn indexing_window_cap_parses_inline_table() {
+        let toml = format!(
+            "{MINIMAL_TOML}\n[indexing.ms2]\nwindow_cap = {{ max_peaks = 1000, window_da = 100.0 }}\n"
+        );
+        let cfg: Config = toml::from_str(&toml).unwrap();
+        let resolved = cfg.indexing.as_ref().unwrap().resolve();
+        assert_eq!(
+            resolved.ms2.window_cap,
+            Some(WindowCap {
+                max_peaks: 1000,
+                window_da: 100.0
+            })
+        );
+        assert_eq!(resolved.ms1.window_cap, None);
+        assert_eq!(
+            resolved.ms2.max_peaks,
+            IndexingCentroidingConfig::default().ms2.max_peaks
+        );
+    }
+
+    #[test]
+    fn indexing_rt_slice_parses_and_defaults_to_none() {
+        let toml = format!("{MINIMAL_TOML}\n[indexing]\nrt_range_seconds = [600.0, 720.0]\n");
+        let cfg: Config = toml::from_str(&toml).unwrap();
+        let resolved = cfg.indexing.as_ref().unwrap().resolve();
+        assert_eq!(resolved.rt_range_seconds, Some((600.0, 720.0)));
+        assert_eq!(IndexingConfig::default().resolve().rt_range_seconds, None);
+    }
+
+    #[test]
+    fn indexing_ignore_mobility_defaults_off() {
+        let toml = format!("{MINIMAL_TOML}\n[indexing]\nignore_mobility = true\n");
+        let cfg: Config = toml::from_str(&toml).unwrap();
+        assert!(cfg.indexing.as_ref().unwrap().ignore_mobility);
+        assert!(!IndexingConfig::default().ignore_mobility);
+    }
+
+    #[test]
+    fn indexing_rejects_unknown_field() {
+        let toml = format!("{MINIMAL_TOML}\n[indexing.ms2]\nmax_peak = 20000\n");
+        assert!(toml::from_str::<Config>(&toml).is_err());
     }
 
     #[test]
