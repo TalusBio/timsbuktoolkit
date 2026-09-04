@@ -92,6 +92,26 @@ jobs:
       - name: PSI-MS vocabulary snapshot is current
         run: python3 scripts/gen_psims_origin_type.py --check
 
+  # `rustfmt.toml` uses nightly-only options, so a stable `cargo fmt` reports
+  # hundreds of spurious diffs and a nightly one is the only check that means
+  # anything. `task fmt` is the local spelling; this is the same thing in CI.
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Setup nightly rustfmt
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly
+          components: rustfmt
+          cache: false
+          rustflags: ''
+      - name: rustfmt
+        run: cargo +nightly fmt --all -- --check
+      - uses: astral-sh/setup-uv@v6
+      - name: ruff format
+        run: uv run ruff format --check
+
   # `deny.toml` existed for a long time with nothing invoking it, so dependency
   # licensing drifted red unnoticed. This is the gate.
   #
