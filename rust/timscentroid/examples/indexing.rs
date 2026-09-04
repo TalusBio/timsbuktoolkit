@@ -25,9 +25,10 @@ fn main() {
 
     let centroiding_config = CentroidingConfig {
         max_peaks: 20_000,
-        mz_ppm_tol: 5.0,
+        mz_tol: timscentroid::centroiding::MzTolerance::Bins(0),
         im_pct_tol: 3.0,
         early_stop_iterations: 200,
+        window_cap: None,
     };
     println!("Indexing with config: {:#?}", centroiding_config);
     let (index, index_stats) = IndexedTimstofPeaks::from_timstof_file(

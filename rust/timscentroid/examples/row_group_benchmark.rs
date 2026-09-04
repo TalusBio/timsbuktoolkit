@@ -52,9 +52,10 @@ fn main() {
     let file = TimsTofPath::new(DATA_FILE).expect("Failed to open TimsTOF file");
     let config = CentroidingConfig {
         max_peaks: 20_000,
-        mz_ppm_tol: 5.0,
+        mz_tol: timscentroid::centroiding::MzTolerance::Bins(0),
         im_pct_tol: 3.0,
         early_stop_iterations: 200,
+        window_cap: None,
     };
 
     let start = std::time::Instant::now();

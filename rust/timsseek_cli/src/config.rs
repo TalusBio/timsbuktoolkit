@@ -2,7 +2,15 @@ use serde::{
     Deserialize,
     Serialize,
 };
-use timsquery::Tolerance;
+use timscentroid::centroiding::{
+    MzTolerance,
+    WindowCap,
+};
+use timsquery::{
+    CentroidingConfig,
+    IndexingCentroidingConfig,
+    Tolerance,
+};
 use timsseek::ml::RescoreModel;
 use timsseek::scoring::CalibrationConfig;
 use timsseek::{
@@ -37,6 +45,10 @@ pub struct Config {
     pub library: Option<LibraryConfig>,
     #[serde(default)]
     pub sequences: Option<SequencesConfig>,
+    /// Centroiding overrides for an index built from raw. A cached `.idx`
+    /// ignores it.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub indexing: Option<IndexingConfig>,
     /// What produced the library a run predicted, as msspeculator reports it:
     /// the model and the digests of what went into it.
     ///
@@ -63,6 +75,63 @@ pub struct Config {
 pub struct BuildConfig {
     #[serde(default)]
     pub library: Option<LibraryConfig>,
+}
+
+/// Per-MS-level centroiding overrides on top of
+/// [`IndexingCentroidingConfig::default`]. Every field is optional.
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct IndexingConfig {
+    #[serde(default)]
+    pub ms1: CentroidingOverride,
+    #[serde(default)]
+    pub ms2: CentroidingOverride,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Default, PartialEq)]
+#[serde(deny_unknown_fields)]
+pub struct CentroidingOverride {
+    #[serde(default)]
+    pub max_peaks: Option<usize>,
+    /// `{ Bins = n }` or `{ Ppm = x }`.
+    #[serde(default)]
+    pub mz_tol: Option<MzTolerance>,
+    #[serde(default)]
+    pub im_pct_tol: Option<f64>,
+    #[serde(default)]
+    pub early_stop_iterations: Option<u32>,
+    /// `{ max_peaks = N, window_da = W }`. `Some` replaces the default cap.
+    #[serde(default)]
+    pub window_cap: Option<WindowCap>,
+}
+
+impl CentroidingOverride {
+    fn apply(&self, base: CentroidingConfig) -> CentroidingConfig {
+        let Self {
+            max_peaks,
+            mz_tol,
+            im_pct_tol,
+            early_stop_iterations,
+            window_cap,
+        } = self;
+        CentroidingConfig {
+            max_peaks: max_peaks.unwrap_or(base.max_peaks),
+            mz_tol: mz_tol.unwrap_or(base.mz_tol),
+            im_pct_tol: im_pct_tol.unwrap_or(base.im_pct_tol),
+            early_stop_iterations: early_stop_iterations.unwrap_or(base.early_stop_iterations),
+            window_cap: window_cap.or(base.window_cap),
+        }
+    }
+}
+
+impl IndexingConfig {
+    pub fn resolve(&self) -> IndexingCentroidingConfig {
+        let base = IndexingCentroidingConfig::default();
+        IndexingCentroidingConfig {
+            ms1: self.ms1.apply(base.ms1),
+            ms2: self.ms2.apply(base.ms2),
+        }
+    }
 }
 
 /// How to predict a library.
@@ -263,6 +332,46 @@ rt = "Unrestricted"
     fn parses_minimal_toml() {
         let c: Config = toml::from_str(MINIMAL_TOML).unwrap();
         assert_eq!(c.analysis.chunk_size, 20000);
+    }
+
+    #[test]
+    fn indexing_override_touches_only_the_named_field() {
+        let toml = format!(
+            "{MINIMAL_TOML}\n[indexing.ms2]\nwindow_cap = {{ max_peaks = 1000, window_da = 100.0 }}\n"
+        );
+        let cfg: Config = toml::from_str(&toml).unwrap();
+        let resolved = cfg.indexing.as_ref().unwrap().resolve();
+        let default = IndexingCentroidingConfig::default();
+        assert_eq!(
+            resolved.ms2.window_cap,
+            Some(WindowCap {
+                max_peaks: 1000,
+                window_da: 100.0
+            })
+        );
+        assert_eq!(resolved.ms2.max_peaks, default.ms2.max_peaks);
+        assert_eq!(resolved.ms1.window_cap, default.ms1.window_cap);
+        assert_eq!(resolved.ms1.im_pct_tol, default.ms1.im_pct_tol);
+    }
+
+    #[test]
+    fn indexing_mz_tol_takes_either_unit() {
+        let toml = format!(
+            "{MINIMAL_TOML}\n[indexing.ms1]\nmz_tol = {{ Ppm = 5.0 }}\n[indexing.ms2]\nmz_tol = {{ Bins = 1 }}\n"
+        );
+        let resolved = toml::from_str::<Config>(&toml)
+            .unwrap()
+            .indexing
+            .unwrap()
+            .resolve();
+        assert_eq!(resolved.ms1.mz_tol, MzTolerance::Ppm(5.0));
+        assert_eq!(resolved.ms2.mz_tol, MzTolerance::Bins(1));
+    }
+
+    #[test]
+    fn indexing_rejects_unknown_field() {
+        let toml = format!("{MINIMAL_TOML}\n[indexing.ms2]\nmax_peak = 20000\n");
+        assert!(toml::from_str::<Config>(&toml).is_err());
     }
 
     #[test]

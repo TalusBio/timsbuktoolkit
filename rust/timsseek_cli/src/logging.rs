@@ -91,10 +91,12 @@ pub(crate) fn init_tracing(args: &SearchArgs, resolved: &ResolvedInputs) -> Trac
             let fl = fmt::layer()
                 .with_writer(std::sync::Mutex::new(log_file))
                 .with_filter(build_env_filter());
+            // Warnings, plus the index build's one-line tolerance report: a
+            // build parameter the user should see next to "Loading index".
             let sl = fmt::layer()
                 .with_writer(std::io::stderr)
                 .without_time()
-                .with_filter(tracing_subscriber::filter::LevelFilter::WARN);
+                .with_filter(EnvFilter::new("warn,timscentroid::indexing=info"));
             (Some(fl), Some(sl), None)
         } else {
             let sl = fmt::layer()

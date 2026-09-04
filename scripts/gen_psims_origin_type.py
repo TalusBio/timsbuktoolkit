@@ -37,6 +37,7 @@ from __future__ import annotations
 import argparse
 import pathlib
 import re
+import subprocess
 import sys
 import urllib.request
 
@@ -248,6 +249,16 @@ def main() -> None:
         sys.exit(f"MS:{ROOT} is absent from psi-ms.obo; the root has been renamed")
     OUT_PATH.write_text(render(version, names, parents))
     print(f"wrote {OUT_PATH} from psi-ms data-version {version}")
+    # Format as `task fmt` would, so a regeneration diffs as the version line
+    # and nothing else. Nightly, because rustfmt.toml uses nightly-only options.
+    try:
+        subprocess.run(
+            ["rustfmt", "+nightly", "--edition", "2024", str(OUT_PATH)], check=True
+        )
+    except (OSError, subprocess.CalledProcessError) as e:
+        sys.exit(
+            f"wrote the file but could not run nightly rustfmt on it ({e}); run `task fmt`"
+        )
 
 
 if __name__ == "__main__":

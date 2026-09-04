@@ -14,7 +14,7 @@
 /// `--check` compares this against the published ontology, so most
 /// releases will report a difference that leaves the table unchanged.
 /// Regenerating then edits only this line.
-pub const DATA_VERSION: &str = "4.1.259";
+pub const DATA_VERSION: &str = "4.1.260";
 
 /// One `spectrum origin type` term, and what it implies for a reader.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

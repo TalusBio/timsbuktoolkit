@@ -8,7 +8,6 @@ use tims_stage::{
 use timsquery::utils::TupleRange;
 use timsquery::{
     IndexedTimstofPeaks,
-    IndexingCentroidingConfig,
     load_index,
 };
 use timsseek::scoring::Scorer;
@@ -256,7 +255,11 @@ impl SearchRun<'_> {
             raw_uri,
             self.backend,
             self.save_sidecar,
-            IndexingCentroidingConfig::default(),
+            self.config
+                .indexing
+                .as_ref()
+                .map(|c| c.resolve())
+                .unwrap_or_default(),
         )
         .map_err(|e| errors::CliError::Io {
             source: format!("load_index({raw_uri}): {e}"),
