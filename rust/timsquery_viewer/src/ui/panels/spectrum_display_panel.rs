@@ -1,0 +1,110 @@
+use eframe::egui;
+use egui_plot::{
+    Line,
+    Plot,
+    PlotPoint,
+    PlotPoints,
+    Text,
+};
+use timsquery::ion::IonAnnot;
+use timsseek::ExpectedIntensities;
+
+use crate::plot_renderer::MS2Spectrum;
+
+/// Panel for displaying MS2 spectrum
+pub struct SpectrumPanel;
+
+impl SpectrumPanel {
+    pub fn new() -> Self {
+        Self
+    }
+
+    pub fn title(&self) -> &str {
+        "MS2"
+    }
+
+    pub fn render(
+        &mut self,
+        ui: &mut egui::Ui,
+        ms2_spectrum: Option<&MS2Spectrum>,
+        expected_intensities: Option<&ExpectedIntensities<IonAnnot>>,
+    ) {
+        if let Some(spec) = ms2_spectrum {
+            let expected_intensities = expected_intensities
+                .expect("If a spectrum is present we should also have expected intensities.");
+            ui.label(format!("RT: {:.2} seconds", spec.rt_seconds));
+            ui.separator();
+
+            // Calculate label offset based on max intensity
+            let max_intensity = spec.intensities.iter().cloned().fold(0.0f32, f32::max);
+            let norm_factor = max_intensity.max(1.0);
+            let label_offset = 0.03f64; // 3% of max intensity
+
+            let expected_norm_factor = expected_intensities
+                .fragment_intensities
+                .iter()
+                .map(|(_, v)| *v)
+                .max_by(|a, b| a.partial_cmp(b).unwrap())
+                .unwrap_or(0.1);
+
+            Plot::new("ms2_spectrum")
+                .height(ui.available_height())
+                .show_axes([true, true])
+                .allow_zoom(true)
+                .allow_drag(true)
+                .x_axis_label("m/z")
+                .y_axis_label("Intensity")
+                .include_y(0.0)
+                .show(ui, |plot_ui| {
+                    // Draw each peak as a vertical line from 0 to intensity
+                    for (idx, (&mz, &intensity)) in
+                        spec.mz_values.iter().zip(&spec.intensities).enumerate()
+                    {
+                        let label_str = &spec.fragment_labels[idx];
+                        let color = super::ion_color(label_str, Some(255));
+                        let y_value = (intensity / norm_factor) as f64;
+
+                        let points = PlotPoints::new(vec![[mz, 0.0], [mz, y_value]]);
+                        let line = Line::new(label_str, points).color(color);
+                        plot_ui.line(line);
+
+                        // Add label above the peak with offset
+                        let label = Text::new(
+                            label_str,
+                            PlotPoint::new(mz, y_value + label_offset),
+                            label_str,
+                        )
+                        .color(color);
+                        plot_ui.text(label);
+
+                        // If expected intensities are provided, draw them as dashed lines
+                        // in the negative direction. The display label is the
+                        // ion's mzPAF string; parse it back to the `IonAnnot`
+                        // key the expected-intensity store is keyed by.
+                        let ei = IonAnnot::try_from(label_str.as_str())
+                            .ok()
+                            .and_then(|key| expected_intensities.get_fragment(&key));
+                        if let Some(expected_intensity) = ei {
+                            let y_ref_value = (expected_intensity / expected_norm_factor) as f64;
+                            let expected_points =
+                                PlotPoints::new(vec![[mz, 0.0], [mz, -y_ref_value]]);
+                            let expected_line =
+                                Line::new(format!("expected_{}", label_str), expected_points)
+                                    .color(color);
+                            plot_ui.line(expected_line);
+                        }
+                    }
+                });
+        } else {
+            ui.centered_and_justified(|ui| {
+                ui.label("Click on XIC plot to view MS2 spectrum");
+            });
+        }
+    }
+}
+
+impl Default for SpectrumPanel {
+    fn default() -> Self {
+        Self::new()
+    }
+}

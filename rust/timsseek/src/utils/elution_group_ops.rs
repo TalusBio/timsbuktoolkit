@@ -1,0 +1,29 @@
+use timsquery::Target;
+use timsquery::utils::constants::C13_C12_MASS_DIFF;
+
+use crate::IonAnnot;
+
+/// Buffer-override variant of `isotope_offset_fragments`: reset `dst` from `src`
+/// (reusing Vec/TinyVec capacity), then apply an isotope-spacing m/z shift and label
+/// rewrite to every fragment in place. Zero alloc after warm-up.
+///
+/// `dst` and `src` must refer to distinct Target values -- typical use
+/// is `apply_isotope_offset_fragments_into(&mut worker.isotope_scratch_eg, &item.query, 1)`.
+pub fn apply_isotope_offset_fragments_into(
+    dst: &mut Target<IonAnnot>,
+    src: &impl timsquery::traits::QueryGeom<Label = IonAnnot>,
+    offset: i8,
+) {
+    dst.reset_from(src);
+    for (k, v) in dst.iter_fragments_refs_mut() {
+        // The error names the representable range, so a library carrying an
+        // isotope offset too close to the ceiling says what the limit is rather
+        // than asserting the situation is impossible.
+        let new_ions = k.try_with_offset_neutrons(offset).unwrap_or_else(|e| {
+            panic!("fragment {k} cannot take a {offset:+} isotope offset: {e}")
+        });
+        let mz_offset = (C13_C12_MASS_DIFF / k.get_charge() as f64) * offset as f64;
+        *v += mz_offset;
+        *k = new_ions;
+    }
+}

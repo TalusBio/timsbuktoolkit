@@ -1,0 +1,74 @@
+[package]
+name = "timsseek_cli"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+timsseek = { path = "../timsseek", default-features = false }
+timsquery = { path = "../timsquery" }
+timscentroid = { path = "../timscentroid" }
+tims_stage = { path = "../tims_stage" }
+alloc_track = { path = "../alloc_track" }
+rescore_dash = { path = "../rescore_dash", optional = true }
+tempfile = { workspace = true }
+# Library prediction. The digestion, modification and prediction logic lives
+# there; this crate owns only the flag surface. Pinned to a revision rather than
+# a branch, and unpublished, so it is a git reference until it reaches crates.io.
+msspeculator-inference = { git = "https://github.com/TalusBio/msspeculator", rev = "14634ad065ddcb9750d3c1bb0c817a2c3e332e07" }
+# For `builtin::BUILTIN_PREFIX` and `builtin::names()`, which the inference
+# crate does not re-export. Same revision, already in the graph.
+msspeculator-core = { git = "https://github.com/TalusBio/msspeculator", rev = "14634ad065ddcb9750d3c1bb0c817a2c3e332e07" }
+calib_dash = { path = "../calib_dash", optional = true }
+
+# The error type of msspeculator's `LibrarySink`, which this crate implements.
+anyhow = "1"
+regex = "1.11.1"
+chrono = { version = "0.4", default-features = false, features = ["clock"] }
+# tracing-profile = { version="0.10.11",features=["perfetto"] }
+tracing-profile = { git = "https://github.com/jspaezp/tracing-profile.git" , branch = "feat/aggregate_common", optional = true }
+
+# Workspace-inherited deps
+clap = { workspace = true, features = ["derive"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+toml = "0.8"
+rayon = { workspace = true }
+indicatif = { workspace = true }
+timsrust = { workspace = true }
+
+[[bin]]
+name = "timsseek"
+path = "src/main.rs"
+
+[target.'cfg(any(target_os = "windows", target_env = "musl"))'.dependencies]
+mimalloc = { workspace = true }
+
+[features]
+default = ["parallel", "aws", "mzdata"]
+parallel = ["timsseek/rayon"]
+instrumentation = ["timsseek/instrumentation", "tracing-profile"]
+track-alloc = ["alloc_track/enabled"]
+# Dev-only calibration fit dashboard (TIMSSEEK_CALIB_DASHBOARD=1). Opt-in;
+# build with `--features calib-dashboard`.
+calib-dashboard = ["dep:calib_dash"]
+# S3 is default (see above). GCS/Azure stay opt-in -- add when actually needed.
+aws = ["tims_stage/aws", "timscentroid/aws"]
+gcp = ["tims_stage/gcp", "timscentroid/gcp"]
+azure = ["tims_stage/azure", "timscentroid/azure"]
+# mzML/mzdata ingest (open-format raw input). On by default; drop with
+# `--no-default-features`.
+mzdata = ["timsseek/mzdata"]
+# Dev-only rescore dashboard (TIMSSEEK_RESCORE_DASHBOARD=1). Opt-in, like
+# `track-alloc`: enable explicitly with `--features dashboard` to pull in
+# `rescore_dash`/`ratatui`. Without this feature, `TIMSSEEK_RESCORE_DASHBOARD`
+# does nothing.
+dashboard = ["dep:rescore_dash"]
+
+[dev-dependencies]
+# Constructors for the opaque arena handles, for the competition tests, which
+# assemble candidates without an arena behind them. Dev-only, so a shipped
+# build cannot mint one.
+timsquery = { path = "../timsquery", features = ["test-support"] }

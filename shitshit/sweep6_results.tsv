@@ -1,0 +1,7 @@
+tag	with_mobility_q01	status	peak_fp_mb	wall_s	idx_s	q01	q05	no_signal
+nomob_ref	4481	ok	4995	106	27.52466925	10443	12926	
+nomob_nt_both_im1	4624	ok	4710	102	25.250196	11067	13394	4
+nomob_bins1	4101	ok	4901	162	67.482312667	9314	11669	8
+nomob_nt_bins1	4269	ok	4593	229	58.939070958	9622	12226	7
+nomob_im4_5		ok	4963	127	29.926150583	10120	12442	4
+SWEEP_DONE

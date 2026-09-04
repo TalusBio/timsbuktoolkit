@@ -1,0 +1,28 @@
+name: Cleanup PR Tags
+
+on:
+  pull_request:
+    types: [closed]
+
+jobs:
+  delete-tag:
+    if: contains(github.event.pull_request.labels.*.name, 'build-artifact')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write # Needed to delete tags
+    steps:
+      - name: Delete PR Tag
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const tagName = `pr-build-${context.issue.number}`;
+            try {
+              await github.rest.git.deleteRef({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                ref: `tags/${tagName}`,
+              });
+              console.log(`Successfully deleted tag: ${tagName}`);
+            } catch (error) {
+              console.log(`Tag ${tagName} not found or already deleted.`);
+            }

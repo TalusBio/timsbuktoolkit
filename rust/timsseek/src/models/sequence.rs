@@ -1,0 +1,979 @@
+//! Peptide and mod representation for per-entry speclib rows.
+//!
+//! `Peptide` is used on scoring paths. `ProteinSlice` stays on FASTA digestion.
+
+use crate::models::decoy::DecoyMarking;
+use serde::Serialize;
+use smallvec::SmallVec;
+use std::sync::Arc;
+use timsquery::chemistry::ontologies;
+
+/// Parse a ProForma string with the process-wide ontologies.
+///
+/// This handles input that the byte-walk parser in [`parse_sequence`] does not
+/// recognize. The indexes are built on first use, so input that matches the fast
+/// grammar never loads them. They live in timsquery because the mzSpecLib reader
+/// needs the same set and cannot depend on this crate; see
+/// [`timsquery::chemistry`].
+///
+/// DIA-NN writes `(UniMod:n)`. [`normalize_to_proforma`] changes that to
+/// `[UNIMOD:n]`, which the byte-walk parser handles without an ontology, so a
+/// hand-written `[GNO:...]` input is the case that reaches this fallback.
+///
+/// mzcore returns parse warnings with the peptidoform. Callers only need the
+/// success or failure result, so this function drops the warnings.
+pub fn parse_proforma(
+    sequence: &str,
+) -> Result<mzcore::sequence::Peptidoform<mzcore::sequence::Linked>, String> {
+    mzcore::sequence::Peptidoform::pro_forma(sequence, ontologies())
+        .map(|(peptidoform, _warnings)| peptidoform)
+        .map_err(|errors| {
+            errors
+                .iter()
+                .map(|e| e.to_string())
+                .collect::<Vec<_>>()
+                .join("; ")
+        })
+}
+
+/// Amino acid stored as alphabet offset `c - b'A'` (0..=25). `u8::MAX`
+/// means "unrecognized / non-alpha". Unreachable slots in count buffers
+/// (B=1, J=9, O=14, U=20, X=23, Z=25) stay zero.
+///
+/// Chosen over canonical-20 index storage so parse cost is one subtraction
+/// per residue (no 20-scan `.find`) and `aa_counts` inner loop is branchless.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct AminoAcid(pub u8);
+
+pub const UNKNOWN_AA: AminoAcid = AminoAcid(u8::MAX);
+
+/// Canonical output order for the 20-dim count vector:
+/// A C D E F G H I K L M N P Q R S T V W Y.
+/// Do not reorder -- `FEATURE_NAMES` follows this.
+pub const CANONICAL_AA_INDICES: [usize; 20] = [
+    0, 2, 3, 4, 5, 6, 7, 8, 10, 11, 12, 13, 15, 16, 17, 18, 19, 21, 22, 24,
+];
+
+pub const CANONICAL_AA_LETTERS: [u8; 20] = *b"ACDEFGHIKLMNPQRSTVWY";
+
+/// Feature-vector names for the 20-dim AA-count block, derived from
+/// [`CANONICAL_AA_LETTERS`] so the order can never drift out of sync.
+/// `AA_COUNT_NAMES[i]` is `format!("aa_count_{}", CANONICAL_AA_LETTERS[i] as char)`
+/// with a single one-time allocation leaked to `&'static str`.
+pub static AA_COUNT_NAMES: std::sync::LazyLock<[&'static str; 20]> =
+    std::sync::LazyLock::new(|| {
+        let mut out: [&'static str; 20] = [""; 20];
+        for (i, &c) in CANONICAL_AA_LETTERS.iter().enumerate() {
+            let s = format!("aa_count_{}", c as char);
+            out[i] = Box::leak(s.into_boxed_str());
+        }
+        out
+    });
+
+impl AminoAcid {
+    pub fn from_ascii(c: u8) -> AminoAcid {
+        if c.is_ascii_uppercase() {
+            AminoAcid(c - b'A')
+        } else {
+            UNKNOWN_AA
+        }
+    }
+
+    /// Returns `true` for any ASCII uppercase letter (`A`..=`Z`), including
+    /// non-standard codes `B/J/O/U/X/Z`. These non-canonical codes occupy
+    /// slots in the 26-wide count buffer but are never projected into the
+    /// 20-dim `aa_counts` output. For "is this one of the canonical 20?",
+    /// check `CANONICAL_AA_INDICES.contains(&(self.0 as usize))`.
+    pub fn is_known(self) -> bool {
+        self.0 < 26
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub enum Mod {
+    Unimod(u16),
+    Mass(f32),
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+pub struct ModEntry {
+    /// Residue position. Sentinel values: `POS_N_TERM` (0xFF) / `POS_C_TERM` (0xFE).
+    /// Otherwise a 0-based residue index, valid range `0..=253`. Sequences
+    /// longer than 254 residues cannot be represented -- the parser rejects them
+    /// in `parse_sequence` rather than truncating here.
+    pub pos: u8,
+    pub kind: Mod,
+}
+
+pub const POS_N_TERM: u8 = 0xFF;
+pub const POS_C_TERM: u8 = 0xFE;
+
+#[derive(Debug, Clone, PartialEq)]
+pub struct ParsedSequence {
+    pub residues: SmallVec<[AminoAcid; 32]>,
+    pub mods: SmallVec<[ModEntry; 2]>,
+}
+
+impl ParsedSequence {
+    pub fn aa_counts(&self) -> [f64; 20] {
+        // Count into 26-wide alphabet buffer (branchless hot loop).
+        let mut tmp = [0.0_f64; 26];
+        for r in &self.residues {
+            if r.is_known() {
+                tmp[r.0 as usize] += 1.0;
+            }
+        }
+        // Project to canonical 20-dim output.
+        let mut out = [0.0_f64; 20];
+        for (i, &idx) in CANONICAL_AA_INDICES.iter().enumerate() {
+            out[i] = tmp[idx];
+        }
+        out
+    }
+}
+
+#[derive(Debug, Clone)]
+pub struct Peptide {
+    pub raw: Arc<str>,
+    pub decoy: DecoyMarking,
+    /// Whether the source library exposes sequence features. Gates [`Self::parse`]:
+    /// a library without them yields no residues, so the sequence lanes stay NaN.
+    pub sequence_features: bool,
+}
+
+impl Peptide {
+    pub fn as_str(&self) -> &str {
+        &self.raw
+    }
+
+    /// Byte length of the raw sequence string (not residue count).
+    pub fn len(&self) -> usize {
+        self.raw.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.raw.is_empty()
+    }
+
+    /// `true` when this entry is a decoy (reversed or mass-shifted).
+    pub fn is_decoy(&self) -> bool {
+        self.decoy.is_decoy()
+    }
+
+    /// Normalize and parse `raw` into residues and mods. `None` when the library
+    /// exposes no sequence features, or when the sequence does not parse.
+    ///
+    /// Parsed on demand rather than stored: only the rescore's sequence lanes read
+    /// it, and they run on competed candidates, not on everything Phase 3 scores.
+    pub fn parse(&self) -> Option<ParsedSequence> {
+        if !self.sequence_features {
+            return None;
+        }
+        parse_sequence(&normalize_to_proforma(&self.raw))
+    }
+}
+
+impl Serialize for Peptide {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        serializer.serialize_str(&self.raw)
+    }
+}
+
+/// Parse a ProForma-normalized peptide string into our thin representation.
+/// Returns `None` on parse error, non-linear peptides, or mods outside the
+/// `Unimod`/`Mass` subset.
+///
+/// A byte walk handles the grammar emitted by `normalize_to_proforma`, including
+/// bare residues, `[UNIMOD:n]`, signed masses, and terminal mods. It returns
+/// `Some` only for inputs it fully recognizes. Named mods, cross-links, and
+/// unexpected bytes return `None` and go to mzcore.
+///
+/// The fast path does not check whether a `UNIMOD:n` ID exists. DIA-NN emits
+/// valid IDs, so this only matters for malformed or hand-written input.
+pub fn parse_sequence(normalized: &str) -> Option<ParsedSequence> {
+    if let Some(parsed) = parse_sequence_fast(normalized) {
+        return Some(parsed);
+    }
+    parse_sequence_mzcore(normalized)
+}
+
+/// Classify one bracket body (`UNIMOD:n` or a signed mass like `+15.995`) into a
+/// [`Mod`]. Anything else returns `None` and goes to the mzcore fallback in
+/// [`parse_sequence`]. This includes named mods, unsigned numbers, and empty
+/// bodies.
+fn classify_mod(body: &str) -> Option<Mod> {
+    let body = body.trim();
+    if body.len() >= 7 && body[..7].eq_ignore_ascii_case("UNIMOD:") {
+        return body[7..].trim().parse::<u16>().ok().map(Mod::Unimod);
+    }
+    match body.as_bytes().first() {
+        Some(b'+') | Some(b'-') => body.parse::<f32>().ok().map(Mod::Mass),
+        _ => None,
+    }
+}
+
+/// Byte-walk parser for the grammar emitted by `normalize_to_proforma`. `None`
+/// means the input is outside this grammar. [`parse_sequence`] then asks mzcore
+/// whether the input is valid.
+fn parse_sequence_fast(s: &str) -> Option<ParsedSequence> {
+    let b = s.as_bytes();
+    let mut residues: SmallVec<[AminoAcid; 32]> = SmallVec::new();
+    let mut mods: SmallVec<[ModEntry; 2]> = SmallVec::new();
+    let mut i = 0usize;
+
+    // Optional leading N-terminal mod: `[..]-SEQ`.
+    if b.first() == Some(&b'[') {
+        let close = i + 1 + b[i + 1..].iter().position(|&c| c == b']')?;
+        // A leading bracket without the `[..]-` form is outside this grammar.
+        // Let mzcore handle it.
+        if b.get(close + 1) != Some(&b'-') {
+            return None;
+        }
+        mods.push(ModEntry {
+            pos: POS_N_TERM,
+            kind: classify_mod(&s[i + 1..close])?,
+        });
+        i = close + 2;
+    }
+
+    while i < b.len() {
+        match b[i] {
+            c if c.is_ascii_uppercase() => {
+                // A residue index must fit u8 for `ModEntry::pos` (0..=253).
+                if residues.len() > 253 {
+                    return None;
+                }
+                residues.push(AminoAcid::from_ascii(c));
+                i += 1;
+            }
+            b'[' => {
+                // Residue mod attaches to the residue just pushed.
+                if residues.is_empty() {
+                    return None;
+                }
+                let close = i + 1 + b[i + 1..].iter().position(|&c| c == b']')?;
+                mods.push(ModEntry {
+                    pos: (residues.len() - 1) as u8,
+                    kind: classify_mod(&s[i + 1..close])?,
+                });
+                i = close + 1;
+            }
+            b'-' if b.get(i + 1) == Some(&b'[') => {
+                // Trailing C-terminal mod: `SEQ-[..]`.
+                let close = i + 2 + b[i + 2..].iter().position(|&c| c == b']')?;
+                mods.push(ModEntry {
+                    pos: POS_C_TERM,
+                    kind: classify_mod(&s[i + 2..close])?,
+                });
+                i = close + 1;
+            }
+            _ => return None, // anything unexpected -> mzcore fallback
+        }
+    }
+
+    if residues.is_empty() {
+        return None;
+    }
+    Some(ParsedSequence { residues, mods })
+}
+
+/// Fallback parser for [`parse_sequence`]. It validates with the ontology,
+/// handles named mods, and rejects non-linear peptides. The fast parser handles
+/// common inputs first.
+///
+/// `pro_forma` also returns parse warnings. This function only reports success
+/// or failure, so it ignores them.
+fn parse_sequence_mzcore(normalized: &str) -> Option<ParsedSequence> {
+    use mzcore::prelude::IsAminoAcid;
+
+    let pf = parse_proforma(normalized).ok()?;
+    let linear = pf.into_linear()?;
+
+    let mut residues: SmallVec<[AminoAcid; 32]> = SmallVec::new();
+    let mut mods: SmallVec<[ModEntry; 2]> = SmallVec::new();
+
+    for (i, el) in linear.sequence().iter().enumerate() {
+        if i > 253 {
+            return None;
+        }
+        let c = el.aminoacid.pro_forma_definition().chars().next()?;
+        residues.push(AminoAcid::from_ascii(c as u8));
+
+        for m in &el.modifications {
+            let kind = modification_to_mod(m)?;
+            mods.push(ModEntry { pos: i as u8, kind });
+        }
+    }
+
+    for m in linear.get_n_term() {
+        let kind = modification_to_mod(m)?;
+        mods.push(ModEntry {
+            pos: POS_N_TERM,
+            kind,
+        });
+    }
+    for m in linear.get_c_term() {
+        let kind = modification_to_mod(m)?;
+        mods.push(ModEntry {
+            pos: POS_C_TERM,
+            kind,
+        });
+    }
+
+    Some(ParsedSequence { residues, mods })
+}
+
+fn modification_to_mod(m: &mzcore::sequence::Modification) -> Option<Mod> {
+    use mzcore::ontology::Ontology;
+    use mzcore::sequence::{
+        Modification,
+        SimpleModificationInner,
+    };
+    let simple = match m {
+        Modification::Simple(s) => s,
+        _ => return None, // Cross-link / ambiguous -- out of v1 scope
+    };
+    match simple.as_ref() {
+        SimpleModificationInner::Mass(_tag, mass, _digits) => Some(Mod::Mass(mass.value as f32)),
+        SimpleModificationInner::Database { id, .. } => {
+            if id.ontology != Ontology::Unimod {
+                return None;
+            }
+            // `Mod::Unimod(u16)` can store only numeric UNIMOD accessions.
+            match id.id() {
+                mzcv::AccessionCode::Numeric(n) => u16::try_from(n).ok().map(Mod::Unimod),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Rewrite `[U:<digits>]` to `[UNIMOD:<digits>]`, leaving `[U:<name>]` alone.
+///
+/// ProForma 2.1 pairs a name with the one-letter prefix (§6.2.1) and an
+/// accession with the long one (§6.2.2), and calls the short-prefix accession
+/// `[U:35]` incorrect outright. So this canonicalizes a spelling the spec
+/// rejects into the one it wants, which is also the one `classify_mod` reads --
+/// and leaves a name alone, since moving it to the long prefix would produce a
+/// form the spec does not define.
+fn expand_unimod_accessions(s: &str) -> String {
+    let mut out = String::with_capacity(s.len());
+    let mut rest = s;
+    while let Some(at) = rest.to_ascii_lowercase().find("[u:") {
+        let body = &rest[at + 3..];
+        let numeric = body
+            .split(']')
+            .next()
+            .is_some_and(|tag| !tag.is_empty() && tag.bytes().all(|b| b.is_ascii_digit()));
+        out.push_str(&rest[..at]);
+        out.push_str(if numeric { "[UNIMOD:" } else { "[U:" });
+        rest = body;
+    }
+    out.push_str(rest);
+    out
+}
+
+/// Replace every occurrence of `needle` in `haystack`, matching ignoring ASCII
+/// case, with `replacement`. `needle` must be ASCII (UNIMOD tags are). ASCII-only
+/// lowercasing preserves byte length, so match indices stay aligned with the
+/// original (UTF-8-safe) string.
+fn replace_ascii_ci(haystack: &str, needle: &str, replacement: &str) -> String {
+    debug_assert!(needle.is_ascii());
+    let hay_lower = haystack.to_ascii_lowercase();
+    let needle_lower = needle.to_ascii_lowercase();
+    let mut out = String::with_capacity(haystack.len());
+    let mut i = 0;
+    while i < haystack.len() {
+        if hay_lower[i..].starts_with(&needle_lower) {
+            out.push_str(replacement);
+            i += needle.len();
+        } else {
+            let ch = haystack[i..].chars().next().unwrap();
+            out.push(ch);
+            i += ch.len_utf8();
+        }
+    }
+    out
+}
+
+/// Convert DIA-NN parenthesised UNIMOD mods to ProForma brackets: each
+/// case-insensitive `(unimod:` / `(u:` opener becomes `[UNIMOD:` and the single
+/// `)` that closes it becomes `]`. Any other paren -- notably `)` inside a bracket
+/// mod name like `[Carbamidomethyl (C)]` -- is left untouched.
+fn convert_paren_unimod(s: &str) -> String {
+    let lower = s.to_ascii_lowercase();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < s.len() {
+        let opener_len = if lower[i..].starts_with("(unimod:") {
+            Some("(unimod:".len())
+        } else if lower[i..].starts_with("(u:") {
+            Some("(u:".len())
+        } else {
+            None
+        };
+        match opener_len {
+            Some(len) => {
+                out.push_str("[UNIMOD:");
+                i += len;
+                let rest = &s[i..];
+                match rest.find(')') {
+                    // The id (ASCII digits) up to the matching close paren.
+                    Some(rel) => {
+                        out.push_str(&rest[..rel]);
+                        out.push(']');
+                        i += rel + 1; // consume ')'
+                    }
+                    // Malformed (no closer) -- copy the remainder verbatim.
+                    None => {
+                        out.push_str(rest);
+                        i = s.len();
+                    }
+                }
+            }
+            None => {
+                let ch = s[i..].chars().next().unwrap();
+                out.push(ch);
+                i += ch.len_utf8();
+            }
+        }
+    }
+    out
+}
+
+/// Coerce DIA-NN / short-form modified-sequence strings into mzcore-parseable
+/// ProForma. Strips `_..._` wrapping used by DIA-NN, converts DIA-NN's
+/// parenthesised mods (`C(UniMod:4)`) to ProForma brackets (`C[UNIMOD:4]`), and
+/// normalizes UNIMOD tag casing (`[UniMod:`, `[Unimod:`, `[U:` → `[UNIMOD:`).
+/// A leading (N-terminal) mod is rewritten to `[UNIMOD:n]-SEQ` as ProForma
+/// requires. Pass-through for plain sequences.
+///
+/// Off the hot path -- allocates on every replacement, which is fine at load.
+pub fn normalize_to_proforma(raw: &str) -> String {
+    let trimmed = raw.trim_matches('_');
+    // Fast path: plain-AA sequences (no mod tags) skip the rewrite chain.
+    if !trimmed.contains('[') && !trimmed.contains('(') {
+        return trimmed.to_owned();
+    }
+
+    // DIA-NN writes mods in parentheses, e.g. `C(UniMod:4)`; ProForma needs
+    // brackets, e.g. `C[UNIMOD:4]`. Convert each opener and ONLY its matching
+    // `)` (see `convert_paren_unimod`) -- never a blanket `)` replace, which would
+    // corrupt parens inside a bracket mod name, e.g. `C[Carbamidomethyl (C)]`.
+    let s = convert_paren_unimod(trimmed);
+
+    // Normalize any pre-existing bracket casing likewise.
+    let mut s = replace_ascii_ci(&s, "[unimod:", "[UNIMOD:");
+    // Expanded only for an accession, which is the form `classify_mod`'s fast
+    // path reads. A NAME is left alone, because ProForma 2.1 keeps the two in
+    // separate namespaces: §6.2.1 gives names a ONE-LETTER prefix, and §6.2.2
+    // requires accessions to use the long one ("full accession numbers MUST be
+    // used in all cases"). So `[UNIMOD:Carbamidomethyl]` is in neither, and
+    // expanding a name produced a string no parser owes us an answer for.
+    //
+    // That is what made it a bug rather than a nicety: mzSpecLib names its
+    // modifications, the gate is library-wide, and one unparsable row turned
+    // sequence features off for a whole library.
+    s = expand_unimod_accessions(&s);
+
+    // A mod at the very start is N-terminal: ProForma wants `[UNIMOD:n]-SEQ`.
+    if s.starts_with('[')
+        && let Some(close) = s.find(']')
+        && s[close + 1..].chars().next().is_some_and(|c| c != '-')
+    {
+        s.insert(close + 1, '-');
+    }
+    s
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smallvec::smallvec;
+
+    fn ci(ch: u8) -> usize {
+        CANONICAL_AA_LETTERS.iter().position(|&x| x == ch).unwrap()
+    }
+
+    #[test]
+    fn aa_counts_peptidek() {
+        let seq = ParsedSequence {
+            residues: "PEPTIDEK".bytes().map(AminoAcid::from_ascii).collect(),
+            mods: smallvec![],
+        };
+        let c = seq.aa_counts();
+        assert_eq!(c[ci(b'P')], 2.0);
+        assert_eq!(c[ci(b'E')], 2.0);
+        assert_eq!(c[ci(b'T')], 1.0);
+        assert_eq!(c[ci(b'I')], 1.0);
+        assert_eq!(c[ci(b'D')], 1.0);
+        assert_eq!(c[ci(b'K')], 1.0);
+        assert_eq!(c[ci(b'A')], 0.0);
+        assert_eq!(c.iter().sum::<f64>(), 8.0);
+    }
+
+    #[test]
+    fn aa_counts_skip_unknown() {
+        // 'X' maps to a non-canonical alpha slot (tmp[23]); never projected to out[].
+        let seq = ParsedSequence {
+            residues: "AXA".bytes().map(AminoAcid::from_ascii).collect(),
+            mods: smallvec![],
+        };
+        let c = seq.aa_counts();
+        assert_eq!(c[ci(b'A')], 2.0);
+        assert_eq!(c.iter().sum::<f64>(), 2.0);
+    }
+
+    #[test]
+    fn aa_encoding_alpha_offset() {
+        assert_eq!(AminoAcid::from_ascii(b'A').0, 0);
+        assert_eq!(AminoAcid::from_ascii(b'Y').0, 24);
+        assert_eq!(AminoAcid::from_ascii(b'Z').0, 25);
+        assert_eq!(AminoAcid::from_ascii(b'!').0, u8::MAX);
+    }
+
+    #[test]
+    fn normalize_strips_underscores() {
+        assert_eq!(normalize_to_proforma("_PEPTIDEK_"), "PEPTIDEK");
+    }
+
+    #[test]
+    fn normalize_diann_unimod_case() {
+        assert_eq!(
+            normalize_to_proforma("_LSHPGC[UniMod:4]K_"),
+            "LSHPGC[UNIMOD:4]K"
+        );
+        assert_eq!(
+            normalize_to_proforma("_C[Unimod:4]TVPGHK_"),
+            "C[UNIMOD:4]TVPGHK"
+        );
+    }
+
+    #[test]
+    fn normalize_short_u_form() {
+        assert_eq!(
+            normalize_to_proforma("PEPTC[U:4]IDEK"),
+            "PEPTC[UNIMOD:4]IDEK"
+        );
+    }
+
+    #[test]
+    fn normalize_diann_paren_unimod() {
+        // DIA-NN parenthesised mods -> ProForma brackets (internal residue mod).
+        assert_eq!(
+            normalize_to_proforma("AAC(UniMod:4)DEK"),
+            "AAC[UNIMOD:4]DEK"
+        );
+        // Case-insensitive on the tag.
+        assert_eq!(
+            normalize_to_proforma("AAC(unimod:4)DEK"),
+            "AAC[UNIMOD:4]DEK"
+        );
+        assert_eq!(
+            normalize_to_proforma("AAC(UNIMOD:4)DEK"),
+            "AAC[UNIMOD:4]DEK"
+        );
+        // Multiple mods in one peptide.
+        assert_eq!(
+            normalize_to_proforma("AAC(UniMod:4)M(UniMod:35)K"),
+            "AAC[UNIMOD:4]M[UNIMOD:35]K"
+        );
+    }
+
+    #[test]
+    fn normalize_diann_paren_nterm_gets_dash() {
+        // A leading (N-terminal) mod must become `[UNIMOD:n]-SEQ`.
+        assert_eq!(
+            normalize_to_proforma("(UniMod:1)AACDEK"),
+            "[UNIMOD:1]-AACDEK"
+        );
+    }
+
+    #[test]
+    fn parse_diann_paren_unimod_roundtrips() {
+        // The end-to-end path the load uses: normalize then parse. Parenthesised
+        // DIA-NN mods must parse (else the parse gate disables sequence features).
+        let norm = normalize_to_proforma("AAC(UniMod:4)DEK");
+        let p = parse_sequence(&norm).expect("paren UniMod must parse");
+        assert_eq!(p.residues.len(), 6);
+        assert_eq!(p.mods.len(), 1);
+        assert_eq!(p.mods[0].kind, Mod::Unimod(4));
+    }
+
+    #[test]
+    fn normalize_mixed_paren_unimod_and_bracket_paren_untouched() {
+        // A paren UNIMOD tag AND a bracket mod whose name contains `)`: only the
+        // UNIMOD `)` converts; the `(M)` inside the bracket name stays intact.
+        assert_eq!(
+            normalize_to_proforma("AAC(UniMod:4)M[Oxidation (M)]K"),
+            "AAC[UNIMOD:4]M[Oxidation (M)]K"
+        );
+    }
+
+    #[test]
+    fn normalize_spectronaut_parens_in_brackets_untouched() {
+        // Spectronaut writes mod names with parens INSIDE brackets. The DIA-NN
+        // paren->bracket conversion must not touch these (no `(unimod:` opener).
+        assert_eq!(
+            normalize_to_proforma("_C[Carbamidomethyl (C)]PEPK_"),
+            "C[Carbamidomethyl (C)]PEPK"
+        );
+    }
+
+    #[test]
+    fn normalize_skyline_nterm_mass_gets_dash() {
+        // Skyline N-terminal mass mod -> ProForma `[+42]-SEQ`.
+        assert_eq!(normalize_to_proforma("[+42]AACDEK"), "[+42]-AACDEK");
+    }
+
+    #[test]
+    fn normalize_mass_shift_unchanged() {
+        assert_eq!(
+            normalize_to_proforma("PEPTM[+15.995]IDEK"),
+            "PEPTM[+15.995]IDEK"
+        );
+    }
+
+    #[test]
+    fn normalize_plain_unchanged() {
+        assert_eq!(normalize_to_proforma("PEPTIDEK"), "PEPTIDEK");
+    }
+
+    /// A UNIMOD accession is expanded, because that is the spelling the byte-walk
+    /// parser reads; a UNIMOD *name* is not, because mzcore resolves `U:<name>`
+    /// and rejects `UNIMOD:<name>`.
+    #[test]
+    fn normalize_expands_a_unimod_accession_and_leaves_a_name_alone() {
+        assert_eq!(
+            normalize_to_proforma("PEPTC[U:4]IDEK"),
+            "PEPTC[UNIMOD:4]IDEK"
+        );
+        assert_eq!(
+            normalize_to_proforma("PEPTC[u:4]IDEK"),
+            "PEPTC[UNIMOD:4]IDEK"
+        );
+        assert_eq!(
+            normalize_to_proforma("PEPTC[U:Carbamidomethyl]IDEK"),
+            "PEPTC[U:Carbamidomethyl]IDEK"
+        );
+    }
+
+    /// The regression. mzSpecLib names its modifications, so this is the spelling
+    /// every mzSpecLib library arrives in. Expanding `U:` unconditionally made
+    /// these unparsable -- and because the parse gate is library-wide, one such
+    /// modification turned sequence features off for the entire file.
+    #[test]
+    fn a_named_modification_from_mzspeclib_parses() {
+        for raw in [
+            "FAC[U:Carbamidomethyl]HSASLTVR/3",
+            "FAC[U:Carbamidomethyl]HSASLTVR",
+            "AVC[U:Carbamidomethyl]ASFSLTHR/3",
+        ] {
+            let normalized = normalize_to_proforma(raw);
+            assert!(
+                parse_sequence(&normalized).is_some(),
+                "{raw:?} normalized to {normalized:?}, which does not parse"
+            );
+        }
+    }
+
+    /// What a modification may be spelled, and what it may not.
+    ///
+    /// Pinned as a table because the failures are the valuable half, and because
+    /// each is a plausible "fix" someone could add on seeing a library rejected.
+    /// Accepting any of them would be worse than rejecting it: a spelling that
+    /// works here and nowhere else teaches a user that their file is fine, and
+    /// the next tool disagrees. `[UNIMOD:Carbamidomethyl]` is the trap that
+    /// matters -- it looks like the accession form and would imply
+    /// `[UNIMOD:CAM]` works too, which no reading of the spec allows.
+    #[test]
+    fn only_the_spelled_out_proforma_forms_are_accepted() {
+        let accepted = [
+            // §6.2.1: a name takes the one-letter prefix, or none at all.
+            "PEPTC[U:Carbamidomethyl]IDEK",
+            "PEPTC[Carbamidomethyl]IDEK",
+            // §6.2.2: an accession takes the long prefix.
+            "PEPTC[UNIMOD:4]IDEK",
+            // Not §6.2.2-conformant -- it calls `[U:35]` incorrect outright --
+            // but accepted, because this reads libraries other tools wrote and
+            // repairing an input is not the same as blessing it. Nothing here
+            // ever emits this spelling.
+            "PEPTC[U:4]IDEK",
+        ];
+        for raw in accepted {
+            let normalized = normalize_to_proforma(raw);
+            assert!(
+                parse_sequence(&normalized).is_some(),
+                "{raw:?} should parse (normalized to {normalized:?})"
+            );
+        }
+
+        let rejected = [
+            // A name under the long prefix: §6.2.1 gives names a letter and
+            // §6.2.2 governs accessions, so this is in neither.
+            "PEPTC[UNIMOD:Carbamidomethyl]IDEK",
+            // Synonyms and abbreviations, which §6.2.1.2 excludes: the Unimod
+            // OBO `name` tag is the only accepted spelling.
+            "PEPTC[U:CAM]IDEK",
+            "PEPTC[CAM]IDEK",
+            "PEPTC[UNIMOD:CAM]IDEK",
+            // An accession that does not exist.
+            "PEPTC[UNIMOD:999999]IDEK",
+        ];
+        for raw in rejected {
+            let normalized = normalize_to_proforma(raw);
+            assert!(
+                parse_sequence(&normalized).is_none(),
+                "{raw:?} should NOT parse (normalized to {normalized:?})"
+            );
+        }
+    }
+
+    /// Two spellings of one modification agree on the residue and the count.
+    /// Names go through mzcore and accessions through the byte walk, so this is
+    /// the one place the two parsers are compared on the same input.
+    #[test]
+    fn a_named_and_an_accession_modification_agree() {
+        let by_name =
+            parse_sequence(&normalize_to_proforma("PEPTC[U:Carbamidomethyl]IDEK")).expect("name");
+        let by_accession =
+            parse_sequence(&normalize_to_proforma("PEPTC[U:4]IDEK")).expect("accession");
+        assert_eq!(by_name.residues, by_accession.residues);
+        assert_eq!(by_name.mods.len(), by_accession.mods.len());
+    }
+
+    #[test]
+    fn parse_plain() {
+        let p = parse_sequence("PEPTIDEK").expect("parse");
+        assert_eq!(p.residues.len(), 8);
+        assert_eq!(p.mods.len(), 0);
+        assert_eq!(p.residues[0], AminoAcid::from_ascii(b'P'));
+        assert_eq!(p.residues[7], AminoAcid::from_ascii(b'K'));
+    }
+
+    #[test]
+    fn parse_with_unimod() {
+        // PEPTC[UNIMOD:4]IDEK = 9 residues: P-E-P-T-C-I-D-E-K, C at index 4
+        let p = parse_sequence("PEPTC[UNIMOD:4]IDEK").expect("parse");
+        assert_eq!(p.residues.len(), 9);
+        assert_eq!(p.mods.len(), 1);
+        assert_eq!(p.mods[0].pos, 4);
+        assert_eq!(p.mods[0].kind, Mod::Unimod(4));
+    }
+
+    #[test]
+    fn parse_with_mass_shift() {
+        // PEPTM[+15.995]IDEK = 9 residues: P-E-P-T-M-I-D-E-K, M at index 4
+        let p = parse_sequence("PEPTM[+15.995]IDEK").expect("parse");
+        assert_eq!(p.residues.len(), 9);
+        assert_eq!(p.mods.len(), 1);
+        assert_eq!(p.mods[0].pos, 4);
+        match p.mods[0].kind {
+            Mod::Mass(m) => assert!((m - 15.995).abs() < 1e-3),
+            _ => panic!("expected Mass variant"),
+        }
+    }
+
+    #[test]
+    fn parse_rejects_garbage() {
+        assert!(parse_sequence("not a peptide!!!").is_none());
+    }
+
+    #[test]
+    fn parse_n_term_mod() {
+        // Acetyl (UNIMOD:1) on n-term
+        let p = parse_sequence("[Acetyl]-PEPTIDEK").expect("parse");
+        assert_eq!(p.residues.len(), 8);
+        assert_eq!(p.mods.len(), 1);
+        assert_eq!(p.mods[0].pos, POS_N_TERM);
+        assert_eq!(p.mods[0].kind, Mod::Unimod(1));
+    }
+
+    #[test]
+    fn fast_path_takes_recognized_grammar() {
+        // These bare, UNIMOD, and mass forms must use the fast parser.
+        for s in [
+            "PEPTIDEK",
+            "AAC[UNIMOD:4]DEK",
+            "AAC[UNIMOD:4]M[UNIMOD:35]K",
+            "[UNIMOD:1]-PEPTIDEK",
+            "M[+15.995]PEPTIDEK",
+            "[+42]-PEPTIDEK",
+        ] {
+            assert!(
+                parse_sequence_fast(s).is_some(),
+                "fast path must accept {s:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn fast_path_defers_named_and_garbage() {
+        // Named mods and unexpected bytes return None so mzcore can validate
+        // them and resolve names.
+        for s in [
+            "[Acetyl]-PEPTIDEK",
+            "C[Carbamidomethyl (C)]PEPK",
+            "not a pep!",
+        ] {
+            assert!(
+                parse_sequence_fast(s).is_none(),
+                "fast path must defer {s:?}"
+            );
+        }
+    }
+
+    /// GNOme is omitted from [`ontologies`]. GNO modifications already produce
+    /// no usable `ParsedSequence` because only Unimod modifications map to
+    /// [`Mod`]. This test checks that `[GNO:...]` still fails during parsing.
+    #[test]
+    fn dropping_gnome_costs_no_sequence_that_was_usable() {
+        // Unimod names, IDs, and bare masses still parse.
+        for usable in [
+            "PEPTIDEK",
+            "PEPTC[UNIMOD:4]IDEK",
+            "PEPTC[Carbamidomethyl]IDEK",
+            "PEPT[+79.966]IDEK",
+        ] {
+            assert!(
+                parse_sequence(usable).is_some(),
+                "{usable:?} must still parse"
+            );
+        }
+
+        // These ontologies remain loaded for the formula path. The sequence
+        // parser rejects their modifications because they are not Unimod.
+        for non_unimod in [
+            "PEPTK[MOD:00046]IDEK",
+            "PEPTK[XLMOD:02001]IDEK",
+            "PEPTK[RESID:AA0038]IDEK",
+        ] {
+            assert!(
+                parse_proforma(non_unimod).is_ok(),
+                "{non_unimod:?} must still reach mzcore"
+            );
+            assert!(
+                parse_sequence(non_unimod).is_none(),
+                "{non_unimod:?} yields no usable sequence either way"
+            );
+        }
+
+        // This input also failed before the change, but at a later step.
+        assert!(
+            parse_sequence("PEPTN[GNO:G59626AS]IDEK").is_none(),
+            "a GNO glycopeptide was never usable"
+        );
+        // A glycan composition does not need an ontology index.
+        assert!(parse_proforma("PEPTN[Glycan:HexNAc]IDEK").is_ok());
+    }
+
+    /// Named mods must resolve through UNIMOD to the same numeric IDs as their
+    /// `[UNIMOD:n]` forms. The fast parser does not cover this case.
+    #[test]
+    fn mzcore_fallback_resolves_named_mods_via_ontology() {
+        for (named, expected) in [
+            ("[Acetyl]-PEPTIDEK", Mod::Unimod(1)),
+            ("PEPTC[Carbamidomethyl]IDEK", Mod::Unimod(4)),
+            ("PEPTM[Oxidation]IDEK", Mod::Unimod(35)),
+        ] {
+            let parsed = parse_sequence(named)
+                .unwrap_or_else(|| panic!("mzcore must resolve named mod in {named:?}"));
+            assert_eq!(
+                parsed.mods.len(),
+                1,
+                "expected exactly one mod in {named:?}, got {:?}",
+                parsed.mods
+            );
+            assert_eq!(
+                parsed.mods[0].kind, expected,
+                "ontology resolved {named:?} to the wrong id"
+            );
+        }
+    }
+
+    /// Named and numeric forms must produce the same residues and modifications.
+    #[test]
+    fn named_and_numeric_mod_spellings_agree() {
+        let named = parse_sequence("PEPTC[Carbamidomethyl]IDEK").expect("named form parses");
+        let numeric = parse_sequence("PEPTC[UNIMOD:4]IDEK").expect("numeric form parses");
+        assert_eq!(named, numeric);
+    }
+
+    #[test]
+    fn fast_matches_mzcore_on_recognized_grammar() {
+        // Require both parsers to claim every sample. An optional fast-path
+        // check could stop testing if the fast grammar became narrower.
+        let corpus = [
+            "PEPTIDEK",
+            "AACDEK",
+            "AAC[UNIMOD:4]DEK",
+            "AAC[UNIMOD:4]M[UNIMOD:35]K",
+            "[UNIMOD:1]-AACDEK",
+            "M[UNIMOD:35]LEGNSPQGSNQGVK",
+            "AAAGAAATHLEVAR",
+        ];
+        for s in corpus {
+            // Both parsers must accept every sample in this corpus.
+            let fast =
+                parse_sequence_fast(s).unwrap_or_else(|| panic!("fast path must claim {s:?}"));
+            let slow =
+                parse_sequence_mzcore(s).unwrap_or_else(|| panic!("mzcore must also parse {s:?}"));
+            assert_eq!(fast.residues, slow.residues, "residues mismatch for {s:?}");
+            assert_eq!(
+                fast.aa_counts(),
+                slow.aa_counts(),
+                "aa_counts mismatch for {s:?}"
+            );
+            // Compare positions and kinds as well as the number of mods.
+            let mut fast_mods: Vec<_> = fast.mods.iter().map(|m| (m.pos, m.kind)).collect();
+            let mut slow_mods: Vec<_> = slow.mods.iter().map(|m| (m.pos, m.kind)).collect();
+            fast_mods.sort_by_key(|(pos, _)| *pos);
+            slow_mods.sort_by_key(|(pos, _)| *pos);
+            assert_eq!(fast_mods, slow_mods, "mods mismatch for {s:?}");
+        }
+    }
+
+    /// Monoisotopic mass of a peptide with exactly one formula.
+    fn neutral_mass(seq: &str) -> f64 {
+        use mzcore::prelude::*;
+        let pf = parse_proforma(seq).unwrap_or_else(|e| panic!("{seq:?}: {e}"));
+        let linear = pf.as_linear().expect("linear").clone();
+        let formulas = linear.formulas();
+        assert_eq!(formulas.len(), 1, "{seq:?} is not a single formula");
+        formulas[0].monoisotopic_mass().value
+    }
+
+    /// Compare against atomic masses, not mzcore output. This catches an
+    /// accession mapped to the wrong chemistry.
+    ///
+    /// These four modifications cover the library inputs used here.
+    #[test]
+    fn unimod_deltas_match_their_compositions() {
+        // (bare, modified, delta, composition)
+        let cases = [
+            ("PEPTCIDEK", "PEPTC[UNIMOD:4]IDEK", 57.021_46, "C2H3NO"),
+            ("PEPTMIDEK", "PEPTM[UNIMOD:35]IDEK", 15.994_91, "O"),
+            ("PEPTSIDEK", "PEPTS[UNIMOD:21]IDEK", 79.966_33, "HPO3"),
+            ("PEPTNIDEK", "PEPTN[UNIMOD:7]IDEK", 0.984_02, "O minus NH"),
+        ];
+        for (bare, modified, delta, composition) in cases {
+            let got = neutral_mass(modified) - neutral_mass(bare);
+            assert!(
+                (got - delta).abs() < 1e-4,
+                "{modified} minus {bare} must be {delta} ({composition}), got {got}"
+            );
+        }
+    }
+
+    /// PEPTIDEK's residue sum is 909.44434 Da. Add H2O to get 927.45491 Da.
+    /// The tolerance covers the five-decimal residue masses.
+    #[test]
+    fn unmodified_peptide_mass_is_the_hand_sum() {
+        let got = neutral_mass("PEPTIDEK");
+        assert!(
+            (got - 927.454_91).abs() < 1e-4,
+            "PEPTIDEK must be 927.45491, got {got}"
+        );
+    }
+}

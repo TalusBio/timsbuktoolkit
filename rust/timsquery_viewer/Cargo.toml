@@ -1,0 +1,46 @@
+[package]
+name = "timsquery_viewer"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "timsquery_viewer"
+path = "src/main.rs"
+
+[dependencies]
+timsquery = { path = "../timsquery" }
+timscentroid = { path = "../timscentroid" }
+timsseek = { path = "../timsseek" }
+calibrt = { path = "../calibrt" }
+
+# GUI dependencies
+egui = {version = "0.33", features = ["persistence", "rayon"]}
+eframe = { version = "0.33", default-features = true, features = ["default_fonts", "persistence"] }
+egui_plot = "0.34"
+egui_extras = { version = "0.33", features = ["serde"] }
+egui_dock = { version = "0.18", features = ["serde"] }
+rfd = "0.16" # File dialogs dependency
+image = { version = "0.25", default-features = false, features = ["png"] }
+ron = "0.12.0" # Yet another serialization format ...
+
+# Workspace-inherited deps
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+timsrust = { workspace = true }
+rayon = { workspace = true }
+thiserror = { workspace = true }
+clap = { workspace = true, features = ["derive"] }
+
+[features]
+default = ["mzdata"]
+# mzML ingest (open-format raw input), on by default; drop with
+# `--no-default-features`.
+mzdata = ["timsquery/mzdata"]
+instrumentation = ["timsseek/instrumentation"]
+
+[target.'cfg(any(target_os = "windows", target_env = "musl"))'.dependencies]
+mimalloc = { workspace = true }

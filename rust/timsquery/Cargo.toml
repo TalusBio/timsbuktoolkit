@@ -1,0 +1,57 @@
+[package]
+name = "timsquery"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+
+# Workspace member deps
+array2d = { path = "../array2d" }
+timscentroid = { path = "../timscentroid" }
+micromzpaf = { path = "../micromzpaf" }
+tims_stage = { path = "../tims_stage" }
+
+# Workspace-inherited deps
+timsrust = { workspace = true }
+serde = { workspace = true, features = ["rc"] }
+serde_json = { workspace = true }
+tinyvec = { workspace = true, features = ["alloc", "serde"] }
+tracing = { workspace = true }
+rayon = { workspace = true }
+memmap2 = { workspace = true }
+half = { workspace = true }
+bon = { workspace = true }
+csv = { workspace = true }
+parquet = { workspace = true }
+arrow = { workspace = true }
+thiserror = { workspace = true }
+
+# The mzSpecLib reader. Unconditional, like every other library format.
+#
+# `chemistry::ontologies` links about 1.34 MB of compiled-in `.dat` into every
+# binary that depends on this crate: unimod 333 KB, psimod 689 KB, resid 264 KB,
+# xlmod 56 KB. GNOme's 25 MB is deliberately not among them. The indexes are
+# built lazily, so the cost at run time is only paid by a library that reaches
+# the ProForma parser, but the bytes are in the binary either way.
+mzannotate = { workspace = true }
+mzcore = { workspace = true }
+mzcv = { workspace = true }
+flate2 = "1.1"
+
+[features]
+# Forward mzML/mzdata ingest support down to timscentroid, where the reader lives.
+# Not defaulted here (see timsseek_cli) so `--no-default-features` stays lean.
+mzdata = ["timscentroid/mzdata"]
+# Constructors for the opaque arena handles (`models::test_handles`). Enabled
+# only through a `dev-dependency`, so a shipped build still cannot mint one.
+test-support = []
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+
+[lib]
+
+[lints]
+workspace = true

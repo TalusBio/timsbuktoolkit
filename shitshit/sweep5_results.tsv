@@ -1,0 +1,5 @@
+tag	status	peak_fp_mb	wall_s	idx_s	q01	q05	no_signal
+both_im1	ok	5078	127	29.65305	4419	5087	489
+nt_both_im1	ok	4770	152	43.359350125	4624	5334	390
+ms1_im0p5	ok	4700	132	37.547442542	4514	5242	470
+SWEEP_DONE

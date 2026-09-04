@@ -1,0 +1,36 @@
+[package]
+name = "timsquery_cli"
+version.workspace = true
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+
+[features]
+# On by default, as on timsseek_cli: the Carafe end-to-end test reads an mzML,
+# and a feature that is off by default would let that test be skipped silently
+# in a plain `cargo test`. Drop it with `--no-default-features`.
+default = ["mzdata"]
+# The reader lives in timscentroid; timsquery forwards to it.
+mzdata = ["timsquery/mzdata"]
+
+[dependencies]
+timsquery = { path = "../timsquery" }
+timscentroid = { path = "../timscentroid" }
+
+# Workspace-inherited deps from the original main.rs
+clap = { workspace = true, features = ["derive"] }
+timsrust = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+rayon = { workspace = true }
+half = { workspace = true }
+thiserror = { workspace = true } # User requested
+
+[dev-dependencies]
+base64 = "0.22"  # matches the version already in the tree
+tempfile = { workspace = true }
+
+[target.'cfg(any(target_os = "windows", target_env = "musl"))'.dependencies]
+mimalloc = { workspace = true }

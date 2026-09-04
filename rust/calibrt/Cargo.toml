@@ -1,0 +1,21 @@
+[package]
+name = "calibrt"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+array2d = { path = "../array2d" }
+serde = { workspace = true }
+serde_json = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+# Only `examples/calibrt.rs` generates sample data, so this stays out of the
+# normal dependencies of every crate that pulls calibrt in.
+rand = "0.9"
+tracing-subscriber = { workspace = true }
+
+[lib]
+
+

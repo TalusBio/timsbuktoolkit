@@ -1,0 +1,73 @@
+#![doc = include_str!("../README.md")]
+
+// Re export stuff from other crates ...
+pub use micromzpaf;
+pub use tinyvec;
+
+// Re-export main structures
+pub use crate::models::Tolerance;
+pub use crate::models::aggregators::{
+    ChromatogramCollector,
+    MzMobilityStatsCollector,
+    PointIntensityAggregator,
+    SpectralCollector,
+};
+pub use crate::models::base::{
+    Array2D,
+    MzMajorIntensityArray,
+    RTMajorIntensityArray,
+};
+pub use crate::models::target::Target;
+
+// Re-export traits
+pub use crate::models::PeakAddable;
+pub use crate::traits::queriable_data::{
+    GenerallyQueriable,
+    QueriableData,
+};
+pub use crate::traits::{
+    KeyLike,
+    ValueLike,
+};
+pub use timscentroid::dimension::MobilityKind;
+pub use timscentroid::utils::OptionallyRestricted;
+pub use timscentroid::{
+    CentroidingConfig,
+    IndexedTimstofPeaks,
+    IndexingCentroidingConfig,
+    TimsTofPath,
+};
+
+// Declare modules
+pub mod chemistry;
+pub mod errors;
+pub mod models;
+pub mod serde;
+pub mod traits;
+pub mod utils;
+pub use crate::utils::TupleRange;
+
+// Re-export errors
+pub use crate::errors::{
+    DataProcessingError,
+    DataReadingError,
+    TimsqueryError,
+};
+
+pub mod ion {
+    pub use micromzpaf::{
+        IonAnnot,
+        IonParsingError,
+        IonSeriesOrdinal,
+        NeutralLoss,
+        Series,
+        UnknownIonCounter,
+    };
+}
+
+pub use ion::IonAnnot;
+
+pub use crate::serde::index_serde::{
+    LoadIndexError,
+    load_index,
+};

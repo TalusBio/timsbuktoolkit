@@ -1,0 +1,129 @@
+name: Rust
+
+on:
+  push:
+    branches: [ "main" ]
+  pull_request:
+    branches: [ "main" ]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUST_BACKTRACE: 1
+  CARGO_INCREMENTAL: 0
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        features:
+          - ""                       # default (rayon on for timsseek)
+          - "--no-default-features"  # serial
+    steps:
+      - uses: actions/checkout@v6
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: true
+          # Per leg: the two resolve different features and would thrash one entry.
+          cache-key: ${{ matrix.features }}
+          # This action defaults to `-D warnings`; `task clippy` owns that.
+          rustflags: ''
+      - name: Build
+        run: cargo build --verbose -p timsseek ${{ matrix.features }}
+      - name: Run tests
+        run: cargo test --verbose -p timsseek ${{ matrix.features }}
+      # timsseek alone misses timscentroid's mzdata ingest, tims_stage staging
+      # and the timsquery mobility gate.
+      - name: Run reader + staging tests (mzdata)
+        if: matrix.features == ''
+        run: |
+          cargo test -p timscentroid --features mzdata
+          cargo test -p tims_stage -p timsquery
+
+  # Crates the timsseek matrix above never compiles. `--all-targets` so examples
+  # are built too — that is what let `timsseek_cli/examples/load_bench.rs` rot.
+  cli-and-sim:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: true
+          # Bump when the `-p` list changes: the key ignores it, so a widened
+          # build hits the old key and rust-cache saves nothing.
+          cache-key: pkgs-cli-sim-viewer
+          # This action defaults to `-D warnings`; `task clippy` owns that.
+          rustflags: ''
+      - name: Build
+        run: cargo build --verbose -p timsseek_cli -p apex_sim -p timsseek_macros -p rescore_dash -p timsquery_viewer
+      - name: Run tests
+        run: cargo test --verbose -p timsseek_cli -p apex_sim -p timsseek_macros -p rescore_dash -p timsquery_viewer --all-targets
+      # Opt-in, so these call sites compile under no other leg.
+      - name: Type-check (dashboard feature)
+        run: cargo check -p timsseek_cli --features dashboard --all-targets
+      # calibrt compiles in every leg but nothing above runs its tests, and
+      # calib_dash is built by no other leg at all. The feature leg is the only
+      # one that compiles `calib_dash_hook`'s real arm.
+      - name: Run calibrt / calib_dash tests
+        run: cargo test --verbose -p calibrt -p calib_dash
+      - name: Check timsseek_cli with the calib-dashboard feature
+        run: cargo check --verbose -p timsseek_cli --features calib-dashboard --all-targets
+
+  # The PSI-MS `spectrum origin type` subtree is vendored as generated Rust
+  # (`rust/timsquery/src/serde/psims_origin_type.rs`), because no crate in the
+  # tree carries the PSI-MS vocabulary and the reader needs `is_a` to tell a
+  # decoy from a target. A vendored snapshot can go stale silently, so this job
+  # compares its `data-version` against the published ontology, over a ranged
+  # request for the first 400 bytes rather than the 1.2 MB file.
+  #
+  # `continue-on-error` on purpose. The check reaches the network, and most
+  # releases move the version without touching these ten terms, so a failure
+  # usually resolves to regenerating and committing one changed line. Loud, not
+  # fatal.
+  psims-vocabulary:
+    runs-on: ubuntu-latest
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+      # ubuntu-latest ships python3, and the script is standard library only.
+      - name: PSI-MS vocabulary snapshot is current
+        run: python3 scripts/gen_psims_origin_type.py --check
+
+  # `rustfmt.toml` uses nightly-only options, so a stable `cargo fmt` reports
+  # hundreds of spurious diffs and a nightly one is the only check that means
+  # anything. `task fmt` is the local spelling; this is the same thing in CI.
+  fmt:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Setup nightly rustfmt
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          toolchain: nightly
+          components: rustfmt
+          cache: false
+          rustflags: ''
+      - name: rustfmt
+        run: cargo +nightly fmt --all -- --check
+      - uses: astral-sh/setup-uv@v6
+      - name: ruff format
+        run: uv run ruff format --check
+
+  # `deny.toml` existed for a long time with nothing invoking it, so dependency
+  # licensing drifted red unnoticed. This is the gate.
+  #
+  # `advisories` blocks too. It reads a database that moves without the lockfile
+  # moving, so this job can go red on a commit that changed nothing — that is
+  # the intended behaviour, not a flake. Every finding with no reachable fix is
+  # an `advisories.ignore` entry in `deny.toml` carrying the blocker, so a new
+  # red here is genuinely new.
+  cargo-deny:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: EmbarkStudios/cargo-deny-action@v2
+        with:
+          command: check

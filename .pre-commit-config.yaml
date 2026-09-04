@@ -1,0 +1,30 @@
+repos:
+-   repo: https://github.com/pre-commit/pre-commit-hooks
+    rev: v6.0.0
+    hooks:
+    -   id: trailing-whitespace
+    -   id: check-toml
+-   repo: local
+    hooks:
+    - id: fmt
+      name: fmt
+      description: Format files with cargo fmt.
+      entry: task fmt
+      language: system
+      always_run: true
+      pass_filenames: false
+    - id: cargo-check
+      name: cargo check
+      description: Check the package for errors.
+      entry: cargo check
+      language: system
+      always_run: true
+      pass_filenames: false
+    - id: clippy
+      name: clippy
+      description: Lint rust sources
+      entry: task clippy
+      language: system
+      pass_filenames: false
+
+

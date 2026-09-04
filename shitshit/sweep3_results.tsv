@@ -1,0 +1,7 @@
+tag	ms1_tol	ms2_tol	ms2_cap	status	peak_fp_mb	wall_s	idx_s	q01	q05	no_signal
+cap500_50_ref	-	-	500/50	ok	5079	128	33.640994792	4481	5233	467
+ms2_bins1	-	{ Bins = 1 }	500/50	ok	4576	158	63.280091375	4101	4961	267
+ms2_bins2	-	{ Bins = 2 }	500/50	ok	4691	148	60.250649875	4201	4874	355
+ms1_bins1	{ Bins = 1 }	-	500/50	ok	4814	143	49.626497958	4232	5024	496
+both_bins1	{ Bins = 1 }	{ Bins = 1 }	500/50	ok	4510	189	64.929177167	3979	4716	332
+SWEEP_DONE

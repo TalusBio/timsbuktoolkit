@@ -1,0 +1,203 @@
+use serde_json;
+use std::path::PathBuf;
+use timsquery::{
+    DataProcessingError as TQDataProcessingError,
+    TimsqueryError,
+};
+use timsrust::{
+    TimsRustError,
+    TimsTofPathError,
+};
+
+// TODO: break up ... the type system RN gives no info bc
+// everything is a datada processing error...
+#[derive(Debug)]
+pub enum DataProcessingError {
+    ExpectedSlicesSameLength {
+        expected: usize,
+        other: usize,
+        context: String,
+    },
+    ExpectedNonEmptyData {
+        context: Option<String>,
+    },
+    ExpectedFiniteNonNanData {
+        context: String,
+    },
+    TimsQueryDataProcessingError {
+        error: TQDataProcessingError,
+        context: String,
+    },
+}
+
+#[derive(Debug)]
+pub enum TargetReadingError {
+    SpeclibParsingError {
+        source: serde_json::Error,
+        context: &'static str,
+    },
+    FileReadingError {
+        source: std::io::Error,
+        context: &'static str,
+        path: PathBuf,
+    },
+    TimsQueryLibraryError {
+        source: timsquery::serde::TargetReadingError,
+    },
+    UnsupportedFormat {
+        message: String,
+    },
+}
+
+impl From<timsquery::serde::TargetReadingError> for TargetReadingError {
+    fn from(source: timsquery::serde::TargetReadingError) -> Self {
+        Self::TimsQueryLibraryError { source }
+    }
+}
+
+/// Sealing an arena builds its id column, which fails on ids that cannot serve
+/// as a result key. Routed through timsquery's reader error so the message a
+/// caller sees is the same whichever crate did the sealing.
+impl From<timsquery::models::SourceIdError> for TargetReadingError {
+    fn from(source: timsquery::models::SourceIdError) -> Self {
+        Self::TimsQueryLibraryError {
+            source: source.into(),
+        }
+    }
+}
+
+impl From<TQDataProcessingError> for DataProcessingError {
+    fn from(x: TQDataProcessingError) -> Self {
+        Self::TimsQueryDataProcessingError {
+            error: x,
+            context: "".to_string(),
+        }
+    }
+}
+
+impl DataProcessingError {
+    pub fn append_to_context(mut self, context: &str) -> Self {
+        match &mut self {
+            DataProcessingError::ExpectedSlicesSameLength {
+                context: owned_context,
+                ..
+            } => {
+                owned_context.push_str(context);
+            }
+            DataProcessingError::ExpectedNonEmptyData {
+                context: owned_context,
+            } => match owned_context {
+                Some(x) => x.push_str(context),
+                None => *owned_context = Some(context.to_string()),
+            },
+            DataProcessingError::ExpectedFiniteNonNanData {
+                context: owned_context,
+            } => {
+                owned_context.push_str(context);
+            }
+            DataProcessingError::TimsQueryDataProcessingError {
+                context: owned_context,
+                ..
+            } => {
+                owned_context.push_str(context);
+            }
+        }
+        self
+    }
+}
+
+#[derive(Debug)]
+pub enum TimsSeekError {
+    TimsTofPath(TimsTofPathError),
+    TimsRust(TimsRustError),
+    Timsquery(TimsqueryError),
+    Io {
+        source: std::io::Error,
+        path: Option<std::path::PathBuf>,
+    },
+    ParseError {
+        msg: String,
+    },
+    DataProcessingError(DataProcessingError),
+    TargetReadingError(TargetReadingError),
+    Rescore(crate::ml::RescoreError),
+}
+
+impl std::fmt::Display for TimsSeekError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Rescore(error) => error.fmt(f),
+            other => write!(f, "{other:?}"),
+        }
+    }
+}
+
+impl std::error::Error for TimsSeekError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Rescore(error) => Some(error),
+            _ => None,
+        }
+    }
+}
+
+pub type Result<T> = std::result::Result<T, TimsSeekError>;
+
+impl From<TimsTofPathError> for TimsSeekError {
+    fn from(x: TimsTofPathError) -> Self {
+        Self::TimsTofPath(x)
+    }
+}
+
+impl From<TimsRustError> for TimsSeekError {
+    fn from(x: TimsRustError) -> Self {
+        Self::TimsRust(x)
+    }
+}
+
+impl From<TimsqueryError> for TimsSeekError {
+    fn from(x: TimsqueryError) -> Self {
+        Self::Timsquery(x)
+    }
+}
+
+impl From<std::num::ParseIntError> for TimsSeekError {
+    fn from(x: std::num::ParseIntError) -> Self {
+        Self::ParseError { msg: x.to_string() }
+    }
+}
+
+impl From<serde_json::Error> for TimsSeekError {
+    fn from(val: serde_json::Error) -> Self {
+        TimsSeekError::ParseError {
+            msg: val.to_string(),
+        }
+    }
+}
+
+impl From<DataProcessingError> for TimsSeekError {
+    fn from(x: DataProcessingError) -> Self {
+        Self::DataProcessingError(x)
+    }
+}
+
+impl From<TargetReadingError> for TimsSeekError {
+    fn from(x: TargetReadingError) -> Self {
+        Self::TargetReadingError(x)
+    }
+}
+
+impl From<crate::ml::RescoreError> for TimsSeekError {
+    fn from(error: crate::ml::RescoreError) -> Self {
+        Self::Rescore(error)
+    }
+}
+
+impl From<TQDataProcessingError> for TimsSeekError {
+    fn from(x: TQDataProcessingError) -> Self {
+        Self::DataProcessingError(DataProcessingError::TimsQueryDataProcessingError {
+            error: x,
+            context: "".to_string(),
+        })
+    }
+}

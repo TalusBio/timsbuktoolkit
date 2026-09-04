@@ -1,0 +1,115 @@
+[workspace]
+resolver = "2"
+members = [
+    "rust/alloc_track",
+    "rust/array2d",
+    "rust/calibrt",
+    "rust/calib_dash",
+    "rust/micromzpaf",
+    "rust/timscentroid",
+    "rust/timsseek",
+    "rust/timsseek_cli",
+    "rust/timsquery",
+    "rust/timsquery_cli",
+    "rust/timsquery_viewer",
+    "rust/apex_sim",
+    "rust/tims_stage",
+    "rust/timsseek_macros",
+    "rust/rescore_dash",
+    "python/timsquery_pyo3"
+]
+default-members = [
+    "rust/alloc_track",
+    "rust/array2d",
+    "rust/calibrt",
+    # calib_dash is deliberately NOT here: it pulls ratatui/crossterm, and a bare
+    # `cargo build` should not compile a dev-only TUI. CI names it with `-p`.
+    "rust/micromzpaf",
+    "rust/timscentroid",
+    "rust/timsseek",
+    "rust/timsseek_cli",
+    "rust/timsquery",
+    "rust/timsquery_cli",
+    "rust/timsquery_viewer",
+    "rust/apex_sim",
+    "rust/tims_stage",
+    "rust/timsseek_macros"
+]
+
+[workspace.package]
+version = "0.34.0"
+edition = "2024"
+authors = ["Sebastian Paez"]
+license = "Apache-2.0"
+
+[workspace.dependencies]
+half = "2.6"
+tracing = { version = "0.1.40", features = ["log"] }
+serde = { version = "1.0.219", features = ["derive", "rc"] }
+serde_json = "1.0.141"
+tracing-subscriber = { version = "0.3.18", features = [
+  "registry",
+  "env-filter",
+  "json",
+] }
+# `minitdf` is off: nothing here reads MiniTDF, and that feature is what drags
+# in a second, older parquet (and with it the vulnerable thrift 0.17).
+timsrust = { git = "https://github.com/jspaezp/timsrust", branch = "experimental/recalib_iter", default-features = false, features = [
+  "tdf",
+  "serialize",
+] }
+rusqlite = "0.37.0"
+rayon = "1.5"
+memmap2 = "0.9"
+clap = { version = "4.5.27", features = ["derive"] }
+indicatif = { version = "0.18.0", features = ["rayon"] }
+
+# Keep versions in sync. arrow drops csv/ipc/json; parquet keeps every codec so
+# any speclib reads.
+parquet_derive = { version = "59.2" }
+parquet = { version = "59.2" }
+arrow = { version = "59.2", default-features = false }
+
+# Set as the global allocator on windows and musl, whose own allocators are
+# slower here -- musl's serialises on one lock. Every binary that wants it repeats
+# the same `cfg(any(target_os = "windows", target_env = "musl"))` gate. Only the
+# deployables carry it: the CLIs and the viewer. The rest are dev utilities and
+# may run slow on those targets.
+mimalloc = { version = "0.1.46", features = ["secure"] }
+thiserror = "2"
+insta = { version = "1.34.0" }
+bon = "3.8.1"
+tinyvec = { features = ["alloc", "serde"], version = "1.10.0" }
+smallvec = { version = "1.13", features = ["const_generics", "union"] }
+# `mzannotate` carries the mzSpecLib reader. Two fixes are not in a release yet:
+# named attribute sets were never applied, so every decoy in a target/decoy
+# library read back as a target, and retention time was dropped for any spectrum
+# whose writer grouped other attributes with it. `mzcore` and `mzcv` come from
+# the same source so the graph holds one copy of each and the ontology types
+# unify.
+#
+# Pinned by revision, not by branch: a branch can be force-pushed or deleted.
+# All three become version numbers once the fixes ship.
+mzannotate = { git = "https://github.com/jspaezp/rustyms", rev = "142c96ed1d31c56936c003af5f599d0c8f740005" }
+mzcore = { git = "https://github.com/jspaezp/rustyms", rev = "142c96ed1d31c56936c003af5f599d0c8f740005" }
+mzcv = { git = "https://github.com/jspaezp/rustyms", rev = "142c96ed1d31c56936c003af5f599d0c8f740005" }
+csv = "1.3"
+
+tempfile = "3.23.0"
+
+[workspace.lints.clippy]
+len_without_is_empty = "allow"
+
+[profile.dev]
+# Keeps `file:line` in backtraces at ~half the size of full debuginfo, which put
+# `target/debug` at 36 GB. Set `debug = true` for an lldb session.
+debug = "line-tables-only"
+
+[profile.release]
+lto = 'thin'
+codegen-units = 1
+panic = 'abort'
+opt-level = 3
+strip = "symbols"
+# Flip `strip` off and `debug = true` on when profiling / flamegraph.
+# debug = true

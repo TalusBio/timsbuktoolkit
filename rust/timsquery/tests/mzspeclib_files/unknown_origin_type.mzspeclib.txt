@@ -1,0 +1,14 @@
+<mzSpecLib>
+MS:1003186|library format version=1.0
+MS:1003188|library name=unknown_origin_type
+<AttributeSet Spectrum=all>
+MS:1000511|ms level=2
+<Spectrum=1>
+MS:1003061|library spectrum name=PEPTIDEK/2
+MS:1003072|spectrum origin type=MS:1999999|future origin type
+MS:1000041|charge state=2
+MS:1000744|selected ion m/z=458.23327
+<Analyte=1>
+MS:1003270|proforma peptidoform ion notation=PEPTIDEK/2
+<Peaks>
+227.10188	0.50000	b2

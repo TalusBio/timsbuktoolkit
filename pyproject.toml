@@ -1,0 +1,45 @@
+[project]
+name = "timsseek-workspace"
+version = "0.33.0"
+requires-python = ">=3.11,<3.13"
+dependencies = []
+
+[dependency-groups]
+dev = [
+  "pre-commit>=4.0.1",
+  "ruff>=0.9.0",
+  "pytest",
+  "uv",
+  "bumpver",
+  "plotnine>=0.15.2",
+]
+interactive = [
+  "pandas",
+  "polars",
+  "matplotlib",
+  "vizta",
+]
+
+[tool.ruff]
+target-version = "py312"
+
+[tool.ruff.format]
+docstring-code-format = true
+preview = true
+
+[tool.ruff.lint]
+select = ["E", "F", "T20", "I"]
+
+[tool.bumpver]
+current_version = "0.33.0"
+version_pattern = "MAJOR.MINOR.PATCH[-PYTAGNUM]"
+tag_message = "v{new_version}"
+commit_message = "chore: bump version to {new_version}"
+commit = true
+tag = true
+push = true
+
+[tool.bumpver.file_patterns]
+"python/*/pyproject.toml" = ['version = "{version}"$']
+"pyproject.toml" = ['version = "{version}"$']
+"Cargo.toml" = ['version = "{version}"$']

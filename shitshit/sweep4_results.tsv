@@ -1,0 +1,6 @@
+tag	ms1_extra	ms2_extra	status	peak_fp_mb	wall_s	idx_s	q01	q05	no_signal
+nt_ppm	transitive = false;	transitive = false;	ok	4784	168	61.779415917	4544	5440	442
+nt_bins1	transitive = false\nmz_tol = { Bins = 1 };	transitive = false\nmz_tol = { Bins = 1 };	ok	4607	199	77.347409875	4269	5050	448
+nt_bins1_im4	transitive = false\nmz_tol = { Bins = 1 }\nim_tol = { Pct = 4.0 };	transitive = false\nmz_tol = { Bins = 1 }\nim_tol = { Pct = 5.0 };	ok	4523	184	80.639082834	4455	5412	376
+nt_ppm_im4	transitive = false\nim_tol = { Pct = 4.0 };	transitive = false\nim_tol = { Pct = 5.0 };	ok	4967	148	50.581580708	4289	5193	420
+SWEEP_DONE

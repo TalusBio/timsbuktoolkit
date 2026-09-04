@@ -1,0 +1,62 @@
+version: "3"
+
+interval: 100ms
+
+includes:
+  timsseek: ./rust/timsseek
+
+tasks:
+  # Mirrors the `cargo-deny` CI job. Needs cargo-deny >= 0.16: older builds
+  # cannot parse CVSS 4.0 entries and die on the advisory database itself.
+  license_check:
+    cmds:
+      - cargo deny check
+
+  test:
+    cmds:
+      - cargo test -- --nocapture
+      # Not a default member — that keeps ratatui out of a plain `cargo build`.
+      - cargo test -p rescore_dash -- --nocapture
+      - uv run python -m pytest
+
+  fmt:
+    cmds:
+      - cargo +nightly fmt --verbose
+      - uv run ruff format
+
+  clippy:
+    cmds:
+      - cargo clippy --fix --allow-dirty --allow-staged {{.CLI_ARGS}} -- -D warnings
+      # Same: not a default member, so the line above never reaches it.
+      - cargo clippy -p rescore_dash --all-targets -- -D warnings
+      # dashboard.rs only exists under the opt-in feature; CI only `cargo check`s it.
+      - cargo clippy -p timsseek_cli --features dashboard --all-targets -- -D warnings
+
+  # Keep workspace documentation warning-free.
+  doc:
+    cmds:
+      - RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps
+
+  todos:
+    cmds:
+      - grep -nH -R TODO rust/tims*/src
+      - grep -nH -R "todo!" rust/tims*/src
+
+  build_python:
+    cmds:
+      - uv build --all-packages --verbose
+
+  bumpver:
+    cmds:
+      # --tag {alpha, beta, dev, rc, post, final}
+      - uv run --dev  bumpver update --minor --allow-dirty --no-commit
+      - cargo b
+      - uv lock
+
+  docker:
+    cmds:
+      # - cargo install cross --git https://github.com/cross-rs/cross
+      - cross build --release --target x86_64-unknown-linux-gnu --bin timsquery_cli
+      - cross build --release --target x86_64-unknown-linux-gnu --bin timsseek
+      - docker build --platform linux/amd64 -t timsseek:local .
+

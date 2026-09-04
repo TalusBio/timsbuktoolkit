@@ -1,0 +1,74 @@
+/data_ignore
+/target
+/templates
+/tmp
+/data_ignore
+.env
+.task/
+results.json
+
+**/.DS_Store
+*.code-workspace
+
+
+# Python stuff
+**/__pycache__
+**/*.pyc
+**/*.egg-info
+
+# Speclib stuff
+*.ndjson
+*.pretty.json
+
+# Test runs stuff
+*results*/*.csv
+*results*/*.json
+*results*/*.parquet
+
+*summary*/*.png
+*summary*/*.toml
+*summary*/*.parquet
+*human*/*.csv
+*human*/*.parquet
+*human*/*.png
+*hela*/*.parquet
+*hela*/*.csv
+*hela*/*.png
+*search_results*/*
+
+wandb/*
+docs/superpowers/*
+.plans/*
+.claude/*
+.prompts/*
+.scratch/
+sh*/
+*plan*.md
+# Working notes and design docs
+dev/
+debug_*.md
+
+docs/superpowers/
+
+# Bench / scratch scratch
+bench.bash
+bench_*.bash
+quichbench*.bash
+run_instrument.bash
+run_remote.bash
+stage.bash
+here.toml
+*.log
+results.tsv
+config_use.json
+latest_metrics.json
+plot_calib.py
+LEARNINGS.md
+research.md
+reading.md
+
+# A/B benchmark scratch (score-blocks)
+scratchpad_ab/
+ab_bench.out
+# Local bench outputs, logs, feature dumps (repo-local, never tracked)
+bench_out/

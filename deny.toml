@@ -1,0 +1,307 @@
+# This template contains all of the possible sections and their default values
+
+# Note that all fields that take a lint level have these possible values:
+# * deny - An error will be produced and the check will fail
+# * warn - A warning will be produced, but the check will not fail
+# * allow - No warning or error will be produced, though in some cases a note
+# will be
+
+# The values provided in this template are the default values that will be used
+# when any section or field is not specified in your own configuration
+
+[graph]
+
+# If 1 or more target triples (and optionally, target_features) are specified,
+# only the specified targets will be checked when running `cargo deny check`.
+# This means, if a particular package is only ever used as a target specific
+# dependency, such as, for example, the `nix` crate only being used via the
+# `target_family = "unix"` configuration, that only having windows targets in
+# this list would mean the nix crate, as well as any of its exclusive
+# dependencies not shared by any other crates, would be ignored, as the target
+# list here is effectively saying which targets you are building for.
+targets = [
+  { triple = "aarch64-apple-darwin" },
+  { triple = "x86_64-apple-darwin" },
+  { triple = "i686-pc-windows-gnu" },
+  { triple = "i686-pc-windows-msvc" },
+  { triple = "x86_64-pc-windows-gnu" },
+  { triple = "x86_64-pc-windows-msvc" },
+  { triple = "i686-unknown-linux-gnu" },
+  { triple = "x86_64-unknown-linux-gnu" },
+  { triple = "x86_64-unknown-linux-musl" },
+  # { triple = "wasm32-unknown-unknown" },
+  # { triple = "x86_64-unknown-redox" },
+]
+# When creating the dependency graph used as the source of truth when checks are
+# executed, this field can be used to prune crates from the graph, removing them
+# from the view of cargo-deny. This is an extremely heavy hammer, as if a crate
+# is pruned from the graph, all of its dependencies will also be pruned unless
+# they are connected to another crate in the graph that hasn't been pruned,
+# so it should be used with care. The identifiers are [Package ID Specifications]
+# (https://doc.rust-lang.org/cargo/reference/pkgid-spec.html)
+#exclude = []
+# If true, metadata will be collected with `--all-features`. Note that this can't
+# be toggled off if true, if you want to conditionally enable `--all-features` it
+# is recommended to pass `--all-features` on the cmd line instead
+all-features = false
+# If true, metadata will be collected with `--no-default-features`. The same
+# caveat with `all-features` applies
+no-default-features = false
+# If set, these feature will be enabled when collecting metadata. If `--features`
+# is specified on the cmd line they will take precedence over this option.
+features = []
+
+[output]
+# When outputting inclusion graphs in diagnostics that include features, this
+# option can be used to specify the depth at which feature edges will be added.
+# This option is included since the graphs can be quite large and the addition
+# of features from the crate(s) to all of the graph roots can be far too verbose.
+# This option can be overridden via `--feature-depth` on the cmd line
+feature-depth = 1
+
+# This section is considered when running `cargo deny check advisories`
+# More documentation for the advisories section can be found here:
+# https://embarkstudios.github.io/cargo-deny/checks/advisories/cfg.html
+[advisories]
+version = 2
+# The path where the advisory database is cloned/fetched into
+db-path = "~/.cargo/advisory-db"
+# The url(s) of the advisory databases to use
+db-urls = ["https://github.com/rustsec/advisory-db"]
+# The lint level for security vulnerabilities
+yanked = "warn"
+# A list of advisory IDs to ignore. Note that ignored advisories will still
+# output a note when they are encountered.
+#
+# Every entry below is here because no fixed version is reachable from this
+# tree, not because the finding was judged unimportant. Re-check them whenever
+# arrow-rs, egui or mzcore move; deleting an entry that has become fixable is
+# the point of writing the blocker down.
+ignore = [
+  # No fixed version exists: the authors stopped maintaining these crates.
+  # bincode arrives via mzcore/mzcv, paste via nalgebra -> mzsignal -> mzdata
+  # and via egui_dock, ttf-parser via ab_glyph -> epaint. All three are
+  # upstream migrations (postcard/bitcode/rkyv, and skrifa for the font
+  # parser), none of them ours to make.
+  { id = "RUSTSEC-2025-0141", reason = "bincode unmaintained; no fixed version, reached via mzcore/mzcv" },
+  { id = "RUSTSEC-2024-0436", reason = "paste unmaintained; no fixed version, build-time proc-macro under nalgebra and egui_dock" },
+  { id = "RUSTSEC-2026-0192", reason = "ttf-parser unmaintained; no fixed version, reached via ab_glyph -> epaint" },
+
+  # Both need quick-xml >= 0.41, which nothing here can pull:
+  #
+  #  - quick-xml 0.39.2 <- object_store 0.13.2 <- parquet 59.2. object_store
+  #    0.14 is fixed, but parquet still requires 0.13, so bumping our direct
+  #    dependency only adds a second copy and breaks the parquet boundary.
+  #  - quick-xml 0.39.2 <- wayland-scanner, a build-time proc-macro reading
+  #    protocol XML shipped in the crate. Not attacker-reachable at all.
+  #  - quick-xml 0.38.4 <- zbus_xml 5.1 <- atspi <- accesskit <- eframe.
+  #    zbus_xml 5.2.1 is fixed but zbus-lockstep 0.5.2 pins ^5.1. Upgrading
+  #    eframe does not help: 0.36.1 resolves to the same zbus_xml 5.1.0.
+  #
+  # Both are DoS-class and the reachable XML is S3/GCS list responses and the
+  # Linux accessibility bus -- not spectra, not library files.
+  { id = "RUSTSEC-2026-0194", reason = "quick-xml < 0.41 quadratic duplicate-attribute check; blocked on arrow-rs and accesskit" },
+  { id = "RUSTSEC-2026-0195", reason = "quick-xml < 0.41 unbounded namespace allocation; blocked on arrow-rs and accesskit" },
+]
+# Threshold for security vulnerabilities, any vulnerability with a CVSS score
+# lower than the range specified will be ignored. Note that ignored advisories
+# will still output a note when they are encountered.
+# * None - CVSS Score 0.0
+# * Low - CVSS Score 0.1 - 3.9
+# * Medium - CVSS Score 4.0 - 6.9
+# * High - CVSS Score 7.0 - 8.9
+# * Critical - CVSS Score 9.0 - 10.0
+#severity-threshold =
+
+# If this is true, then cargo deny will use the git executable to fetch advisory database.
+# If this is false, then it uses a built-in git library.
+# Setting this to true can be helpful if you have special authentication requirements that cargo-deny does not support.
+# See Git Authentication for more information about setting up git authentication.
+#git-fetch-with-cli = true
+
+# This section is considered when running `cargo deny check licenses`
+# More documentation for the licenses section can be found here:
+# https://embarkstudios.github.io/cargo-deny/checks/licenses/cfg.html
+[licenses]
+version = 2
+# List of explicitly allowed licenses
+# See https://spdx.org/licenses/ for list of possible licenses
+# [possible values: any SPDX 3.11 short identifier (+ optional exception)].
+allow = [
+  "MIT",
+  "Apache-2.0",
+  # Only reached via `target-lexicon`, a build dependency of pyo3.
+  "Apache-2.0 WITH LLVM-exception",
+  "BSD-2-Clause",
+  "BSD-3-Clause",
+  # Boost: permissive, and does not require attribution in binaries.
+  "BSL-1.0",
+  "Unicode-3.0",
+  "Zlib",
+  "ISC",
+]
+
+# The confidence threshold for detecting a license from license text.
+# The higher the value, the more closely the license text must be to the
+# canonical license text of a valid SPDX license file.
+# [possible values: any between 0.0 and 1.0].
+confidence-threshold = 0.95
+# Allow 1 or more licenses on a per-crate basis, so that particular licenses
+# aren't accepted for every possible crate as with the normal allow list
+#
+# MPL-2.0 is file-level copyleft: linking `option-ext` does not affect our code,
+# but modifying its own files would. Scoped to the crate rather than allowed
+# outright, so a future MPL dependency still has to be looked at. `option-ext`
+# arrives via dirs-sys -> directories, an unconditional dependency of mzcv.
+#
+# `epaint_default_fonts` licences the font files it embeds; see the clarify
+# entry below for why the Ubuntu font licence needs a `LicenseRef`.
+exceptions = [
+  { name = "option-ext", allow = ["MPL-2.0"] },
+  { name = "epaint_default_fonts", allow = [
+    "OFL-1.1",
+    "LicenseRef-Ubuntu-font-1.0",
+  ] },
+]
+
+# Some crates don't have (easily) machine readable licensing information,
+# adding a clarification entry for it allows you to manually specify the
+# licensing information
+
+# Declared as `(MIT OR Apache-2.0) AND OFL-1.1 AND Ubuntu-font-1.0`.
+# `Ubuntu-font-1.0` is not an SPDX identifier, so cargo-deny cannot parse the
+# expression at all and reports the crate as unlicensed rather than rejected.
+# Restate it with a `LicenseRef` for that one term; the rest is unchanged.
+[[licenses.clarify]]
+name = "epaint_default_fonts"
+expression = "(MIT OR Apache-2.0) AND OFL-1.1 AND LicenseRef-Ubuntu-font-1.0"
+license-files = [{ path = "fonts/OFL.txt", hash = 0x447eed1c }]
+
+[[licenses.clarify]]
+name = "webpki"
+expression = "ISC"
+license-files = [{ path = "LICENSE", hash = 0x001c7e6c }]
+
+[[licenses.clarify]]
+name = "ring"
+expression = "MIT AND ISC AND OpenSSL"
+license-files = [{ path = "LICENSE", hash = 0xbd0eed23 }]
+
+
+#[[licenses.clarify]]
+# The name of the crate the clarification applies to
+#name = "ring"
+# The optional version constraint for the crate
+#version = "*"
+# The SPDX expression for the license requirements of the crate
+#expression = "MIT AND ISC AND OpenSSL"
+# One or more files in the crate's source used as the "source of truth" for
+# the license expression. If the contents match, the clarification will be used
+# when running the license check, otherwise the clarification will be ignored
+# and the crate will be checked normally, which may produce warnings or errors
+# depending on the rest of your configuration
+#license-files = [
+# Each entry is a crate relative path, and the (opaque) hash of its contents
+#{ path = "LICENSE", hash = 0xbd0eed23 }
+#]
+
+[licenses.private]
+# If true, ignores workspace crates that aren't published, or are only
+# published to private registries.
+# To see how to mark a crate as unpublished (to the official registry),
+# visit https://doc.rust-lang.org/cargo/reference/manifest.html#the-publish-field.
+ignore = false
+# One or more private registries that you might publish crates to, if a crate
+# is only published to private registries, and ignore is true, the crate will
+# not have its license(s) checked
+registries = [
+  #"https://sekretz.com/registry
+]
+
+# This section is considered when running `cargo deny check bans`.
+# More documentation about the 'bans' section can be found here:
+# https://embarkstudios.github.io/cargo-deny/checks/bans/cfg.html
+[bans]
+# Lint level for when multiple versions of the same crate are detected
+multiple-versions = "warn"
+# Lint level for when a crate version requirement is `*`
+wildcards = "allow"
+# The graph highlighting used when creating dotgraphs for crates
+# with multiple versions
+# * lowest-version - The path to the lowest versioned duplicate is highlighted
+# * simplest-path - The path to the version with the fewest edges is highlighted
+# * all - Both lowest-version and simplest-path are used
+highlight = "all"
+# The default lint level for `default` features for crates that are members of
+# the workspace that is being checked. This can be overridden by allowing/denying
+# `default` on a crate-by-crate basis if desired.
+workspace-default-features = "allow"
+# The default lint level for `default` features for external crates that are not
+# members of the workspace. This can be overridden by allowing/denying `default`
+# on a crate-by-crate basis if desired.
+external-default-features = "allow"
+# List of crates that are allowed. Use with care!
+allow = [
+  #{ name = "ansi_term", version = "=0.11.0" },
+]
+# List of crates to deny
+deny = [
+  # Each entry the name of a crate and a version range. If version is
+  # not specified, all versions will be matched.
+  #{ name = "ansi_term", version = "=0.11.0" },
+  #
+  # Wrapper crates can optionally be specified to allow the crate when it
+  # is a direct dependency of the otherwise banned crate
+  #{ name = "ansi_term", version = "=0.11.0", wrappers = [] },
+]
+
+# List of features to allow/deny
+# Each entry the name of a crate and a version range. If version is
+# not specified, all versions will be matched.
+#[[bans.features]]
+#name = "reqwest"
+# Features to not allow
+#deny = ["json"]
+# Features to allow
+#allow = [
+#    "rustls",
+#    "__rustls",
+#    "__tls",
+#    "hyper-rustls",
+#    "rustls",
+#    "rustls-pemfile",
+#    "rustls-tls-webpki-roots",
+#    "tokio-rustls",
+#    "webpki-roots",
+#]
+# If true, the allowed features must exactly match the enabled feature set. If
+# this is set there is no point setting `deny`
+#exact = true
+
+# Certain crates/versions that will be skipped when doing duplicate detection.
+skip = []
+# Similarly to `skip` allows you to skip certain crates during duplicate
+# detection. Unlike skip, it also includes the entire tree of transitive
+# dependencies starting at the specified crate, up to a certain depth, which is
+# by default infinite.
+skip-tree = []
+
+# This section is considered when running `cargo deny check sources`.
+# More documentation about the 'sources' section can be found here:
+# https://embarkstudios.github.io/cargo-deny/checks/sources/cfg.html
+[sources]
+# Lint level for what to happen when a crate from a crate registry that is not
+# in the allow list is encountered
+unknown-registry = "warn"
+# Lint level for what to happen when a crate from a git repository that is not
+# in the allow list is encountered
+unknown-git = "warn"
+# List of URLs for allowed crate registries. Defaults to the crates.io index
+# if not specified. If it is specified but empty, no registries are allowed.
+allow-registry = ["https://github.com/rust-lang/crates.io-index"]
+# List of URLs for allowed Git repositories
+allow-git = ["https://github.com/lazear/sage"]
+
+[sources.allow-org]
+# 1 or more github.com organizations to allow git sources for
+# github = [""]

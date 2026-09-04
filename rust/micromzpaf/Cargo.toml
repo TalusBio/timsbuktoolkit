@@ -1,0 +1,15 @@
+[package]
+name = "micromzpaf"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+serde = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
+# Used for the one-time warning when parsing drops a mass-error suffix.
+tracing = { workspace = true }
+
+[dev-dependencies]
+# Pins the string serialization format.
+serde_json = { workspace = true }

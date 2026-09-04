@@ -1,0 +1,114 @@
+//! File loading service
+
+use std::path::Path;
+use std::sync::Arc;
+use timsquery::models::tolerance::Tolerance;
+use timsquery::serde::{
+    IndexLoadConfig,
+    IndexedPeaksHandle,
+    load_index_auto,
+};
+use tracing::info;
+
+use crate::error::ViewerError;
+use crate::file_loader::ElutionGroupData;
+
+/// Stateless namespace for file-loading entry points. Could be free functions;
+/// kept as a unit struct so call sites read `FileService::load_*`.
+pub struct FileService;
+
+impl FileService {
+    /// Load elution groups from a JSON file
+    ///
+    /// # Arguments
+    /// * `path` - Path to the elution groups file (.json or .txt)
+    ///
+    /// # Returns
+    /// Parsed elution group data
+    pub fn load_elution_groups(path: &Path) -> Result<ElutionGroupData, ViewerError> {
+        // Load the SAME shared columnar arena the timsseek CLI scores, so the
+        // viewer displays exactly what gets scored (one isotope model, one
+        // intensity source). String-labelled JSON elution-group files no longer
+        // load here: scoring requires ion-annotated fragments + reference
+        // intensities, which only the DIA-NN family (.speclib/TSV/parquet)
+        // carry.
+        let lib = timsseek::ReferenceLibrary::from_file(path, timsseek::LoadPolicy::default())
+            .map_err(|e| ViewerError::General(format!("Failed to load library: {e:?}")))?;
+        info!(
+            "Loaded {} library entries from {}",
+            lib.len(),
+            path.display()
+        );
+        Ok(ElutionGroupData::new(lib))
+    }
+
+    /// Load and index raw timsTOF data from a location (path or URL)
+    ///
+    /// Supports both local paths and cloud URLs (s3://, gs://, az://).
+    /// Automatically detects input type and loads appropriately.
+    ///
+    /// For cloud cached indexes (.idx), uses lazy loading for faster initialization
+    /// (loads metadata only, row groups fetched on-demand during queries).
+    ///
+    /// Note: This operation may take 10-30 seconds for large datasets when
+    /// loading from raw .d files. Cached .idx files load much faster.
+    ///
+    /// # Arguments
+    /// * `location` - Path or URL to the .d directory or .idx cache
+    ///
+    /// # Returns
+    /// Indexed peaks loaded into memory
+    pub fn load_raw_data_from_location(
+        location: &str,
+    ) -> Result<Arc<IndexedPeaksHandle>, ViewerError> {
+        // Detect if cloud URL
+        let is_cloud = location.contains("://") && !location.starts_with("file://");
+        // Use lazy loading for cloud cached indexes (fast init, load on query)
+        let prefer_lazy = is_cloud;
+
+        info!(
+            "Loading raw data from {}: is_cloud={}, prefer_lazy={}",
+            location, is_cloud, prefer_lazy
+        );
+
+        let config = IndexLoadConfig {
+            prefer_lazy,
+            ..Default::default()
+        };
+
+        let (index, index_source) = load_index_auto(location, Some(config))
+            .map_err(|e| ViewerError::General(format!("Failed to load index: {:?}", e)))?;
+        // Surface the load mechanism (cache reuse vs raw build + reader).
+        tracing::info!("Index source: {index_source}");
+
+        Ok(Arc::new(index))
+    }
+
+    /// Load and index raw timsTOF data (legacy method for local paths)
+    ///
+    /// Supports both local paths and cloud URLs (s3://, gs://, az://).
+    /// Automatically detects input type and loads appropriately.
+    ///
+    /// Load tolerance settings from a JSON file
+    ///
+    /// # Arguments
+    /// * `path` - Path to the tolerance JSON file
+    ///
+    /// # Returns
+    /// Parsed tolerance settings
+    pub fn load_tolerance(path: &Path) -> Result<Tolerance, ViewerError> {
+        let file_content = std::fs::read_to_string(path)?;
+        let tolerance: Tolerance = serde_json::from_str(&file_content)?;
+        Ok(tolerance)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_file_service_structure() {
+        let _service = FileService;
+    }
+}

@@ -1,0 +1,690 @@
+//! Synthetic extraction-product generator.
+//!
+//! Builds a [`timsseek::scoring::apex_finding::Extraction`] from tunable knobs
+//! WITHOUT any real timsTOF index or `.d` data. The produced extraction is fed
+//! verbatim to the real `TraceScorer`, so what the app scores is exactly what
+//! the timsseek pipeline would score.
+//!
+//! Model: all "real" fragments co-elute at a single shared apex cycle (no RT
+//! drift between real fragments -- coelution is always real). Realism knobs:
+//! per-fragment noise, theoretical-vs-observed ratio mismatch (`obs_scale`),
+//! absent/empty transitions (`obs_scale == 0`), randomly injected peak-like
+//! objects, and a global noise floor.
+
+use rand::{
+    Rng,
+    SeedableRng,
+};
+use rand_chacha::ChaCha8Rng;
+
+use timsquery::models::OwnedSourceId;
+use timsquery::{
+    ChromatogramCollector,
+    MzMajorIntensityArray,
+    TupleRange,
+};
+use timsseek::ExpectedIntensities;
+use timsseek::scoring::apex_finding::Extraction;
+use timsseek::scoring::pipeline::{
+    TOP_N_FRAGMENTS,
+    filter_zero_intensity_ions,
+    select_top_n_fragments,
+};
+
+/// A library fragment. Theoretical and observed intensities are decoupled:
+/// `theo_intensity` is what the spectral library predicts (goes into
+/// `ExpectedIntensities`), while the observed peak height is
+/// `theo_intensity * obs_scale`. Real speclibs are often measured on a
+/// different instrument, so observed ratios rarely match theory exactly.
+///
+/// - `obs_scale == 1.0` -> observed matches theory.
+/// - `obs_scale != 1.0` -> instrument ratio mismatch.
+/// - `obs_scale == 0.0` -> transition is EXPECTED but ABSENT: its trace is
+///   pure noise (an "empty" transition), which stresses fragment coverage.
+#[derive(Debug, Clone)]
+pub struct FragmentSpec {
+    pub label: String,
+    /// Theoretical (library) relative intensity -> `ExpectedIntensities`.
+    pub theo_intensity: f32,
+    /// Observed height multiplier relative to theory (0 => empty/noise-only).
+    pub obs_scale: f32,
+    /// Per-fragment noise multiplier (some fragments noisier than others).
+    pub noise_mult: f32,
+}
+
+/// Random "peak-like objects" injected onto existing transitions/precursors.
+///
+/// These are `count`
+/// gaussian bumps scattered uniformly at random -- each lands on a randomly
+/// chosen existing transition (and optionally precursor) row, at a uniform-
+/// random cycle, with height/width drawn uniformly from the given ranges.
+/// Because they add onto REAL rows, they perturb cosine/scribe/apex directly.
+#[derive(Debug, Clone)]
+pub struct RandomPeaks {
+    pub enabled: bool,
+    pub count: usize,
+    /// Peak height as a fraction of the global `height`, drawn uniformly.
+    pub height_frac_min: f32,
+    pub height_frac_max: f32,
+    /// If true, precursor rows are also eligible targets.
+    pub hit_precursors: bool,
+    /// Interferents per cycle; when > 0 this overrides `count` as
+    /// `round(density_per_cycle * n_cycles * hardness)`, so interferent DENSITY
+    /// (not absolute count) stays fixed as the window widens -- a fixed count in
+    /// a wide window is an artificially easy task.
+    pub density_per_cycle: f32,
+    /// Multiplier (>=1) to deliberately over-load interferents above realistic
+    /// density for stress-testing.
+    pub hardness: f32,
+}
+
+impl Default for RandomPeaks {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            count: 200,
+            height_frac_min: 0.1,
+            height_frac_max: 10.0,
+            hit_precursors: true,
+            density_per_cycle: 0.0,
+            hardness: 1.0,
+        }
+    }
+}
+
+/// Effective interferent count for a window of `n_cycles`: density-scaled when
+/// `density_per_cycle > 0`, else the absolute `count`.
+pub fn effective_random_count(rp: &RandomPeaks, n_cycles: usize) -> usize {
+    if rp.density_per_cycle > 0.0 {
+        (rp.density_per_cycle * n_cycles as f32 * rp.hardness.max(1.0)).round() as usize
+    } else {
+        rp.count
+    }
+}
+
+/// Full set of simulation knobs. Deterministic given `seed`.
+#[derive(Debug, Clone)]
+pub struct SimParams {
+    pub n_cycles: usize,
+    /// Shared apex position (cycle index) for all real fragments + precursor.
+    /// Always offset by a seeded sub-cycle `U(-0.5, 0.5)` -- the realized peak
+    /// never sits exactly on a cycle boundary. See `realized_apex_cycle`.
+    pub apex_cycle: f32,
+    /// COARSE per-seed relocation on top of the sub-cycle offset: `Some(range)`
+    /// draws `U(-range, range)`, so the peak also moves around the window.
+    /// `None` keeps it near `apex_cycle`.
+    pub apex_jitter: Option<f32>,
+    /// Elution peak width (gaussian sigma, in cycles).
+    pub width_sigma: f32,
+    /// Global height scale applied on top of each fragment's rel_intensity.
+    pub height: f32,
+
+    pub real_fragments: Vec<FragmentSpec>,
+    pub random_peaks: RandomPeaks,
+
+    /// Number of precursor isotopes (keys 0..n, all positive => scored).
+    pub n_isotopes: usize,
+    pub precursor_intensity: f32,
+    /// Per-cell noise scale for precursor rows, the counterpart of
+    /// [`FragmentSpec::noise_mult`]. Moves precursor density without touching the
+    /// fragment rows; see [`SimParams::with_measured_density`].
+    pub precursor_noise_mult: f32,
+
+    /// Global additive noise scale (uniform 0..1 * this, per cell).
+    pub noise_floor: f32,
+
+    /// Detection threshold as a fraction of `height`: a cell below it is
+    /// recorded as zero. Applied after interferent injection, so it bounds the
+    /// cell's final content, not just the simulated signal.
+    pub detection_floor: f32,
+
+    pub seed: u64,
+
+    // Cycle <-> ms mapping for the rt_mapper.
+    pub rt_start_ms: u32,
+    pub cycle_period_ms: u32,
+}
+
+impl Default for SimParams {
+    fn default() -> Self {
+        // (label, theo_intensity, obs_scale, noise_mult)
+        // obs_scale defaults deviate from 1.0 => realistic cross-instrument
+        // ratio mismatch out of the box (observed != theoretical).
+        let real_fragments = vec![
+            ("y3", 1.00, 0.9, 1.0),
+            ("y4", 0.80, 1.1, 1.0),
+            ("y5", 0.55, 0.6, 1.5),
+            ("b3", 0.40, 1.3, 1.0),
+            ("b4", 0.30, 0.8, 2.5),
+            ("y6", 0.20, 1.0, 1.0),
+        ]
+        .into_iter()
+        .map(|(l, theo, obs, n)| FragmentSpec {
+            label: l.to_string(),
+            theo_intensity: theo,
+            obs_scale: obs,
+            noise_mult: n,
+        })
+        .collect();
+
+        Self {
+            n_cycles: 60,
+            apex_cycle: 30.0,
+            apex_jitter: None,
+            width_sigma: 1.0,
+            height: 1000.0,
+            real_fragments,
+            random_peaks: RandomPeaks::default(),
+            n_isotopes: 3,
+            precursor_intensity: 0.7,
+            precursor_noise_mult: 1.0,
+            noise_floor: 0.02,
+            detection_floor: 0.0,
+            seed: 42,
+            rt_start_ms: 60_000,
+            cycle_period_ms: 1_000,
+        }
+    }
+}
+
+impl SimParams {
+    /// Populate cells at roughly the rate real data does (~0.7 fragment, ~0.4
+    /// precursor), where every other scenario fills every cell. The three numbers
+    /// are eyeballed from one real run: `detection_floor` sets fragment density,
+    /// and `precursor_noise_mult` moves precursor density separately, the floor
+    /// being compared against the cell so the noise-to-floor ratio decides survival.
+    pub fn with_measured_density(mut self) -> Self {
+        self.noise_floor = 0.2;
+        self.detection_floor = 0.097;
+        self.precursor_noise_mult = 0.57;
+        self
+    }
+
+    /// Linear cycle -> retention-time (ms) mapper, matching what the pipeline
+    /// passes into `TraceScorer::suggest_apex` / `score_at`.
+    pub fn rt_mapper(&self) -> impl Fn(usize) -> u32 + '_ {
+        move |cycle: usize| self.rt_start_ms + (cycle as u32) * self.cycle_period_ms
+    }
+}
+
+/// A single observed transition row, kept for display alongside the extraction.
+#[derive(Debug, Clone)]
+pub struct TransitionRow {
+    pub label: String,
+    /// True when the transition is expected but observed as noise only
+    /// (`obs_scale == 0`). Drawn dashed so it reads as "missing".
+    pub is_absent: bool,
+    pub intensities: Vec<f32>,
+}
+
+/// The synthesized data: the `Extraction` fed to the scorer, plus the raw rows
+/// (fragments + precursors) kept separately so the UI can plot them directly.
+pub struct SimData {
+    pub extraction: Extraction<String>,
+    pub fragment_rows: Vec<TransitionRow>,
+    pub precursor_rows: Vec<TransitionRow>,
+    /// The (fractional) apex cycle actually used to generate this realization:
+    /// `apex_cycle` + optional coarse jitter + the always-on sub-cycle offset.
+    pub realized_apex_cycle: f32,
+}
+
+/// Gaussian elution value at `cycle` for a peak centered at `center`.
+fn gaussian(cycle: f32, center: f32, sigma: f32, height: f32) -> f32 {
+    let z = (cycle - center) / sigma;
+    height * (-0.5 * z * z).exp()
+}
+
+/// Build the full synthetic extraction + display rows from `params`.
+pub fn build(params: &SimParams) -> SimData {
+    let mut rng = ChaCha8Rng::seed_from_u64(params.seed);
+    let n = params.n_cycles;
+    let dummy_mz = 500.0_f64;
+
+    // Realized apex, drawn BEFORE any signal/noise sampling. A real peak never
+    // lands exactly on a cycle boundary, so the sub-cycle offset is ALWAYS
+    // applied; `apex_jitter` adds coarse per-seed relocation on top of it.
+    let realized_apex = {
+        let lo = 3.0f32;
+        let hi = (n as f32 - 4.0).max(lo);
+        let coarse = params
+            .apex_jitter
+            .map_or(0.0, |range| rng.random_range(-range..=range));
+        let subcycle = rng.random_range(-0.5..=0.5);
+        (params.apex_cycle + coarse + subcycle).clamp(lo, hi)
+    };
+
+    // --- Expected intensities: THEORETICAL (library) ratios. ---
+    // These drive cosine/scribe. Observed peaks below may deviate (obs_scale).
+    let expected = ExpectedIntensities::try_from_pairs(
+        params
+            .real_fragments
+            .iter()
+            .map(|f| (f.label.clone(), f.theo_intensity)),
+        (0..params.n_isotopes as i8).map(|iso| {
+            // simple decaying isotope pattern
+            (iso, params.precursor_intensity * 0.6_f32.powi(iso as i32))
+        }),
+    )
+    .expect("labels are unique by construction");
+
+    let detection_floor = params.detection_floor * params.height;
+
+    // --- Fragment rows: OBSERVED = theo * obs_scale (co-eluting). ---
+    let mut frag_order: Vec<(String, f64)> = Vec::new();
+    let mut frag_rows: Vec<TransitionRow> = Vec::new();
+
+    for f in &params.real_fragments {
+        // Observed height decoupled from theory. obs_scale == 0 => absent
+        // transition: no peak, trace is pure noise.
+        let peak = params.height * f.theo_intensity * f.obs_scale;
+        let noise = params.noise_floor * params.height * f.noise_mult;
+        let intensities = (0..n)
+            .map(|c| {
+                let signal = gaussian(c as f32, realized_apex, params.width_sigma, peak);
+                sample_cell(&mut rng, signal, noise)
+            })
+            .collect();
+        frag_order.push((f.label.clone(), dummy_mz));
+        frag_rows.push(TransitionRow {
+            label: f.label.clone(),
+            is_absent: f.obs_scale <= 0.0,
+            intensities,
+        });
+    }
+
+    // --- Precursor rows (isotopes, co-eluting at shared apex) ---
+    let mut prec_order: Vec<(i8, f64)> = Vec::new();
+    let mut prec_rows: Vec<TransitionRow> = Vec::new();
+    for iso in 0..params.n_isotopes as i8 {
+        let peak = params.height * params.precursor_intensity * 0.6_f32.powi(iso as i32);
+        let noise = params.noise_floor * params.height * params.precursor_noise_mult;
+        let intensities = (0..n)
+            .map(|c| {
+                let signal = gaussian(c as f32, realized_apex, params.width_sigma, peak);
+                sample_cell(&mut rng, signal, noise)
+            })
+            .collect();
+        prec_order.push((iso, dummy_mz));
+        prec_rows.push(TransitionRow {
+            label: format!("M+{iso}"),
+            is_absent: false,
+            intensities,
+        });
+    }
+
+    // --- Inject random peak-like objects onto existing rows ---
+    inject_random_peaks(&mut rng, &mut frag_rows, &mut prec_rows, params);
+
+    apply_detection_floor(&mut frag_rows, detection_floor);
+    apply_detection_floor(&mut prec_rows, detection_floor);
+
+    // --- Pack into MzMajorIntensityArrays (cycle_offset = 0) ---
+    let mut fragments = MzMajorIntensityArray::<String, f32>::try_new_empty(frag_order, n, 0)
+        .expect("non-empty fragments");
+    fill_array(&mut fragments, &frag_rows);
+
+    let mut precursors = MzMajorIntensityArray::<i8, f32>::try_new_empty(prec_order, n, 0)
+        .expect("non-empty precursors");
+    fill_array(&mut precursors, &prec_rows);
+
+    let n_frag_peaks: u64 = frag_rows
+        .iter()
+        .map(|r| r.intensities.iter().filter(|v| **v > 0.0).count() as u64)
+        .sum();
+    let n_prec_peaks: u64 = prec_rows
+        .iter()
+        .map(|r| r.intensities.iter().filter(|v| **v > 0.0).count() as u64)
+        .sum();
+
+    let map = params.rt_mapper();
+    let rt_range_ms =
+        TupleRange::try_new(map(0), map(n - 1)).expect("start < end for positive period");
+
+    let chromatograms = ChromatogramCollector::<String, f32> {
+        id: OwnedSourceId::placeholder(),
+        mobility_ook0: 1.0,
+        rt_seconds: (map((realized_apex as usize).min(n - 1)) as f32) / 1000.0,
+        precursor_mono_mz: dummy_mz,
+        precursor_charge: 2,
+        precursor_mz_limits: (dummy_mz - 1.0, dummy_mz + 1.0),
+        precursors,
+        fragments,
+        rt_range_ms,
+        n_precursor_peaks_added: n_prec_peaks,
+        n_fragment_peaks_added: n_frag_peaks,
+        n_quad_windows_matched: 1,
+    };
+
+    let mut extraction = Extraction {
+        expected_intensities: expected,
+        chromatograms,
+    };
+
+    // Apply the SAME extraction-time filtering the production pipeline always
+    // runs before scoring (broad + calibrated paths, extraction.rs): drop
+    // zero-intensity ions, then keep the top-N fragments by predicted
+    // intensity. Without this the scorer would see rows production discards
+    // (e.g. an absent transition's all-noise row, or >TOP_N_FRAGMENTS ions),
+    // making the sim diverge from what timsseek actually scores.
+    filter_zero_intensity_ions(
+        &mut extraction.chromatograms,
+        &mut extraction.expected_intensities,
+    );
+    select_top_n_fragments(
+        &mut extraction.chromatograms,
+        &mut extraction.expected_intensities,
+        TOP_N_FRAGMENTS,
+    );
+
+    // Display rows are kept RAW (everything simulated), so the plots show the
+    // full input; the scored `extraction` reflects post-filter reality.
+    SimData {
+        extraction,
+        fragment_rows: frag_rows,
+        precursor_rows: prec_rows,
+        realized_apex_cycle: realized_apex,
+    }
+}
+
+/// Scatter `count` random gaussian bumps across the transition (and optionally
+/// precursor) rows. Each bump: uniform-random target row, uniform-random center
+/// cycle, uniform height (fraction of global height) and sigma.
+fn inject_random_peaks(
+    rng: &mut ChaCha8Rng,
+    frag_rows: &mut [TransitionRow],
+    prec_rows: &mut [TransitionRow],
+    params: &SimParams,
+) {
+    let rp = &params.random_peaks;
+    let n = params.n_cycles;
+    let count = effective_random_count(rp, n);
+    if !rp.enabled || count == 0 {
+        return;
+    }
+    let n_frag = frag_rows.len();
+    let n_targets = n_frag
+        + if rp.hit_precursors {
+            prec_rows.len()
+        } else {
+            0
+        };
+    if n_targets == 0 {
+        return;
+    }
+
+    for _ in 0..count {
+        let target = rng.random_range(0..n_targets);
+        let row = if target < n_frag {
+            &mut frag_rows[target]
+        } else {
+            &mut prec_rows[target - n_frag]
+        };
+        let center = rng.random_range(0.0..n as f32);
+        // Width inherited from the peptide's elution width (the fragments the
+        // injected peak is contaminating).
+        let sigma = params.width_sigma;
+        let hfrac =
+            rng.random_range(rp.height_frac_min..=rp.height_frac_max.max(rp.height_frac_min));
+        let peak = params.height * hfrac;
+        for (cy, v) in row.intensities.iter_mut().enumerate() {
+            *v += gaussian(cy as f32, center, sigma, peak);
+        }
+    }
+}
+
+/// Sample one observed cell: signal + uniform noise floor, clamped >=0.
+fn sample_cell(rng: &mut ChaCha8Rng, signal: f32, noise: f32) -> f32 {
+    (signal + rng.random::<f32>() * noise).max(0.0)
+}
+
+/// Zero every cell below `floor`, so it is absent from the chromatogram rather
+/// than small.
+fn apply_detection_floor(rows: &mut [TransitionRow], floor: f32) {
+    if floor <= 0.0 {
+        return;
+    }
+    for row in rows.iter_mut() {
+        for cell in row.intensities.iter_mut() {
+            if *cell < floor {
+                *cell = 0.0;
+            }
+        }
+    }
+}
+
+/// Copy display rows into an [`MzMajorIntensityArray`] via `add_at_index`.
+fn fill_array<K: timsquery::KeyLike>(
+    arr: &mut MzMajorIntensityArray<K, f32>,
+    rows: &[TransitionRow],
+) {
+    // iter_mut_mzs yields rows in mz_order order == `rows` order; zip directly.
+    for (row, ((_key, _mz), mut chrom)) in rows.iter().zip(arr.iter_mut_mzs()) {
+        for (cycle, &val) in row.intensities.iter().enumerate() {
+            if val > 0.0 {
+                chrom.add_at_index(cycle as u32, val);
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Fraction of cells above zero, fragments then precursors.
+    fn cell_density(params: &SimParams) -> (f64, f64) {
+        let d = build(params);
+        let frac = |rows: &[TransitionRow]| {
+            let cells: usize = rows.iter().map(|r| r.intensities.len()).sum();
+            let pos: usize = rows
+                .iter()
+                .map(|r| r.intensities.iter().filter(|v| **v > 0.0).count())
+                .sum();
+            pos as f64 / cells as f64
+        };
+        (frac(&d.fragment_rows), frac(&d.precursor_rows))
+    }
+
+    /// The `*_measured_density` scenarios leave cells empty without emptying the grid.
+    #[test]
+    fn measured_density_scenarios_are_sparse() {
+        let scenarios: Vec<_> = crate::bench::broad_suite()
+            .into_iter()
+            .chain(crate::bench::narrow_suite())
+            .filter(|(name, _)| name.ends_with("measured_density"))
+            .collect();
+        assert_eq!(scenarios.len(), 2, "both suites must carry the scenario");
+
+        for (name, params) in scenarios {
+            let (frag, prec) = cell_density(&params);
+            assert!(frag > 0.15 && frag < 0.9, "{name} fragment density {frag}");
+            assert!(prec > 0.15 && prec < 0.9, "{name} precursor density {prec}");
+        }
+    }
+
+    #[test]
+    fn density_scales_interferent_count_with_window() {
+        let mut p = SimParams {
+            random_peaks: RandomPeaks {
+                count: 0,
+                density_per_cycle: 2.0,
+                hardness: 1.0,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        assert_eq!(effective_random_count(&p.random_peaks, 100), 200);
+        assert_eq!(effective_random_count(&p.random_peaks, 1000), 2000);
+        p.random_peaks.hardness = 3.0;
+        assert_eq!(effective_random_count(&p.random_peaks, 100), 600);
+        // count path preserved when density is 0
+        let q = RandomPeaks {
+            density_per_cycle: 0.0,
+            count: 77,
+            ..Default::default()
+        };
+        assert_eq!(effective_random_count(&q, 5000), 77);
+    }
+
+    #[test]
+    fn apex_jitter_is_deterministic_and_subcycle() {
+        let p = SimParams {
+            n_cycles: 200,
+            apex_cycle: 100.0,
+            apex_jitter: Some(20.0),
+            ..Default::default()
+        };
+        let a = build(&p).realized_apex_cycle;
+        let b = build(&p).realized_apex_cycle; // same seed => identical
+        assert_eq!(a, b);
+        assert!((a - 100.0).abs() <= 20.5 + 1e-3);
+        // vary seed => different position
+        let mut q = p.clone();
+        q.seed = p.seed.wrapping_add(1);
+        let c = build(&q).realized_apex_cycle;
+        assert!((a - c).abs() > 1e-6);
+        // No coarse jitter => still sub-cycle offset, never exactly on-grid.
+        let mut r = p.clone();
+        r.apex_jitter = None;
+        let d = build(&r).realized_apex_cycle;
+        assert!((d - 100.0).abs() <= 0.5, "sub-cycle offset only, got {d}");
+        assert!(d.fract() != 0.0, "peak must not land on a cycle boundary");
+    }
+
+    #[test]
+    fn clean_peak_apex_lands_at_configured_cycle() {
+        let p = SimParams {
+            noise_floor: 0.0,
+            apex_cycle: 25.0,
+            random_peaks: RandomPeaks {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        let data = build(&p);
+        // The tallest real fragment row peaks at the cycle nearest the realized
+        // (sub-cycle offset) apex.
+        let row = &data.fragment_rows[0];
+        let (max_idx, _) = row
+            .intensities
+            .iter()
+            .enumerate()
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap())
+            .unwrap();
+        assert_eq!(max_idx, data.realized_apex_cycle.round() as usize);
+        assert!((data.realized_apex_cycle - 25.0).abs() <= 0.5);
+    }
+
+    #[test]
+    fn deterministic_given_seed() {
+        let p = SimParams::default();
+        let a = build(&p);
+        let b = build(&p);
+        assert_eq!(
+            a.fragment_rows[0].intensities,
+            b.fragment_rows[0].intensities
+        );
+    }
+
+    #[test]
+    fn empty_transition_at_zero_noise_is_filtered_out() {
+        // At zero noise an absent (obs_scale=0) transition is an all-zero row.
+        // Production's filter_zero_intensity_ions drops such rows AND their
+        // expected entry, so the sim must too (matches timsseek exactly).
+        let mut p = SimParams {
+            noise_floor: 0.0,
+            random_peaks: RandomPeaks {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        p.real_fragments[0].obs_scale = 0.0;
+        let label = p.real_fragments[0].label.clone();
+        let data = build(&p);
+        // Display keeps the raw simulated row (all zeros, marked absent)...
+        assert!(data.fragment_rows[0].intensities.iter().all(|&v| v == 0.0));
+        assert!(data.fragment_rows[0].is_absent);
+        // ...but it is dropped from the SCORED extraction's expected set.
+        assert!(
+            data.extraction
+                .expected_intensities
+                .get_fragment(&label)
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn top_n_fragments_capped_for_scoring() {
+        // Add well beyond TOP_N; the scored extraction caps to TOP_N while
+        // display keeps all raw rows.
+        let mut p = SimParams {
+            random_peaks: RandomPeaks {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        for i in 0..12 {
+            p.real_fragments.push(FragmentSpec {
+                label: format!("z{i}"),
+                theo_intensity: 0.05,
+                obs_scale: 1.0,
+                noise_mult: 1.0,
+            });
+        }
+        let data = build(&p);
+        assert!(data.fragment_rows.len() > 8);
+        assert!(data.extraction.expected_intensities.fragment_len() <= 8);
+    }
+
+    #[test]
+    fn observed_decoupled_from_theoretical() {
+        let mut p = SimParams {
+            noise_floor: 0.0,
+            apex_cycle: 30.0,
+            random_peaks: RandomPeaks {
+                enabled: false,
+                ..Default::default()
+            },
+            ..Default::default()
+        };
+        // Two fragments the LIBRARY calls identical, differing only in how much
+        // of that signal the instrument actually sees.
+        p.real_fragments[0].theo_intensity = 1.0;
+        p.real_fragments[0].obs_scale = 0.5; // observed at half of theory
+        p.real_fragments[1].theo_intensity = 1.0;
+        p.real_fragments[1].obs_scale = 1.0; // observed as predicted
+        let (half_label, full_label) = (
+            p.real_fragments[0].label.clone(),
+            p.real_fragments[1].label.clone(),
+        );
+        let data = build(&p);
+
+        let peak = |i: usize| {
+            data.fragment_rows[i]
+                .intensities
+                .iter()
+                .cloned()
+                .fold(0.0_f32, f32::max)
+        };
+        let (half, full) = (peak(0), peak(1));
+
+        // Both rows co-elute at the same realized (off-grid) apex with the same
+        // width, so every shape term -- peak height scale, the gaussian, the
+        // sub-cycle sampling loss -- is common to both and cancels in the ratio.
+        // What survives is exactly the obs_scale ratio, computed WITHOUT
+        // reproducing any of the generator's own arithmetic.
+        assert!(full > 0.0, "reference fragment must carry signal: {full}");
+        assert!(
+            ((half / full) - 0.5).abs() < 1e-4,
+            "observed ratio must track obs_scale (0.5), got {half}/{full}"
+        );
+
+        // ...while the THEORETICAL intensities handed to the scorer stay equal:
+        // obs_scale must not leak into the library side.
+        let theo = |l: &String| data.extraction.expected_intensities.get_fragment(l);
+        assert_eq!(theo(&half_label), theo(&full_label));
+    }
+}

@@ -1,0 +1,30 @@
+[package]
+name = "tims_stage"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+timscentroid = { path = "../timscentroid" }
+serde = { workspace = true, features = ["derive"] }
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tempfile = { workspace = true }
+indicatif = { workspace = true }
+bytes = "1"
+url = "2"
+# RFC-3986 URIs -- matches the reader manifest's `http::Uri` members.
+http = "1"
+
+[dev-dependencies]
+tempfile = { workspace = true }
+filetime = "0.2"
+
+[features]
+default = []
+aws = ["timscentroid/aws"]
+gcp = ["timscentroid/gcp"]
+azure = ["timscentroid/azure"]
+
+[lints]
+workspace = true

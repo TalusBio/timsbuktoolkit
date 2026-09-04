@@ -1,0 +1,105 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - 'v?[0-9]+.*'
+  pull_request:
+    # 'synchronize' triggers on every push to the PR
+    # 'reopened' triggers if you close and open the PR again
+    types: [labeled, synchronize, reopened]
+
+env:
+  CARGO_TERM_COLOR: always
+  CARGO_INCREMENTAL: 0
+  RELEASE_BINARIES: timsseek timsquery_cli timsquery_viewer
+  SCCACHE_GHA_ENABLED: "true"
+  RUSTC_WRAPPER: "sccache"
+
+jobs:
+  build-and-release:
+    # Run on tags OR if the PR has the 'build-artifact' label
+    if: >
+      github.event_name == 'push' || 
+      (github.event_name == 'pull_request' && contains(github.event.pull_request.labels.*.name, 'build-artifact'))
+    name: Build (${{ matrix.target }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-gnu
+            artifact_name: linux-x86_64
+          - os: ubuntu-latest
+            target: x86_64-unknown-linux-musl
+            artifact_name: linux-x86_64-musl
+          - os: macos-latest # M-series
+            target: aarch64-apple-darwin
+            artifact_name: macos-arm64
+          # - os: macos-latest
+          #   target: x86_64-apple-darwin
+          #   artifact_name: macos-x86_64
+          - os: windows-latest
+            target: x86_64-pc-windows-msvc
+            artifact_name: windows-x64
+
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Install Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          target: ${{ matrix.target }}
+          cache: true
+
+      - name: Setup sccache
+        uses: mozilla-actions/sccache-action@v0.0.9
+
+      - name: Install musl-tools
+        if: matrix.target == 'x86_64-unknown-linux-musl'
+        run: sudo apt-get update && sudo apt-get install -y musl-tools
+
+      - name: Build Binaries
+        shell: bash
+        run: |
+          bins=()
+          for binary in $RELEASE_BINARIES; do
+            bins+=(--bin "$binary")
+          done
+          cargo build --release --target ${{ matrix.target }} "${bins[@]}"
+
+      - name: sccache stats
+        shell: bash
+        run: sccache --show-stats
+
+      - name: Package Artifacts
+        shell: bash
+        run: |
+          mkdir dist
+          for binary in $RELEASE_BINARIES; do
+            [ "${{ matrix.os }}" = "windows-latest" ] && EXT=".exe" || EXT=""
+            cp "target/${{ matrix.target }}/release/${binary}${EXT}" dist/
+          done
+          
+          if [ "${{ matrix.os }}" = "windows-latest" ]; then
+            7z a "${{ matrix.artifact_name }}.zip" ./dist/*
+          else
+            tar -czf "${{ matrix.artifact_name }}.tar.gz" -C dist .
+          fi
+
+      - name: Upload to GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          # Use the tag name for pushes, or a special 'pr-#' tag for PRs
+          tag_name: "${{ github.event_name == 'push' && github.ref_name || format('pr-build-{0}', github.event.pull_request.number) }}"
+          name: "${{ github.event_name == 'push' && github.ref_name || format('Pre-release Build (PR #{0})', github.event.pull_request.number) }}"
+          # Mark as prerelease if it's a PR
+          prerelease: ${{ github.event_name == 'pull_request' }}
+          draft: false
+          make_latest: ${{ github.event_name == 'push' && 'true' || 'false' }}
+          files: |
+            *.tar.gz
+            *.zip
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

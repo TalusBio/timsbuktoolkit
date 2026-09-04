@@ -1,0 +1,36 @@
+<mzSpecLib>
+MS:1003186|library format version=1.0
+MS:1003188|library name=minimal_predicted_decoy
+<AttributeSet Spectrum=all>
+MS:1000511|ms level=2
+MS:1003072|spectrum origin type=MS:1003074|predicted spectrum
+MS:1003065|spectrum aggregation type=MS:1003074|predicted spectrum
+<AttributeSet Spectrum=Decoy>
+MS:1003072|spectrum origin type=MS:1003195|unnatural peptidoform decoy spectrum
+<Spectrum=1>
+MS:1003061|library spectrum name=PEPTIDEK/2
+MS:1000041|charge state=2
+MS:1000744|selected ion m/z=458.23327
+[1]MS:1000896|normalized retention time=10.0
+[1]UO:0000000|unit=UO:0000031|minute
+MS:1003059|number of peaks=2
+<Analyte=1>
+MS:1003270|proforma peptidoform ion notation=PEPTIDEK/2
+MS:1000888|stripped peptide sequence=PEPTIDEK
+<Peaks>
+227.10188	0.50000	b2
+262.15108	1.00000	y2
+<Spectrum=2>
+MS:1003061|library spectrum name=PDITPEEK/2
+MS:1003212|library attribute set name=Decoy
+MS:1000041|charge state=2
+MS:1000744|selected ion m/z=458.23327
+[1]MS:1000896|normalized retention time=10.5
+[1]UO:0000000|unit=UO:0000031|minute
+MS:1003059|number of peaks=2
+<Analyte=1>
+MS:1003270|proforma peptidoform ion notation=PDITPEEK/2
+MS:1000888|stripped peptide sequence=PDITPEEK
+<Peaks>
+213.08623	0.50000	b2
+276.13134	1.00000	y2
