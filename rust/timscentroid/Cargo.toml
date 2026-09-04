@@ -22,7 +22,7 @@ arrow = { workspace = true }
 chrono = { version = "0.4", features = ["serde"] }
 
 # Storage abstraction (always available)
-object_store = "0.13"
+object_store = "0.14"
 tokio = { version = "1", features = ["rt", "rt-multi-thread", "io-util"] }
 futures = "0.3"
 bytes = "1"
