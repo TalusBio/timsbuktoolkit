@@ -108,8 +108,9 @@ impl ReferenceLibrary {
     /// into the ion-annotated `ReferenceLibrary` timsseek scores against.
     ///
     /// Scoring requires an `Mzpaf` arena with reference fragment intensities.
-    /// Rejects string labels, a missing intensity sidecar (for example, plain
-    /// target JSON), and nonempty libraries with no annotated fragments.
+    /// Rejects string labels, a missing intensity sidecar, and nonempty
+    /// libraries with no annotated fragments. These are scoring restrictions;
+    /// query extraction also accepts geometry with opaque fragment labels.
     /// Readers that supply reference intensities preserve them in the sidecar;
     /// this includes the DIA-NN TSV/Parquet adapters.
     ///

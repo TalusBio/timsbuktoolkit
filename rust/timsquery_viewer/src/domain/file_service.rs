@@ -20,7 +20,8 @@ pub struct FileService;
 impl FileService {
     /// Load a scoring library through the same reader and validation path as
     /// timsseek. Requires ion-annotated fragments and reference intensities;
-    /// geometry-only target JSON is suitable for query CLI extraction, not scoring.
+    /// the query reader's `Target`/`ElutionGroupInput` JSON-array paths currently
+    /// load geometry without the reference-intensity sidecar required here.
     pub fn load_elution_groups(path: &Path) -> Result<ElutionGroupData, ViewerError> {
         let lib = timsseek::ReferenceLibrary::from_file(path, timsseek::LoadPolicy::default())
             .map_err(|e| ViewerError::General(format!("Failed to load library: {e:?}")))?;
