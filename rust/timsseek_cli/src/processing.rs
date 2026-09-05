@@ -328,7 +328,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         &out_path_pq,
         20_000,
         speclib.parsable_sequences(),
-        &speclib.geom,
+        speclib.geometry(),
     )
     .map_err(|e| TimsSeekError::Io {
         path: out_path_pq.clone().into(),

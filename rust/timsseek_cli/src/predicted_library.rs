@@ -506,10 +506,10 @@ mod tests {
     fn projection(lib: &PredictedLibrary) -> Vec<String> {
         let mut rows: Vec<_> = lib
             .library
-            .geom
+            .geometry()
             .rows()
             .map(|tgt| {
-                let geom = &lib.library.geom;
+                let geom = lib.library.geometry();
                 format!(
                     "{:?} {:?} {} {} {} {} {:?} {:?} {:?}",
                     geom.output_id(tgt),
@@ -520,7 +520,7 @@ mod tests {
                     geom.seq_mod(tgt),
                     geom.frag_labels(tgt),
                     geom.frag_mzs(tgt),
-                    &lib.library.frag_intens[geom.frag_range(tgt)],
+                    &lib.library.fragment_intensities()[geom.frag_range(tgt)],
                 )
             })
             .collect();
@@ -565,7 +565,7 @@ mod tests {
             DecoyPolicy::Never,
         );
 
-        let geom = &lib.library.geom;
+        let geom = lib.library.geometry();
         let groups: Vec<String> = geom
             .rows()
             .map(|tgt| format!("{:?}", geom.decoy_group(tgt)))
@@ -596,7 +596,7 @@ mod tests {
             DecoyPolicy::Never,
         );
 
-        let geom = &lib.library.geom;
+        let geom = lib.library.geometry();
         for tgt in geom.rows() {
             assert_eq!(
                 format!("{:?}", geom.decoy_group(tgt)),
@@ -619,10 +619,10 @@ mod tests {
             DecoyPolicy::Force,
         );
 
-        assert_eq!(lib.library.geom.n_rows(), 1);
-        assert_eq!(lib.library.frag_intens.len(), 3);
+        assert_eq!(lib.library.geometry().n_rows(), 1);
+        assert_eq!(lib.library.fragment_intensities().len(), 3);
         assert!(matches!(
-            lib.library.geom.capabilities().decoys,
+            lib.library.geometry().capabilities().decoys,
             DecoyStrategy::MassShift { .. }
         ));
     }
@@ -638,7 +638,7 @@ mod tests {
             DecoyPolicy::Never,
         );
 
-        assert_eq!(lib.library.frag_intens.len(), 6 + 4);
+        assert_eq!(lib.library.fragment_intensities().len(), 6 + 4);
     }
 
     #[test]
@@ -646,11 +646,11 @@ mod tests {
         let fixture = Fixture::new("PEPC[UNIMOD:4]IDEK", "PEPCIDEK");
         let lib = build(&[fixture.row(2, false, None, peaks(3))], DecoyPolicy::Never);
 
-        let tgt = lib.library.geom.rows().next().unwrap();
-        assert_eq!(lib.library.geom.seq_mod(tgt), "PEPC[UNIMOD:4]IDEK/2");
-        assert_eq!(lib.library.geom.seq_strip(tgt), "PEPCIDEK");
+        let tgt = lib.library.geometry().rows().next().unwrap();
+        assert_eq!(lib.library.geometry().seq_mod(tgt), "PEPC[UNIMOD:4]IDEK/2");
+        assert_eq!(lib.library.geometry().seq_strip(tgt), "PEPCIDEK");
         assert_eq!(
-            lib.library.geom.capabilities().sequence_features,
+            lib.library.geometry().capabilities().sequence_features,
             SeqFeatureState::Available,
         );
     }
@@ -672,9 +672,9 @@ mod tests {
             DecoyPolicy::Never,
         );
 
-        let tgt = lib.library.geom.rows().next().unwrap();
+        let tgt = lib.library.geometry().rows().next().unwrap();
         assert_eq!(
-            lib.library.geom.frag_labels(tgt),
+            lib.library.geometry().frag_labels(tgt),
             [
                 IonAnnot::try_from("y7").unwrap(),
                 IonAnnot::try_from("y7^2").unwrap(),
@@ -688,8 +688,8 @@ mod tests {
         let fixture = Fixture::new("PEPTIDEK", "PEPTIDEK");
         let lib = build(&[fixture.row(2, false, None, peaks(2))], DecoyPolicy::Never);
 
-        let tgt = lib.library.geom.rows().next().unwrap();
-        assert!((lib.library.geom.rt_seconds(tgt) - 93.56484).abs() < 1e-3);
+        let tgt = lib.library.geometry().rows().next().unwrap();
+        assert!((lib.library.geometry().rt_seconds(tgt) - 93.56484).abs() < 1e-3);
     }
 
     #[test]
@@ -705,8 +705,8 @@ mod tests {
         };
         let lib = build(&[contextual], DecoyPolicy::Never);
 
-        let tgt = lib.library.geom.rows().next().unwrap();
-        assert!((lib.library.geom.rt_seconds(tgt) - 1890.0).abs() < 1e-3);
+        let tgt = lib.library.geometry().rows().next().unwrap();
+        assert!((lib.library.geometry().rt_seconds(tgt) - 1890.0).abs() < 1e-3);
     }
 
     #[test]
@@ -833,7 +833,7 @@ mod tests {
         ];
 
         let predicted = build(&rows, DecoyPolicy::Never);
-        let sunk = &predicted.library.geom;
+        let sunk = predicted.library.geometry();
         let from_file = via_file(&rows);
         assert_eq!(sunk.n_rows(), from_file.n_rows());
 
@@ -902,7 +902,7 @@ mod tests {
         ];
 
         let predicted = build(&rows, DecoyPolicy::Never);
-        let sunk = &predicted.library.geom;
+        let sunk = predicted.library.geometry();
         let from_file = via_file(&rows);
 
         let sunk_decoy = row_named(sunk, "PDITPEEK/2");
