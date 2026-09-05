@@ -16,7 +16,6 @@ use timsquery::models::tolerance::Tolerance;
 use timsquery::serde::IndexedPeaksHandle;
 use timsquery::traits::QueryGeom;
 use timsseek::data_sources::reference_library::ScoredIdentity;
-use timsseek::scoring::pipeline::fill_scratch_from;
 use timsseek::{
     ExpectedIntensities,
     ExpectedIntensity,
@@ -203,7 +202,7 @@ impl ElutionGroupData {
     /// arena index, and it is checked against the arena.
     pub fn flat(&self, idx: usize) -> FlatIdx {
         self.inner
-            .geom
+            .geometry()
             .flats()
             .nth(idx)
             .expect("row ordinal past the end of the library")
@@ -263,14 +262,11 @@ impl ElutionGroupData {
             )));
         }
 
-        // Materialize the scratch elution group + expected intensities from the
-        // arena flyweight exactly the way the scoring pipeline does
-        // (`fill_scratch_from`). The precursor envelope comes from
-        // `expected_precursor_envelope()`, which routes through
-        // `isotope_dist_or_averagine` -- no `[1.0, 0.0, 0.0]` fallback.
+        // The viewer owns the selected query and its expected intensities.
+        // Precursor values use the library's composition/averagine envelope.
         let q = self.item_at(index);
         let mut eg = Target::empty_like();
-        fill_scratch_from(&mut eg, &q);
+        eg.reset_from(&q);
         let expected = ExpectedIntensities::try_from_pairs(
             q.iter_expected_fragments(),
             q.expected_precursor_envelope(),

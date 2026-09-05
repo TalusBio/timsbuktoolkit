@@ -44,6 +44,9 @@ pub enum TargetReadingError {
     TimsQueryLibraryError {
         source: timsquery::serde::TargetReadingError,
     },
+    InvalidLibrary {
+        message: String,
+    },
     UnsupportedFormat {
         message: String,
     },

@@ -1,6 +1,7 @@
 use rand::SeedableRng;
 use rand::seq::SliceRandom;
 use smallvec::SmallVec;
+use std::collections::HashSet;
 use std::path::Path;
 use timsquery::IonAnnot;
 use timsquery::serde::{
@@ -36,9 +37,9 @@ use crate::models::sequence::{
 
 #[derive(Debug, Clone)]
 pub struct ReferenceLibrary {
-    pub geom: TargetColumns<IonAnnot>,
+    geom: TargetColumns<IonAnnot>,
     /// Parallel to `geom.frag_labels` / `geom.frag_mzs`; same `frag_off` ranges.
-    pub frag_intens: Vec<f32>,
+    frag_intens: Vec<f32>,
     sequence_features: SeqFeatureState,
 }
 
@@ -56,6 +57,16 @@ pub struct RefQuery<'a> {
 }
 
 impl ReferenceLibrary {
+    /// Immutable query geometry; replacing it would invalidate library validation.
+    pub fn geometry(&self) -> &TargetColumns<IonAnnot> {
+        &self.geom
+    }
+
+    /// Reference intensities in the geometry's fragment order.
+    pub fn fragment_intensities(&self) -> &[f32] {
+        &self.frag_intens
+    }
+
     pub fn len(&self) -> usize {
         self.geom.expanded_len()
     }
@@ -108,8 +119,9 @@ impl ReferenceLibrary {
     /// into the ion-annotated `ReferenceLibrary` timsseek scores against.
     ///
     /// Scoring requires an `Mzpaf` arena with reference fragment intensities.
-    /// Rejects string labels, a missing intensity sidecar, and nonempty
-    /// libraries with no annotated fragments. These are scoring restrictions;
+    /// Rejects string labels, missing/misaligned intensities, repeated fragment
+    /// keys within a row, unsupported isotope counts, and nonempty libraries
+    /// with no annotated fragments. These are scoring restrictions;
     /// query extraction also accepts geometry with opaque fragment labels.
     /// Readers that supply reference intensities preserve them in the sidecar;
     /// this includes the DIA-NN TSV/Parquet adapters.
@@ -123,8 +135,40 @@ impl ReferenceLibrary {
             TargetTable::Mzpaf { geom, frag_intens } => {
                 let frag_intens =
                     frag_intens.ok_or_else(|| TargetReadingError::UnsupportedFormat {
-                        message: "DIA-NN library has no fragment intensities".to_string(),
+                        message: "library has no reference fragment intensities".to_string(),
                     })?;
+                if frag_intens.len() != geom.n_fragments() {
+                    return Err(TargetReadingError::InvalidLibrary {
+                        message: format!(
+                            "reference-intensity sidecar has {} entries for {} fragments",
+                            frag_intens.len(),
+                            geom.n_fragments(),
+                        ),
+                    });
+                }
+                // The scoring envelope currently supplies exactly three isotope bins.
+                let IsotopeStrategy::FromComposition { n_isotopes } = geom.capabilities().isotopes;
+                if n_isotopes > 3 {
+                    return Err(TargetReadingError::InvalidLibrary {
+                        message: format!(
+                            "requested {n_isotopes} precursor isotopes; scoring supports at most 3"
+                        ),
+                    });
+                }
+                let mut seen = HashSet::new();
+                for (row_index, row) in geom.rows().enumerate() {
+                    seen.clear();
+                    for &label in geom.frag_labels(row) {
+                        if !seen.insert(label) {
+                            return Err(TargetReadingError::InvalidLibrary {
+                                message: format!(
+                                    "source {:?}, row {row_index}: duplicate fragment key {label:?}",
+                                    geom.output_id(row),
+                                ),
+                            });
+                        }
+                    }
+                }
                 // An arena with rows but no fragments is a legitimate arena and
                 // an unusable library: every score is driven by fragment
                 // intensity, so it would extract nothing for every row and
@@ -558,11 +602,95 @@ mod tests {
         let geom = geom
             .seal(crate::models::DecoyPolicy::Force)
             .expect("fixture ids are usable");
-        ReferenceLibrary {
+        ReferenceLibrary::try_from(TargetTable::Mzpaf {
             geom,
-            frag_intens: vec![1.0, 0.5],
-            sequence_features: SeqFeatureState::Available,
+            frag_intens: Some(vec![1.0, 0.5]),
+        })
+        .unwrap()
+    }
+
+    fn validation_arena(labels: &[&str], intensity_count: usize, n_isotopes: u8) -> TargetTable {
+        let mut caps = TargetCapabilities::default_diann();
+        caps.isotopes = IsotopeStrategy::FromComposition { n_isotopes };
+        let mut builder = TargetColumnsBuilder::with_capabilities(caps);
+        let frags: Vec<_> = labels
+            .iter()
+            .enumerate()
+            .map(|(i, label)| (IonAnnot::try_from(*label).unwrap(), 300.0 + i as f64))
+            .collect();
+        for id in ["first", "second"] {
+            builder.push_row(Row {
+                precursor_mz: 500.0,
+                charge: 2,
+                frags: &frags,
+                seq_strip: "PEPTIDEK",
+                seq_mod: "PEPTIDEK",
+                id: Some(timsquery::models::OwnedSourceId::Text(id.into())),
+                ..Default::default()
+            });
         }
+        TargetTable::Mzpaf {
+            geom: builder.seal(crate::models::DecoyPolicy::Force).unwrap(),
+            frag_intens: Some(vec![1.0; intensity_count]),
+        }
+    }
+
+    #[test]
+    fn duplicate_fragment_keys_fail_at_conversion_with_row_context() {
+        let err = ReferenceLibrary::try_from(validation_arena(&["y7", "y7"], 4, 3)).unwrap_err();
+        let TargetReadingError::InvalidLibrary { message } = err else {
+            panic!("{err:?}")
+        };
+        assert!(
+            message.contains("first") && message.contains("row 0"),
+            "{message}"
+        );
+        assert!(
+            message.contains(&format!("{:?}", IonAnnot::try_from("y7").unwrap())),
+            "{message}"
+        );
+    }
+
+    #[test]
+    fn same_fragment_keys_across_rows_and_variants_are_valid() {
+        let lib = ReferenceLibrary::try_from(validation_arena(&["y7", "y8"], 4, 3)).unwrap();
+        assert_eq!(lib.len(), 6);
+        for query in lib.iter() {
+            let expected = crate::ExpectedIntensities::try_from_pairs(
+                query.iter_expected_fragments(),
+                query.expected_precursor_envelope(),
+            )
+            .unwrap();
+            assert_eq!(expected.fragment_len(), 2);
+            assert_eq!(expected.precursor_len(), 3);
+        }
+    }
+
+    #[test]
+    fn misaligned_intensity_sidecars_fail_at_conversion() {
+        for count in [3, 5] {
+            let err =
+                ReferenceLibrary::try_from(validation_arena(&["y7", "y8"], count, 3)).unwrap_err();
+            let TargetReadingError::InvalidLibrary { message } = err else {
+                panic!("{err:?}")
+            };
+            assert!(
+                message.contains("sidecar") && message.contains("4 fragments"),
+                "{message}"
+            );
+        }
+    }
+
+    #[test]
+    fn precursor_envelope_count_is_validated_before_scoring() {
+        for count in 0..=3 {
+            let lib = ReferenceLibrary::try_from(validation_arena(&["y7"], 2, count)).unwrap();
+            for query in lib.iter() {
+                assert_eq!(query.expected_precursor_envelope().len(), count as usize);
+            }
+        }
+        let err = ReferenceLibrary::try_from(validation_arena(&["y7"], 2, 4)).unwrap_err();
+        assert!(matches!(err, TargetReadingError::InvalidLibrary { .. }));
     }
 
     #[test]

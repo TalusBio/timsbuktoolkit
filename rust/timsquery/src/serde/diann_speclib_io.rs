@@ -782,8 +782,7 @@ fn map_entry(
     };
 
     // (IonAnnot, fragment mz as f64, height). Dedup by IonAnnot keeping max
-    // height so a duplicate label can't fail the whole load via
-    // `ExpectedIntensities::try_from_pairs`. Reuses the caller's scratch buffer.
+    // height so the scoring library receives unique fragment keys. Reuses the caller's scratch buffer.
     scratch.clear();
     let kept = scratch;
 
