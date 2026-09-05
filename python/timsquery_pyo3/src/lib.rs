@@ -13,11 +13,11 @@
 //!   use `f32` intensities. The MzMobility variant uses `MzMobilityStatsCollector`.
 
 mod chromatogram;
-mod elution_group;
 mod index;
 pub(crate) mod iterator;
 mod numpy_utils;
 mod spectrum;
+mod target;
 mod tolerance;
 
 use pyo3::prelude::*;
@@ -47,7 +47,7 @@ fn timsquery_pyo3(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<tolerance::PyTolerance>()?;
 
     // Query definition
-    m.add_class::<elution_group::PyTarget>()?;
+    m.add_class::<target::PyTarget>()?;
 
     // Index
     m.add_class::<index::PyTimsIndex>()?;

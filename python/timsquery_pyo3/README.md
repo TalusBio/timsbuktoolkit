@@ -35,8 +35,8 @@ tolerance = tq.PyTolerance(
     quad=tq.PyQuadTolerance.absolute(0.1, 0.1),
 )
 
-# 3. Define an elution group (one precursor + its fragments)
-eg = tq.PyTarget(
+# 3. Define a target (one precursor + its fragments)
+target = tq.PyTarget(
     id=1,
     precursor_mz=500.0,
     precursor_charge=2,
@@ -48,7 +48,7 @@ eg = tq.PyTarget(
 )
 
 # 4. Query
-result = index.query_chromatogram(eg, tolerance)
+result = index.query_chromatogram(target, tolerance)
 
 # 5. Access results as numpy arrays
 result.fragment_intensities   # shape (n_fragments, n_cycles), dtype float32
@@ -58,46 +58,46 @@ result.fragment_labels        # [(label, mz), ...] -- row order matches the arra
 result.precursor_labels       # [(isotope_offset, mz), ...]
 result.rt_range_ms            # (start_ms, end_ms)
 result.num_cycles             # number of RT points
-result.id                     # elution group id
+result.id                     # source ID
 ```
 
 ## Batch queries (parallel)
 
 ```python
-elution_groups = [eg1, eg2, eg3, ...]  # list of PyTarget
+targets = [target1, target2, target3, ...]  # list of PyTarget
 
 # Shared tolerance (applied to all queries)
-results = index.query_chromatograms_batch(elution_groups, tolerance)
+results = index.query_chromatograms_batch(targets, tolerance)
 
 # Per-query tolerance (list must match length)
-results = index.query_chromatograms_batch(elution_groups, [tol1, tol2, tol3])
+results = index.query_chromatograms_batch(targets, [tol1, tol2, tol3])
 ```
 
 ## Aggregator reuse
 
 Avoid repeated allocations by reusing a `ChromatogramResult` across queries.
-The internal `Vec<f32>` capacity grows to the largest elution group and stays there.
+The internal `Vec<f32>` capacity grows to the largest target and stays there.
 
 ```python
-result = index.query_chromatogram(eg1, tolerance)   # first query -- allocates
+result = index.query_chromatogram(target1, tolerance)   # first query -- allocates
 
-index.query_chromatogram_into(result, eg2, tolerance)  # reuses allocation
-index.query_chromatogram_into(result, eg3, tolerance)  # same allocation
+index.query_chromatogram_into(result, target2, tolerance)  # reuses allocation
+index.query_chromatogram_into(result, target3, tolerance)  # same allocation
 ```
 
 ## Streaming queries (iterator in, iterator out)
 
-For large-scale workloads, stream elution groups from any Python iterator.
+For large-scale workloads, stream targets from any Python iterator.
 Internally uses chunked rayon parallelism and reuses collector allocations
 across chunks -- after the first chunk, allocations settle and only `memcpy`
 into numpy remains.
 
 ```python
 # Any iterable works -- generator, list, map, etc.
-eg_iter = (make_eg(row) for row in dataframe.itertuples())
+target_iter = (make_target(row) for row in dataframe.itertuples())
 
 # Shared tolerance
-for arrays in index.query_chromatograms_iter(eg_iter, tolerance, chunk_size=256):
+for arrays in index.query_chromatograms_iter(target_iter, tolerance, chunk_size=256):
     arrays.id                      # int
     arrays.precursor_intensities   # np.ndarray (n_prec, n_cycles), float32
     arrays.fragment_intensities    # np.ndarray (n_frag, n_cycles), float32
@@ -106,9 +106,9 @@ for arrays in index.query_chromatograms_iter(eg_iter, tolerance, chunk_size=256)
     arrays.rt_range_ms             # (start_ms, end_ms)
     arrays.num_cycles              # int
 
-# Per-query tolerance (iterable consumed in lockstep with elution groups)
+# Per-query tolerance (iterable consumed in lockstep with targets)
 tol_iter = (make_tol(row) for row in dataframe.itertuples())
-for arrays in index.query_chromatograms_iter(eg_iter, tol_iter, chunk_size=256):
+for arrays in index.query_chromatograms_iter(target_iter, tol_iter, chunk_size=256):
     ...
 ```
 
@@ -121,7 +121,7 @@ the same Rust-side buffers across chunks.
 ### Summed intensity per ion
 
 ```python
-result = index.query_spectrum(eg, tolerance)
+result = index.query_spectrum(target, tolerance)
 result.precursor_intensities   # list[float] -- one total intensity per precursor
 result.fragment_intensities    # list[float] -- one total intensity per fragment
 result.precursor_labels        # list[(isotope_offset, mz)]
@@ -132,7 +132,7 @@ result.id                      # int
 ### Intensity-weighted mean m/z and mobility
 
 ```python
-result = index.query_mz_mobility(eg, tolerance)
+result = index.query_mz_mobility(target, tolerance)
 result.precursor_stats   # list[(weight, mean_mz, mean_mobility)]
 result.fragment_stats    # list[(weight, mean_mz, mean_mobility)]
 result.precursor_labels  # list[(isotope_offset, mz)]
@@ -197,7 +197,7 @@ Useful for building an RT axis aligned with chromatogram arrays:
 
 ```python
 import numpy as np
-result = index.query_chromatogram(eg, tolerance)
+result = index.query_chromatogram(target, tolerance)
 rt_axis = np.array(index.rt_values_ms, dtype=np.float32) / 1000.0  # seconds
 # rt_axis and result.fragment_intensities share the cycle dimension
 ```
@@ -215,7 +215,7 @@ rt_axis = np.array(index.rt_values_ms, dtype=np.float32) / 1000.0  # seconds
       allocation across queries, avoiding repeated allocation.
 - [x] **SpectralCollector** -- `query_spectrum` (summed f32) and `query_mz_mobility`
       (intensity-weighted mean m/z + mobility) per ion.
-- [ ] **PointIntensityAggregator** -- single scalar total intensity per elution group.
+- [ ] **PointIntensityAggregator** -- single scalar total intensity per target.
 - [ ] **IonAnnot key type** -- support `IonAnnot` fragment labels alongside `usize`,
       enabling richer annotation round-trips between Python and Rust.
 - [ ] **Zero-copy array access** -- return numpy views backed by Rust-owned memory

@@ -66,7 +66,7 @@ impl PySpectralResult {
             .collect()
     }
 
-    /// The elution group id.
+    /// The source ID.
     #[getter]
     fn id<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         crate::source_id_to_py(py, &self.source_id)
@@ -165,7 +165,7 @@ impl PyMzMobilityResult {
             .collect()
     }
 
-    /// The elution group id.
+    /// The source ID.
     #[getter]
     fn id<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
         crate::source_id_to_py(py, &self.source_id)

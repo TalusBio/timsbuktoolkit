@@ -9,9 +9,9 @@ use timsquery::{
     Tolerance,
 };
 
-use crate::elution_group::PyTarget;
 use crate::index::rt_range_ms_for_chromatogram;
 use crate::numpy_utils::array2d_to_numpy;
+use crate::target::PyTarget;
 use crate::tolerance::PyTolerance;
 
 /// Source of tolerances: either one shared or one per query from a Python iterator.
@@ -102,7 +102,7 @@ fn extract_arrays(
 pub struct PyChromatogramIterator {
     handle: Arc<IndexedPeaksHandle>,
     tol_source: ToleranceSource,
-    eg_source: Py<PyAny>,
+    target_source: Py<PyAny>,
     pool: Vec<ChromatogramCollector<usize, f32>>,
     chunk_tolerances: Vec<Tolerance>,
     buffer: VecDeque<PyChromatogramArrays>,
@@ -114,13 +114,13 @@ impl PyChromatogramIterator {
     pub fn new(
         handle: Arc<IndexedPeaksHandle>,
         tol_source: ToleranceSource,
-        eg_source: Py<PyAny>,
+        target_source: Py<PyAny>,
         chunk_size: usize,
     ) -> Self {
         Self {
             handle,
             tol_source,
-            eg_source,
+            target_source,
             pool: Vec::with_capacity(chunk_size),
             chunk_tolerances: Vec::with_capacity(chunk_size),
             buffer: VecDeque::with_capacity(chunk_size),
@@ -136,11 +136,11 @@ impl PyChromatogramIterator {
         self.chunk_tolerances.clear();
 
         for i in 0..self.chunk_size {
-            let next_result = self.eg_source.call_method0(py, "__next__");
+            let next_result = self.target_source.call_method0(py, "__next__");
             match next_result {
                 Ok(obj) => {
-                    let eg_ref: PyRef<'_, PyTarget> = obj.extract(py)?;
-                    let eg = eg_ref.inner.clone();
+                    let target_ref: PyRef<'_, PyTarget> = obj.extract(py)?;
+                    let target = target_ref.inner.clone();
 
                     let tol = match &self.tol_source {
                         ToleranceSource::Single(t) => t.clone(),
@@ -148,7 +148,7 @@ impl PyChromatogramIterator {
                             let tol_obj = iter_obj.call_method0(py, "__next__").map_err(|e| {
                                 if e.is_instance_of::<pyo3::exceptions::PyStopIteration>(py) {
                                     PyErr::new::<pyo3::exceptions::PyValueError, _>(
-                                        "tolerance iterator exhausted before elution_groups iterator",
+                                        "tolerance iterator exhausted before targets iterator",
                                     )
                                 } else {
                                     e
@@ -160,17 +160,17 @@ impl PyChromatogramIterator {
                     };
 
                     let rt_range_ms =
-                        rt_range_ms_for_chromatogram(&tol, eg.rt_seconds(), &self.handle)?;
+                        rt_range_ms_for_chromatogram(&tol, target.rt_seconds(), &self.handle)?;
 
                     if i < self.pool.len() {
                         self.pool[i]
-                            .try_reset_with(&eg, rt_range_ms, ref_rt)
+                            .try_reset_with(&target, rt_range_ms, ref_rt)
                             .map_err(|e| {
                                 PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{e:?}"))
                             })?;
                     } else {
                         let collector =
-                            ChromatogramCollector::<usize, f32>::new(&eg, rt_range_ms, ref_rt)
+                            ChromatogramCollector::<usize, f32>::new(&target, rt_range_ms, ref_rt)
                                 .map_err(|e| {
                                     PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
                                         "{e:?}"
@@ -178,7 +178,7 @@ impl PyChromatogramIterator {
                                 })?;
                         self.pool.push(collector);
                     }
-                    source_ids.push(eg.id().to_owned_id());
+                    source_ids.push(target.id().to_owned_id());
                     self.chunk_tolerances.push(tol);
                     n_this_chunk += 1;
                 }

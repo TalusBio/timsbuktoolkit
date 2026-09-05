@@ -2,7 +2,7 @@ use pyo3::prelude::*;
 use timsquery::Target;
 use timsquery::tinyvec::tiny_vec;
 
-/// An elution group defines a query target: one precursor and its fragments.
+/// A query target consists of one precursor and its fragments.
 ///
 /// NOTE: Fragment labels are `usize` only in this binding. This is a deliberate
 /// simplification -- the Rust side is generic over `T: KeyLike` but we monomorphize
@@ -19,7 +19,7 @@ impl PyTarget {
     /// Create a new Target.
     ///
     /// Args:
-    ///     id: Unique identifier.
+    ///     id: Numeric source ID for this target.
     ///     precursor_mz: Monoisotopic precursor m/z.
     ///     precursor_charge: Charge state.
     ///     rt_seconds: Expected retention time in seconds.
@@ -45,7 +45,7 @@ impl PyTarget {
         };
         let fragment_labels_tv = fragment_labels.into_iter().collect();
 
-        let eg = Target::builder()
+        let target = Target::builder()
             .id(id)
             .precursor(precursor_mz, precursor_charge)
             .mobility_ook0(mobility)
@@ -56,7 +56,7 @@ impl PyTarget {
             .try_build()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{:?}", e)))?;
 
-        Ok(Self { inner: eg })
+        Ok(Self { inner: target })
     }
 
     #[getter]

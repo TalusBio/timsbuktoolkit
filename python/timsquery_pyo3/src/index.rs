@@ -13,12 +13,12 @@ use timsquery::{
 };
 
 use crate::chromatogram::PyChromatogramResult;
-use crate::elution_group::PyTarget;
 use crate::iterator::PyChromatogramIterator;
 use crate::spectrum::{
     PyMzMobilityResult,
     PySpectralResult,
 };
+use crate::target::PyTarget;
 use crate::tolerance::PyTolerance;
 
 /// Compute the RT range in milliseconds for a chromatogram query.
@@ -70,7 +70,7 @@ impl ResolvedTolerances {
             && list.len() != expected
         {
             return Err(PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                "tolerance list length ({}) must match elution_groups length ({})",
+                "tolerance list length ({}) must match targets length ({})",
                 list.len(),
                 expected,
             )));
@@ -120,126 +120,126 @@ impl PyTimsIndex {
         })
     }
 
-    /// Query a single elution group and return a ChromatogramResult.
+    /// Query a single target and return a ChromatogramResult.
     ///
     /// Args:
-    ///     elution_group: The query target.
+    ///     target: The query target.
     ///     tolerance: Search tolerances.
     ///
     /// Returns:
     ///     ChromatogramResult with precursor and fragment intensity arrays.
     fn query_chromatogram(
         &self,
-        elution_group: &PyTarget,
+        target: &PyTarget,
         tolerance: &PyTolerance,
     ) -> PyResult<PyChromatogramResult> {
-        let eg = elution_group.inner.clone();
+        let target = target.inner.clone();
         let tol = &tolerance.inner;
-        let rt_range_ms = rt_range_ms_for_chromatogram(tol, eg.rt_seconds(), &self.handle)?;
+        let rt_range_ms = rt_range_ms_for_chromatogram(tol, target.rt_seconds(), &self.handle)?;
         let ref_rt = self.handle.ms1_cycle_mapping();
 
-        let mut collector = ChromatogramCollector::<usize, f32>::new(&eg, rt_range_ms, ref_rt)
+        let mut collector = ChromatogramCollector::<usize, f32>::new(&target, rt_range_ms, ref_rt)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{:?}", e)))?;
 
         self.handle.add_query(&mut collector, tol);
 
-        Ok(PyChromatogramResult::new(collector, eg.id()))
+        Ok(PyChromatogramResult::new(collector, target.id()))
     }
 
     /// Re-query into an existing ChromatogramResult, reusing its allocation.
     ///
     /// The internal arrays are reset and refilled. The Vec capacity is preserved,
-    /// so repeated calls with similarly-sized elution groups avoid reallocation.
+    /// so repeated calls with similarly-sized targets avoid reallocation.
     ///
     /// Args:
     ///     result: A previously returned ChromatogramResult (mutated in place).
-    ///     elution_group: The new query target.
+    ///     target: The new query target.
     ///     tolerance: Search tolerances.
     fn query_chromatogram_into(
         &self,
         result: &mut PyChromatogramResult,
-        elution_group: &PyTarget,
+        target: &PyTarget,
         tolerance: &PyTolerance,
     ) -> PyResult<()> {
-        let eg = elution_group.inner.clone();
+        let target = target.inner.clone();
         let tol = &tolerance.inner;
-        let rt_range_ms = rt_range_ms_for_chromatogram(tol, eg.rt_seconds(), &self.handle)?;
+        let rt_range_ms = rt_range_ms_for_chromatogram(tol, target.rt_seconds(), &self.handle)?;
         let ref_rt = self.handle.ms1_cycle_mapping();
 
         result
             .collector
-            .try_reset_with(&eg, rt_range_ms, ref_rt)
+            .try_reset_with(&target, rt_range_ms, ref_rt)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{:?}", e)))?;
 
-        result.source_id.set_from(eg.id());
+        result.source_id.set_from(target.id());
         self.handle.add_query(&mut result.collector, tol);
 
         Ok(())
     }
 
-    /// Query a single elution group for total summed intensity per ion.
+    /// Query a single target for total summed intensity per ion.
     ///
     /// Returns one f32 intensity value per precursor/fragment (no RT dimension).
     ///
     /// Args:
-    ///     elution_group: The query target.
+    ///     target: The query target.
     ///     tolerance: Search tolerances.
     fn query_spectrum(
         &self,
-        elution_group: &PyTarget,
+        target: &PyTarget,
         tolerance: &PyTolerance,
     ) -> PyResult<PySpectralResult> {
-        let eg = elution_group.inner.clone();
+        let target = target.inner.clone();
         let tol = &tolerance.inner;
-        let mut collector = SpectralCollector::<usize, f32>::new(&eg);
+        let mut collector = SpectralCollector::<usize, f32>::new(&target);
         self.handle.add_query(&mut collector, tol);
-        Ok(PySpectralResult::new(collector, eg.id()))
+        Ok(PySpectralResult::new(collector, target.id()))
     }
 
-    /// Query a single elution group for intensity-weighted mean m/z and mobility.
+    /// Query a single target for intensity-weighted mean m/z and mobility.
     ///
     /// Returns (weight, mean_mz, mean_mobility) per precursor/fragment.
     /// NaN values indicate no peaks were found for that ion.
     ///
     /// Args:
-    ///     elution_group: The query target.
+    ///     target: The query target.
     ///     tolerance: Search tolerances.
     fn query_mz_mobility(
         &self,
-        elution_group: &PyTarget,
+        target: &PyTarget,
         tolerance: &PyTolerance,
     ) -> PyResult<PyMzMobilityResult> {
-        let eg = elution_group.inner.clone();
+        let target = target.inner.clone();
         let tol = &tolerance.inner;
-        let mut collector = SpectralCollector::<usize, MzMobilityStatsCollector>::new(&eg);
+        let mut collector = SpectralCollector::<usize, MzMobilityStatsCollector>::new(&target);
         self.handle.add_query(&mut collector, tol);
-        Ok(PyMzMobilityResult::new(collector, eg.id()))
+        Ok(PyMzMobilityResult::new(collector, target.id()))
     }
 
-    /// Query multiple elution groups in parallel (via rayon).
+    /// Query multiple targets in parallel (via rayon).
     ///
     /// Args:
-    ///     elution_groups: List of query targets.
+    ///     targets: List of query targets.
     ///     tolerance: A single PyTolerance (shared) or a list of PyTolerance
-    ///                (one per elution group, must match length).
+    ///                (one per target, must match length).
     ///
     /// Returns:
-    ///     List of ChromatogramResult, one per elution group.
+    ///     List of ChromatogramResult, one per target.
     fn query_chromatograms_batch(
         &self,
         py: Python<'_>,
-        elution_groups: Vec<PyRef<'_, PyTarget>>,
+        targets: Vec<PyRef<'_, PyTarget>>,
         tolerance: Py<PyAny>,
     ) -> PyResult<Vec<PyChromatogramResult>> {
-        let n = elution_groups.len();
+        let n = targets.len();
         let tolerances = ResolvedTolerances::from_py(py, &tolerance, Some(n))?;
         let ref_rt = self.handle.ms1_cycle_mapping();
 
-        let mut collectors: Vec<ChromatogramCollector<usize, f32>> = elution_groups
+        let mut collectors: Vec<ChromatogramCollector<usize, f32>> = targets
             .iter()
             .enumerate()
-            .map(|(i, eg)| {
-                let inner = eg.inner.clone();
+            .map(|(i, target)| {
+                let inner = target.inner.clone();
                 let tol = tolerances.get(i);
                 let rt_range_ms =
                     rt_range_ms_for_chromatogram(tol, inner.rt_seconds(), &self.handle)?;
@@ -262,34 +262,34 @@ impl PyTimsIndex {
 
         Ok(collectors
             .into_iter()
-            .zip(elution_groups.iter())
-            .map(|(collector, eg)| PyChromatogramResult::new(collector, eg.inner.id()))
+            .zip(targets.iter())
+            .map(|(collector, target)| PyChromatogramResult::new(collector, target.inner.id()))
             .collect())
     }
 
-    /// Streaming query over an iterator of elution groups.
+    /// Streaming query over an iterator of targets.
     ///
     /// Internally reuses collector allocations and processes queries in parallel
     /// chunks via rayon. Yields lightweight ChromatogramArrays with owned numpy
     /// arrays.
     ///
     /// Args:
-    ///     elution_groups: Any Python iterable of Target objects.
+    ///     targets: Any Python iterable of Target objects.
     ///     tolerance: A single PyTolerance (shared) or a Python iterable of
-    ///                PyTolerance (one per elution group, consumed in lockstep).
+    ///                PyTolerance (one per target, consumed in lockstep).
     ///     chunk_size: Number of queries per parallel batch (default: 256).
     ///
     /// Returns:
     ///     An iterator yielding ChromatogramArrays.
-    #[pyo3(signature = (elution_groups, tolerance, chunk_size=None))]
+    #[pyo3(signature = (targets, tolerance, chunk_size=None))]
     fn query_chromatograms_iter(
         &self,
         py: Python<'_>,
-        elution_groups: Py<PyAny>,
+        targets: Py<PyAny>,
         tolerance: Py<PyAny>,
         chunk_size: Option<usize>,
     ) -> PyResult<PyChromatogramIterator> {
-        let eg_iter = elution_groups.call_method0(py, "__iter__")?;
+        let target_iter = targets.call_method0(py, "__iter__")?;
 
         // Check if tolerance is a single PyTolerance or an iterable
         let tol_source = match tolerance.extract::<PyRef<'_, PyTolerance>>(py) {
@@ -307,7 +307,7 @@ impl PyTimsIndex {
         Ok(PyChromatogramIterator::new(
             Arc::clone(&self.handle),
             tol_source,
-            eg_iter,
+            target_iter,
             chunk_size.unwrap_or(256),
         ))
     }
