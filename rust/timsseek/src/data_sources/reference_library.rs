@@ -1,3 +1,5 @@
+use rand::SeedableRng;
+use rand::seq::SliceRandom;
 use smallvec::SmallVec;
 use std::path::Path;
 use timsquery::IonAnnot;
@@ -75,6 +77,31 @@ impl ReferenceLibrary {
     /// Scored slots in batches of at most `n`; see `TargetColumns::chunks`.
     pub fn chunks(&self, n: usize) -> impl Iterator<Item = Vec<FlatIdx>> + use<> {
         self.geom.chunks(n)
+    }
+
+    /// Every scored slot in a deterministic pseudorandom order.
+    ///
+    /// Phase-1 calibration may stop after a prefix, so its traversal cannot
+    /// inherit ordering from the source library (RT, sequence, target/decoy
+    /// variant, or otherwise). The arena remains the authority that mints the
+    /// opaque flat indices; this method only permutes them.
+    pub fn shuffled_flats(&self, seed: u64) -> Vec<FlatIdx> {
+        let mut flats: Vec<_> = self.geom.flats().collect();
+        flats.shuffle(&mut rand::rngs::StdRng::seed_from_u64(seed));
+        flats
+    }
+
+    /// Finite library-RT extent across every scored variant.
+    pub fn rt_range(&self) -> Option<(f32, f32)> {
+        self.iter()
+            .map(|q| q.rt_seconds())
+            .filter(|rt| rt.is_finite())
+            .fold(None, |range, rt| {
+                Some(match range {
+                    Some((lo, hi)) => (lo.min(rt), hi.max(rt)),
+                    None => (rt, rt),
+                })
+            })
     }
 
     /// Narrow a label-generic [`TargetTable`] (timsquery's one library funnel)
@@ -645,6 +672,32 @@ mod tests {
         assert_eq!(lib.item_at(flat(&lib, 1)).geom().row(), row(&lib, 0));
         let all: Vec<_> = lib.iter().map(|q| q.geom().variant()).collect();
         assert_eq!(all, vec![0, 1, 2]);
+    }
+
+    #[test]
+    fn shuffled_flats_are_a_reproducible_permutation() {
+        let lib = tiny_ref_lib();
+        let native: Vec<_> = lib.geom.flats().collect();
+        let shuffled = lib.shuffled_flats(0x5EED);
+
+        assert_eq!(shuffled, lib.shuffled_flats(0x5EED));
+        assert_ne!(shuffled, native, "the test seed must exercise reordering");
+
+        let mut sorted = shuffled;
+        sorted.sort_unstable();
+        assert_eq!(sorted, native, "shuffle must neither lose nor repeat slots");
+    }
+
+    #[test]
+    fn rt_range_covers_every_variant_without_minting_indices() {
+        let lib = tiny_ref_lib();
+        let expected = lib
+            .iter()
+            .map(|q| q.rt_seconds())
+            .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), rt| {
+                (lo.min(rt), hi.max(rt))
+            });
+        assert_eq!(lib.rt_range(), Some(expected));
     }
 }
 

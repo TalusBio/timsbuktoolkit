@@ -3,7 +3,7 @@ use crate::{
     Point,
 };
 use array2d::Array2D;
-use tracing::info;
+use tracing::debug;
 
 /// The x/y extents of a grid geometry, rejecting the empty and inverted ones.
 fn spans(x_range: (f64, f64), y_range: (f64, f64)) -> Result<(f64, f64), CalibRtError> {
@@ -140,7 +140,7 @@ impl Grid {
                 num_unsuppressed += 1;
             }
         });
-        info!(
+        debug!(
             "Suppression complete. Suppressed weight sum: {}, Non-suppressed weight sum: {}, Num Unsuppressed: {}",
             suppressed_sum, non_suppressed_sum, num_unsuppressed
         );

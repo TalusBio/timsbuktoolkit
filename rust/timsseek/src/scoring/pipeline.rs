@@ -37,6 +37,10 @@ use crate::{
     ScorerQueriable,
     timed,
 };
+use std::hash::{
+    Hash,
+    Hasher,
+};
 use timscentroid::rt_mapping::{
     MS1CycleIndex,
     RTIndex,
@@ -143,7 +147,129 @@ impl PartialOrd for CalibrantCandidate {
 
 impl Ord for CalibrantCandidate {
     fn cmp(&self, other: &Self) -> std::cmp::Ordering {
-        self.score.total_cmp(&other.score)
+        self.score
+            .total_cmp(&other.score)
+            .then_with(|| self.speclib_index.cmp(&other.speclib_index))
+    }
+}
+
+pub const CALIBRANT_HEAP_GROUPS: usize = 2;
+pub const CALIBRANT_RT_BANDS: usize = 3;
+
+/// Fixed, implementation-independent hash for assigning opaque library handles
+/// to calibration folds. `FlatIdx` remains responsible for exposing only its
+/// `Hash` behavior; this code neither constructs nor decodes one.
+struct CalibrantSplitHasher(u64);
+
+impl Default for CalibrantSplitHasher {
+    fn default() -> Self {
+        Self(0xcbf2_9ce4_8422_2325)
+    }
+}
+
+impl Hasher for CalibrantSplitHasher {
+    fn write(&mut self, bytes: &[u8]) {
+        // FNV-1a followed by an avalanche in `finish`. The split needs stable,
+        // well-mixed bits, not adversarial collision resistance.
+        let mut hash = self.0;
+        for byte in bytes {
+            hash ^= u64::from(*byte);
+            hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
+        }
+        self.0 = hash;
+    }
+
+    fn write_u32(&mut self, value: u32) {
+        self.write(&value.to_le_bytes());
+    }
+
+    fn finish(&self) -> u64 {
+        let mut value = self.0;
+        value ^= value >> 33;
+        value = value.wrapping_mul(0xff51_afd7_ed55_8ccd);
+        value ^= value >> 33;
+        value = value.wrapping_mul(0xc4ce_b9fe_1a85_ec53);
+        value ^ (value >> 33)
+    }
+}
+
+fn calibrant_heap_group(index: FlatIdx) -> usize {
+    let mut hasher = CalibrantSplitHasher::default();
+    index.hash(&mut hasher);
+    (hasher.finish() as usize) % CALIBRANT_HEAP_GROUPS
+}
+
+/// Two independent calibration folds, each split into equal-width library-RT
+/// bands. This is a bounded, mergeable accumulator for the parallel prescore.
+pub struct StratifiedCalibrantHeaps {
+    heaps: [[CalibrantHeap; CALIBRANT_RT_BANDS]; CALIBRANT_HEAP_GROUPS],
+    rt_min: f32,
+    band_scale: f32,
+}
+
+impl StratifiedCalibrantHeaps {
+    pub fn new(capacity_per_band: usize, rt_range: (f32, f32)) -> Self {
+        let (rt_min, rt_max) = rt_range;
+        let band_scale = if rt_max > rt_min {
+            CALIBRANT_RT_BANDS as f32 / (rt_max - rt_min)
+        } else {
+            0.0
+        };
+        Self {
+            heaps: std::array::from_fn(|_| {
+                std::array::from_fn(|_| CalibrantHeap::new(capacity_per_band))
+            }),
+            rt_min,
+            band_scale,
+        }
+    }
+
+    fn band_of(&self, library_rt: f32) -> usize {
+        if self.band_scale == 0.0 {
+            return 0;
+        }
+        (((library_rt - self.rt_min) * self.band_scale) as usize).min(CALIBRANT_RT_BANDS - 1)
+    }
+
+    pub fn push(&mut self, candidate: CalibrantCandidate) -> Result<(), SkipReason> {
+        let group = calibrant_heap_group(candidate.speclib_index);
+        let band = self.band_of(candidate.library_rt.0);
+        self.heaps[group][band].push(candidate)
+    }
+
+    pub fn merge(mut self, other: Self) -> Self {
+        for (left_group, right_group) in self.heaps.iter_mut().zip(other.heaps) {
+            for (left, right) in left_group.iter_mut().zip(right_group) {
+                left.merge_in_place(right);
+            }
+        }
+        self
+    }
+
+    pub fn merge_in_place(&mut self, other: Self) {
+        for (left_group, right_group) in self.heaps.iter_mut().zip(other.heaps) {
+            for (left, right) in left_group.iter_mut().zip(right_group) {
+                left.merge_in_place(right);
+            }
+        }
+    }
+
+    pub fn group_iter(&self, group: usize) -> impl Iterator<Item = &CalibrantCandidate> + Clone {
+        self.heaps[group].iter().flat_map(CalibrantHeap::iter)
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = &CalibrantCandidate> + Clone {
+        self.heaps
+            .iter()
+            .flat_map(|group| group.iter().flat_map(CalibrantHeap::iter))
+    }
+
+    pub fn into_vec(self) -> Vec<CalibrantCandidate> {
+        self.heaps
+            .into_iter()
+            .flatten()
+            .flat_map(CalibrantHeap::into_vec)
+            .collect()
     }
 }
 
@@ -177,7 +303,7 @@ impl CalibrantHeap {
         if self.heap.len() < self.capacity {
             self.heap.push(std::cmp::Reverse(candidate));
         } else if let Some(std::cmp::Reverse(min)) = self.heap.peek()
-            && candidate.score > min.score
+            && candidate > *min
         {
             self.heap.pop();
             self.heap.push(std::cmp::Reverse(candidate));
@@ -186,11 +312,15 @@ impl CalibrantHeap {
     }
 
     pub fn merge(mut self, other: Self) -> Self {
+        self.merge_in_place(other);
+        self
+    }
+
+    pub fn merge_in_place(&mut self, other: Self) {
         for item in other.heap {
             // Ignore: other heap already filtered on its own push.
             let _ = self.push(item.0);
         }
-        self
     }
 
     pub fn into_vec(self) -> Vec<CalibrantCandidate> {
@@ -205,7 +335,7 @@ impl CalibrantHeap {
     }
 
     /// Iterate over heap contents. Order is arbitrary (not sorted by score).
-    pub fn iter(&self) -> impl Iterator<Item = &CalibrantCandidate> {
+    pub fn iter(&self) -> impl Iterator<Item = &CalibrantCandidate> + Clone {
         self.heap.iter().map(|r| &r.0)
     }
 }
@@ -430,6 +560,11 @@ pub struct Scorer<I: ScorerQueriable> {
 }
 
 impl<I: ScorerQueriable> Scorer<I> {
+    pub fn acquisition_rt_range_seconds(&self) -> (f64, f64) {
+        let (lo, hi) = self.index.ms1_cycle_mapping().range_milis();
+        (lo as f64 / 1000.0, hi as f64 / 1000.0)
+    }
+
     /// Calculates the weighted mean ion mobility across fragments and precursors.
     fn get_mobility(item: &SpectralCollector<IonAnnot, MzMobilityStatsCollector>) -> f64 {
         // Calculate weighted mean mobility from fragments
@@ -831,31 +966,39 @@ impl<I: ScorerQueriable> Scorer<I> {
         result
     }
 
-    /// Phase 1 batch: Prescore all peptides, collecting top-N calibrant candidates via bounded heaps.
+    /// Phase 1 batch: prescore all peptides into bounded A/B, library-RT-stratified heaps.
     #[cfg_attr(
         feature = "instrumentation",
         tracing::instrument(skip_all, level = "trace")
     )]
-    pub fn prescore_batch(
+    pub fn prescore_partitioned_batch(
         &self,
         lib: &ReferenceLibrary,
         flats: &[FlatIdx],
-        config: &CalibrationConfig,
+        capacity_per_band: usize,
+        library_rt_range: (f32, f32),
         timings: &mut PrescoreTimings,
-    ) -> CalibrantHeap {
+    ) -> StratifiedCalibrantHeaps {
         // One columnar store: iterate `RefQuery` flyweights from
         // the arena directly -- monomorphized, no per-item heap alloc on the
         // prescore hot path (see `score_calibrated_batch`).
-        self.prescore_batch_impl(|f| lib.item_at(f), flats, config, timings)
+        self.prescore_partitioned_batch_impl(
+            |f| lib.item_at(f),
+            flats,
+            capacity_per_band,
+            library_rt_range,
+            timings,
+        )
     }
 
-    fn prescore_batch_impl<Q>(
+    fn prescore_partitioned_batch_impl<Q>(
         &self,
         get_item: impl Fn(FlatIdx) -> Q + Sync,
         flats: &[FlatIdx],
-        config: &CalibrationConfig,
+        capacity_per_band: usize,
+        library_rt_range: (f32, f32),
         timings: &mut PrescoreTimings,
-    ) -> CalibrantHeap
+    ) -> StratifiedCalibrantHeaps
     where
         Q: QueryGeom<Label = IonAnnot> + ExpectedIntensity + ScoredIdentity,
     {
@@ -874,7 +1017,6 @@ impl<I: ScorerQueriable> Scorer<I> {
         timings.skips.precursor_out_of_fragmented_range += precursor_oofr_count;
 
         let num_cycles = self.num_cycles();
-        let n_calibrants = config.n_calibrants;
         let max_frags = flats
             .iter()
             .map(|&f| get_item(f).fragment_count())
@@ -888,14 +1030,14 @@ impl<I: ScorerQueriable> Scorer<I> {
                     target: "alloc_track",
                     phase = "phase1_prescore",
                     num_cycles,
-                    n_calibrants,
+                    capacity_per_band,
                     max_frags,
-                    "worker init: ScoringWorker + ScratchBufs + CalibrantHeap"
+                    "worker init: ScoringWorker + ScratchBufs + StratifiedCalibrantHeaps"
                 );
                 (
                     ScoringWorker::new(num_cycles, max_frags),
                     ScratchBufs::new(),
-                    CalibrantHeap::new(n_calibrants),
+                    StratifiedCalibrantHeaps::new(capacity_per_band, library_rt_range),
                     PrescoreTimings::default(),
                 )
             },
@@ -1006,5 +1148,65 @@ mod tests {
         let labels: Vec<i8> = scratch.iter_precursors().map(|(iso, _)| iso).collect();
         let expected_labels: Vec<i8> = env.iter().map(|(i, _)| *i).collect();
         assert_eq!(labels, expected_labels);
+    }
+
+    #[test]
+    fn calibrant_heap_ties_are_reduction_order_independent() {
+        let lib = tiny_lazy_lib();
+        let mut flats = lib.geom.flats();
+        let first = flats.next().unwrap();
+        let second = flats.next().unwrap();
+        let candidate = |speclib_index| CalibrantCandidate {
+            score: 10.0,
+            apex_rt: ObservedRTSeconds(20.0),
+            speclib_index,
+            library_rt: LibraryRT(10.0),
+        };
+
+        let mut forward = CalibrantHeap::new(1);
+        forward.push(candidate(first)).unwrap();
+        forward.push(candidate(second)).unwrap();
+        let mut reverse = CalibrantHeap::new(1);
+        reverse.push(candidate(second)).unwrap();
+        reverse.push(candidate(first)).unwrap();
+
+        assert_eq!(
+            forward.iter().next().unwrap().speclib_index,
+            reverse.iter().next().unwrap().speclib_index
+        );
+    }
+
+    #[test]
+    fn stratified_calibrant_merge_matches_direct_fold() {
+        let lib = tiny_lazy_lib();
+        let flats: Vec<_> = lib.geom.flats().collect();
+        let candidates: Vec<_> = (0..12)
+            .map(|index| CalibrantCandidate {
+                score: index as f32 + 1.0,
+                apex_rt: ObservedRTSeconds(index as f32),
+                speclib_index: flats[index % flats.len()],
+                library_rt: LibraryRT((index % CALIBRANT_RT_BANDS) as f32 * 10.0 + 1.0),
+            })
+            .collect();
+        let mut direct = StratifiedCalibrantHeaps::new(2, (0.0, 30.0));
+        for candidate in candidates.iter().cloned() {
+            direct.push(candidate).unwrap();
+        }
+        let mut left = StratifiedCalibrantHeaps::new(2, (0.0, 30.0));
+        let mut right = StratifiedCalibrantHeaps::new(2, (0.0, 30.0));
+        for candidate in candidates[..6].iter().cloned() {
+            left.push(candidate).unwrap();
+        }
+        for candidate in candidates[6..].iter().cloned() {
+            right.push(candidate).unwrap();
+        }
+        left.merge_in_place(right);
+
+        let scores = |heaps: &StratifiedCalibrantHeaps| {
+            let mut scores: Vec<_> = heaps.iter().map(|candidate| candidate.score).collect();
+            scores.sort_unstable_by(f32::total_cmp);
+            scores
+        };
+        assert_eq!(scores(&direct), scores(&left));
     }
 }
