@@ -33,7 +33,8 @@ pub struct ChromatogramOutput {
 
 impl ChromatogramOutput {
     /// Create a new ChromatogramOutput from a ChromatogramCollector
-    /// and a reference CycleToRTMapping
+    /// and a reference CycleToRTMapping. The caller supplies the library row's
+    /// source identifier; collectors carry only geometry and accumulated signals.
     ///
     /// In theory the original collector does not need to be mutable,
     /// but I have not implemented a nice way to iterate over
@@ -41,6 +42,7 @@ impl ChromatogramOutput {
     pub fn try_new<T: KeyLike + std::fmt::Display>(
         collector: &mut ChromatogramCollector<T, f32>,
         reference_cycles: &CycleToRTMapping<MS1CycleIndex>,
+        source_id: crate::models::SourceId<'_>,
     ) -> Result<Self, crate::errors::DataProcessingError> {
         let mut local_non_zero_min_idx = collector.num_cycles();
         let mut local_non_zero_max_idx = 0usize;
@@ -125,7 +127,7 @@ impl ChromatogramOutput {
                 .unzip();
 
         Ok(ChromatogramOutput {
-            id: collector.id.clone(),
+            id: source_id.to_owned_id(),
             mobility_ook0: collector.mobility_ook0,
             rt_seconds: collector.rt_seconds,
             precursor_mzs,

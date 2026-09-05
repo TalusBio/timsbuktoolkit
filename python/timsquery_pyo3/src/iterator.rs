@@ -70,13 +70,14 @@ impl PyChromatogramArrays {
 fn extract_arrays(
     py: Python<'_>,
     collector: &ChromatogramCollector<usize, f32>,
+    source_id: timsquery::models::OwnedSourceId,
 ) -> PyResult<PyChromatogramArrays> {
     let prec_np = array2d_to_numpy(py, &collector.precursors.arr)?;
     let frag_np = array2d_to_numpy(py, &collector.fragments.arr)?;
     let rt = collector.rt_range_milis();
 
     Ok(PyChromatogramArrays {
-        id: collector.id.clone(),
+        id: source_id,
         precursor_intensities: prec_np.into_any().unbind(),
         fragment_intensities: frag_np.into_any().unbind(),
         precursor_labels: collector
@@ -131,6 +132,7 @@ impl PyChromatogramIterator {
     fn fill_buffer(&mut self, py: Python<'_>) -> PyResult<()> {
         let ref_rt = self.handle.ms1_cycle_mapping();
         let mut n_this_chunk = 0;
+        let mut source_ids = Vec::with_capacity(self.chunk_size);
         self.chunk_tolerances.clear();
 
         for i in 0..self.chunk_size {
@@ -176,6 +178,7 @@ impl PyChromatogramIterator {
                                 })?;
                         self.pool.push(collector);
                     }
+                    source_ids.push(eg.id().to_owned_id());
                     self.chunk_tolerances.push(tol);
                     n_this_chunk += 1;
                 }
@@ -199,8 +202,9 @@ impl PyChromatogramIterator {
             handle.par_add_query_multi(pool_slice, tol_slice);
         });
 
-        for collector in &self.pool[..n_this_chunk] {
-            self.buffer.push_back(extract_arrays(py, collector)?);
+        for (collector, source_id) in self.pool[..n_this_chunk].iter().zip(source_ids) {
+            self.buffer
+                .push_back(extract_arrays(py, collector, source_id)?);
         }
 
         Ok(())

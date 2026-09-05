@@ -143,7 +143,7 @@ impl PyTimsIndex {
 
         self.handle.add_query(&mut collector, tol);
 
-        Ok(PyChromatogramResult::new(collector))
+        Ok(PyChromatogramResult::new(collector, eg.id()))
     }
 
     /// Re-query into an existing ChromatogramResult, reusing its allocation.
@@ -171,6 +171,7 @@ impl PyTimsIndex {
             .try_reset_with(&eg, rt_range_ms, ref_rt)
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{:?}", e)))?;
 
+        result.source_id.set_from(eg.id());
         self.handle.add_query(&mut result.collector, tol);
 
         Ok(())
@@ -192,7 +193,7 @@ impl PyTimsIndex {
         let tol = &tolerance.inner;
         let mut collector = SpectralCollector::<usize, f32>::new(&eg);
         self.handle.add_query(&mut collector, tol);
-        Ok(PySpectralResult::new(collector))
+        Ok(PySpectralResult::new(collector, eg.id()))
     }
 
     /// Query a single elution group for intensity-weighted mean m/z and mobility.
@@ -212,7 +213,7 @@ impl PyTimsIndex {
         let tol = &tolerance.inner;
         let mut collector = SpectralCollector::<usize, MzMobilityStatsCollector>::new(&eg);
         self.handle.add_query(&mut collector, tol);
-        Ok(PyMzMobilityResult::new(collector))
+        Ok(PyMzMobilityResult::new(collector, eg.id()))
     }
 
     /// Query multiple elution groups in parallel (via rayon).
@@ -261,7 +262,8 @@ impl PyTimsIndex {
 
         Ok(collectors
             .into_iter()
-            .map(PyChromatogramResult::new)
+            .zip(elution_groups.iter())
+            .map(|(collector, eg)| PyChromatogramResult::new(collector, eg.inner.id()))
             .collect())
     }
 
