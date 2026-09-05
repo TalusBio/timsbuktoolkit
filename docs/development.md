@@ -13,6 +13,21 @@ Reference for working on timsbuktoolkit. All binaries ship `--help` for CLI flag
 
 Run any with `--help` for the full flag list.
 
+## Library inputs
+
+`timsquery_cli` uses the shared library reader registry: DIA-NN `.speclib`,
+TSV/TXT and Parquet; Spectronaut TSV; Skyline CSV; mzSpecLib (including gzip);
+and target JSON. Format detection also inspects contents; the
+[reader registry](../rust/timsquery/src/serde/library_file.rs) defines dispatch.
+
+`timsseek` and `timsquery_viewer` use the same registry through `ReferenceLibrary`.
+Scoring requires ion-annotated fragments and reference fragment intensities.
+Plain target JSON and arbitrary string-label libraries support query CLI
+extraction, but cannot be loaded as scoring libraries. File extensions alone
+cannot guarantee a library is suitable for scoring.
+
+Standalone `calib_dash` reads saved `calibration.json`, not a spectral library.
+
 ## Cargo features
 
 | Feature | Crate | Effect | Use case | Enable |

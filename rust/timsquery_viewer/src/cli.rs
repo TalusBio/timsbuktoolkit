@@ -15,14 +15,14 @@ pub struct Cli {
     #[arg(
         long,
         value_name = "FILE",
-        help = "Path to raw .d directory",
+        help = "Path to raw MS data or a cached index",
         short = 'r'
     )]
     pub raw_data_path: Option<PathBuf>,
     #[arg(
         long,
         value_name = "FILE",
-        help = "Path to elution groups file (.json or .txt)",
+        help = "Path to a spectral library with ion-annotated fragments and reference intensities",
         short = 'e'
     )]
     pub elution_groups_path: Option<PathBuf>,

@@ -107,13 +107,11 @@ impl ReferenceLibrary {
     /// Narrow a label-generic [`TargetTable`] (timsquery's one library funnel)
     /// into the ion-annotated `ReferenceLibrary` timsseek scores against.
     ///
-    /// Only the `Mzpaf` arena carries the ion chemistry (`IonAnnot`) AND the
-    /// reference-intensity sidecar timsseek needs. Two rejections:
-    /// - `Str` (string labels): no ion chemistry, no intensities.
-    /// - `Mzpaf` without the sidecar (`frag_intens: None`): the current
-    ///   TSV/parquet bridge output. Scoring is intensity-driven, so a lib with
-    ///   no reference intensities is unusable; the `.speclib` reader (the
-    ///   workload) always populates `Some`.
+    /// Scoring requires an `Mzpaf` arena with reference fragment intensities.
+    /// Rejects string labels, a missing intensity sidecar (for example, plain
+    /// target JSON), and nonempty libraries with no annotated fragments.
+    /// Readers that supply reference intensities preserve them in the sidecar;
+    /// this includes the DIA-NN TSV/Parquet adapters.
     ///
     /// Narrowing only, and crate-internal for that reason: none of the load-time
     /// finalize runs, so `caps.sequence_features` keeps the reader's optimistic
@@ -288,11 +286,9 @@ pub struct RowHandles {
     pub group: GroupCode,
 }
 
-/// Arm-neutral identity accessors the scoring loop needs but that are NOT part
-/// of `QueryGeom` / `ExpectedIntensity`. Implemented by the `RefQuery`
-/// flyweight so the batch scoring loop stays generic (monomorphized,
-/// zero-heap) over the concrete type -- see
-/// `Scorer::{prescore,score_calibrated}_batch_impl`.
+/// Identity accessors used by generic scoring loops alongside `QueryGeom`
+/// and `ExpectedIntensity`. `RefQuery` resolves handles without copying row
+/// data; `materialize_peptide` creates owned peptide metadata.
 pub trait ScoredIdentity {
     /// Whether this item is a target (vs a decoy variant).
     fn is_target(&self) -> bool;
@@ -1465,10 +1461,8 @@ mod load_tests {
         );
     }
 
-    /// The Mzpaf arena WITHOUT the intensity sidecar (`frag_intens: None`) is
-    /// the TSV/parquet/Skyline bridge shape -- scoring is intensity-driven, so
-    /// narrowing it to a `ReferenceLibrary` must be an `Err` (the branch that
-    /// causes the disclosed DIA-NN/Skyline regression).
+    /// Geometry-only arenas can serve extraction, but scoring requires the
+    /// reference-intensity sidecar. Reject a missing sidecar at narrowing.
     #[test]
     fn reference_library_rejects_mzpaf_without_intensities() {
         use timsquery::serde::TargetTable;

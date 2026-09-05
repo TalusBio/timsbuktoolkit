@@ -210,8 +210,8 @@ impl FinalResult {
     /// post-model meta block, then the ids -- the same three blocks `emit_row`
     /// writes, in the same order.
     ///
-    /// The ids are their own block because they are not on the result; the
-    /// writer resolves them from the arena. See `parquet_writer::Ids`.
+    /// The ID columns have their own block because the writer resolves them
+    /// from the arena, independently of scoring metadata. See `parquet_writer::Ids`.
     pub fn column_schema(o: &mut SchemaSink) {
         <ScoringFields as ScoreBlock>::column_schema(o);
         <ResultMeta as ScoreBlock>::column_schema(o);

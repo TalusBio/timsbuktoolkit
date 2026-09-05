@@ -62,12 +62,21 @@ impl FileLoader {
         self
     }
 
-    /// Open a file dialog for elution groups JSON file
+    /// Open a scoring-library file. The shared loader validates its contents.
     pub fn open_elution_groups_dialog(&mut self) {
         if let Some(path) = rfd::FileDialog::new()
             .add_filter(
-                "Spectral library (speclib/diann txt/tsv/parquet)",
-                &["speclib", "txt", "tsv", "parquet", "json"],
+                "Spectral library",
+                &[
+                    "speclib",
+                    "txt",
+                    "tsv",
+                    "parquet",
+                    "csv",
+                    "mzlb",
+                    "mzspeclib",
+                    "gz",
+                ],
             )
             .pick_file()
         {
