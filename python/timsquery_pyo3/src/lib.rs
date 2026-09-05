@@ -47,7 +47,7 @@ fn timsquery_pyo3(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<tolerance::PyTolerance>()?;
 
     // Query definition
-    m.add_class::<elution_group::PyElutionGroup>()?;
+    m.add_class::<elution_group::PyTarget>()?;
 
     // Index
     m.add_class::<index::PyTimsIndex>()?;

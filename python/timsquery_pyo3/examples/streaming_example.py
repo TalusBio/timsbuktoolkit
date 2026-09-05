@@ -75,7 +75,7 @@ def make_elution_groups(n: int):
     """Generate n elution groups by cycling through the templates with shifted RTs."""
     for i in range(n):
         template = EXAMPLE_ELUTION_GROUPS[i % len(EXAMPLE_ELUTION_GROUPS)]
-        yield tq.PyElutionGroup(
+        yield tq.PyTarget(
             id=i,
             precursor_mz=template["precursor_mz"],
             precursor_charge=template["precursor_charge"],

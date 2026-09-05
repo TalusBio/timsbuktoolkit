@@ -13,7 +13,7 @@ use timsquery::{
 };
 
 use crate::chromatogram::PyChromatogramResult;
-use crate::elution_group::PyElutionGroup;
+use crate::elution_group::PyTarget;
 use crate::iterator::PyChromatogramIterator;
 use crate::spectrum::{
     PyMzMobilityResult,
@@ -130,7 +130,7 @@ impl PyTimsIndex {
     ///     ChromatogramResult with precursor and fragment intensity arrays.
     fn query_chromatogram(
         &self,
-        elution_group: &PyElutionGroup,
+        elution_group: &PyTarget,
         tolerance: &PyTolerance,
     ) -> PyResult<PyChromatogramResult> {
         let eg = elution_group.inner.clone();
@@ -158,7 +158,7 @@ impl PyTimsIndex {
     fn query_chromatogram_into(
         &self,
         result: &mut PyChromatogramResult,
-        elution_group: &PyElutionGroup,
+        elution_group: &PyTarget,
         tolerance: &PyTolerance,
     ) -> PyResult<()> {
         let eg = elution_group.inner.clone();
@@ -186,7 +186,7 @@ impl PyTimsIndex {
     ///     tolerance: Search tolerances.
     fn query_spectrum(
         &self,
-        elution_group: &PyElutionGroup,
+        elution_group: &PyTarget,
         tolerance: &PyTolerance,
     ) -> PyResult<PySpectralResult> {
         let eg = elution_group.inner.clone();
@@ -206,7 +206,7 @@ impl PyTimsIndex {
     ///     tolerance: Search tolerances.
     fn query_mz_mobility(
         &self,
-        elution_group: &PyElutionGroup,
+        elution_group: &PyTarget,
         tolerance: &PyTolerance,
     ) -> PyResult<PyMzMobilityResult> {
         let eg = elution_group.inner.clone();
@@ -228,7 +228,7 @@ impl PyTimsIndex {
     fn query_chromatograms_batch(
         &self,
         py: Python<'_>,
-        elution_groups: Vec<PyRef<'_, PyElutionGroup>>,
+        elution_groups: Vec<PyRef<'_, PyTarget>>,
         tolerance: Py<PyAny>,
     ) -> PyResult<Vec<PyChromatogramResult>> {
         let n = elution_groups.len();
@@ -274,7 +274,7 @@ impl PyTimsIndex {
     /// arrays.
     ///
     /// Args:
-    ///     elution_groups: Any Python iterable of ElutionGroup objects.
+    ///     elution_groups: Any Python iterable of Target objects.
     ///     tolerance: A single PyTolerance (shared) or a Python iterable of
     ///                PyTolerance (one per elution group, consumed in lockstep).
     ///     chunk_size: Number of queries per parallel batch (default: 256).

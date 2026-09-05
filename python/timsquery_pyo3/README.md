@@ -36,7 +36,7 @@ tolerance = tq.PyTolerance(
 )
 
 # 3. Define an elution group (one precursor + its fragments)
-eg = tq.PyElutionGroup(
+eg = tq.PyTarget(
     id=1,
     precursor_mz=500.0,
     precursor_charge=2,
@@ -64,7 +64,7 @@ result.id                     # elution group id
 ## Batch queries (parallel)
 
 ```python
-elution_groups = [eg1, eg2, eg3, ...]  # list of PyElutionGroup
+elution_groups = [eg1, eg2, eg3, ...]  # list of PyTarget
 
 # Shared tolerance (applied to all queries)
 results = index.query_chromatograms_batch(elution_groups, tolerance)
@@ -223,6 +223,6 @@ rt_axis = np.array(index.rt_values_ms, dtype=np.float32) / 1000.0  # seconds
 - [x] **CycleToRTMapping exposure** -- `rt_seconds_to_cycle_index`, `cycle_index_to_rt_ms`,
       `rt_values_ms`, `num_cycles`, `rt_range_ms` on `PyTimsIndex`.
 - [ ] **Library file I/O** -- read DIA-NN / Spectronaut libraries directly into
-      lists of `PyElutionGroup`, removing boilerplate on the Python side.
+      lists of `PyTarget`, removing boilerplate on the Python side.
 - [x] **Streaming queries** -- `query_chromatograms_iter` streams from any Python
       iterator with chunked rayon parallelism and internal collector reuse.

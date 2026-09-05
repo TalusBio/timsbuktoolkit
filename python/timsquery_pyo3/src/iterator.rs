@@ -9,7 +9,7 @@ use timsquery::{
     Tolerance,
 };
 
-use crate::elution_group::PyElutionGroup;
+use crate::elution_group::PyTarget;
 use crate::index::rt_range_ms_for_chromatogram;
 use crate::numpy_utils::array2d_to_numpy;
 use crate::tolerance::PyTolerance;
@@ -139,7 +139,7 @@ impl PyChromatogramIterator {
             let next_result = self.eg_source.call_method0(py, "__next__");
             match next_result {
                 Ok(obj) => {
-                    let eg_ref: PyRef<'_, PyElutionGroup> = obj.extract(py)?;
+                    let eg_ref: PyRef<'_, PyTarget> = obj.extract(py)?;
                     let eg = eg_ref.inner.clone();
 
                     let tol = match &self.tol_source {
