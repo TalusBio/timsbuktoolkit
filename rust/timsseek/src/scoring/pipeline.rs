@@ -434,6 +434,16 @@ impl ScratchBufs {
         self.expected
             .precursor_intensities
             .extend(q.expected_precursor_envelope());
+        assert_eq!(
+            self.expected.fragment_len(),
+            self.eg.fragment_count(),
+            "expected fragment intensities must match scratch geometry",
+        );
+        assert_eq!(
+            self.expected.precursor_len(),
+            self.eg.precursor_count(),
+            "expected precursor intensities must match scratch geometry",
+        );
     }
 }
 
