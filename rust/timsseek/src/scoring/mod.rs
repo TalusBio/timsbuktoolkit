@@ -15,10 +15,13 @@ pub mod timings;
 pub use scores::hyperscore;
 
 pub use pipeline::{
+    CALIBRANT_HEAP_GROUPS,
+    CALIBRANT_RT_BANDS,
     CalibrantCandidate,
     CalibrantHeap,
     CalibrationConfig,
     Scorer,
+    StratifiedCalibrantHeaps,
 };
 pub use results::{
     CompetedCandidate,

@@ -67,8 +67,11 @@ rt       = "Unrestricted"
 
 
 [calibration]
-## Number of top-scoring calibrants retained from Phase 1 (used to fit the RT
-## curve and measure mass/mobility offsets).
+## Top-scoring calibrant budget per independent Phase-1 fold. Each fold divides
+## this approximately evenly among three library-RT bands; the final fit uses
+## both folds (about 2 * n_calibrants candidates). Randomized Phase 1 may stop
+## early after the independent and multi-scale curves converge. With a separate
+## --calib-lib, convergence is evaluated after mapping onto the main-library RT.
 n_calibrants = 2000
 
 ## Grid resolution for the RT calibration pathfinding.
