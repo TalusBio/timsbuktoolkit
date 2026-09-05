@@ -25,6 +25,7 @@
 
 use crate::data_sources::reference_library::{
     ExpectedIntensity,
+    RefQuery,
     ReferenceLibrary,
     RowHandles,
     ScoredIdentity,
@@ -421,16 +422,18 @@ impl ScratchBufs {
         }
     }
 
-    /// Refill both buffers from the flyweight: geometry into `eg`, and the
-    /// expected fragment/precursor intensities into `expected` (deduped by
-    /// key via `try_from_pairs` -- library keys are unique by construction).
-    fn fill_from<Q: QueryGeom<Label = IonAnnot> + ExpectedIntensity>(&mut self, q: &Q) {
+    /// Refill from a validated library row. Derived decoys preserve its keys;
+    /// precursor keys are unique generated isotope indices.
+    fn fill_from(&mut self, q: &RefQuery<'_>) {
         fill_scratch_from(&mut self.eg, q);
-        self.expected = ExpectedIntensities::try_from_pairs(
-            q.iter_expected_fragments(),
-            q.expected_precursor_envelope(),
-        )
-        .expect("library flyweight yields unique fragment/precursor keys");
+        self.expected.fragment_intensities.clear();
+        self.expected
+            .fragment_intensities
+            .extend(q.iter_expected_fragments());
+        self.expected.precursor_intensities.clear();
+        self.expected
+            .precursor_intensities
+            .extend(q.expected_precursor_envelope());
     }
 }
 
@@ -829,27 +832,12 @@ impl<I: ScorerQueriable> Scorer<I> {
         flats: &[FlatIdx],
         calibration: &CalibrationResult,
     ) -> (Vec<ScoredCandidate>, ScoreTimings, SkipCounts) {
-        // One columnar store, so the
-        // flyweight is always a `RefQuery` from the arena, so the loop is
-        // monomorphized over one concrete type -- statically dispatched, no
-        // per-item heap allocation on the scoring hot path.
-        self.score_calibrated_batch_impl(|f| lib.item_at(f), flats, calibration)
-    }
-
-    fn score_calibrated_batch_impl<Q>(
-        &self,
-        get_item: impl Fn(FlatIdx) -> Q + Sync,
-        flats: &[FlatIdx],
-        calibration: &CalibrationResult,
-    ) -> (Vec<ScoredCandidate>, ScoreTimings, SkipCounts)
-    where
-        Q: QueryGeom<Label = IonAnnot> + ExpectedIntensity + ScoredIdentity,
-    {
+        let get_item = |f| lib.item_at(f);
         let num_cycles = self.num_cycles();
         // `fold_reduce` parallelizes over the slice, driving the flyweight by
         // index; the flyweight itself is never stored.
         // Precursor-range gate over the flyweight geometry.
-        let filter_fn = |q: &Q| {
+        let filter_fn = |q: &RefQuery<'_>| {
             let tmp = q.precursor_mz_limits();
             let lims = TupleRange::try_new(tmp.0, tmp.1).expect("Should already be ordered");
             self.fragmented_range.intersects(lims)
@@ -979,33 +967,11 @@ impl<I: ScorerQueriable> Scorer<I> {
         library_rt_range: (f32, f32),
         timings: &mut PrescoreTimings,
     ) -> StratifiedCalibrantHeaps {
-        // One columnar store: iterate `RefQuery` flyweights from
-        // the arena directly -- monomorphized, no per-item heap alloc on the
-        // prescore hot path (see `score_calibrated_batch`).
-        self.prescore_partitioned_batch_impl(
-            |f| lib.item_at(f),
-            flats,
-            capacity_per_band,
-            library_rt_range,
-            timings,
-        )
-    }
-
-    fn prescore_partitioned_batch_impl<Q>(
-        &self,
-        get_item: impl Fn(FlatIdx) -> Q + Sync,
-        flats: &[FlatIdx],
-        capacity_per_band: usize,
-        library_rt_range: (f32, f32),
-        timings: &mut PrescoreTimings,
-    ) -> StratifiedCalibrantHeaps
-    where
-        Q: QueryGeom<Label = IonAnnot> + ExpectedIntensity + ScoredIdentity,
-    {
+        let get_item = |f| lib.item_at(f);
         // The flat index IS the global speclib index (see `Speclib::item_at`),
         // so it doubles as `CalibrantCandidate::speclib_index` -- no separate
         // chunk offset needed.
-        let filter_fn = |q: &Q| {
+        let filter_fn = |q: &RefQuery<'_>| {
             let tmp = q.precursor_mz_limits();
             let lims = TupleRange::try_new(tmp.0, tmp.1).expect("Should already be ordered");
             self.fragmented_range.intersects(lims)
@@ -1126,11 +1092,70 @@ mod tests {
     }
 
     #[test]
+    fn scratch_refill_matches_checked_pairs_and_reuses_spilled_storage() {
+        let mut builder =
+            TargetColumnsBuilder::with_capabilities(TargetCapabilities::default_diann());
+        let fragments: Vec<_> = (1..=20)
+            .map(|i| {
+                (
+                    IonAnnot::try_from(format!("y{i}").as_str()).unwrap(),
+                    300.0 + i as f64,
+                )
+            })
+            .collect();
+        let mut intensities = Vec::new();
+        for count in [20, 2] {
+            builder.push_row(Row {
+                precursor_mz: 500.0,
+                charge: 2,
+                frags: &fragments[..count],
+                seq_strip: "PEPTIDEK",
+                seq_mod: "PEPTIDEK",
+                ..Default::default()
+            });
+            intensities.extend((0..count).map(|i| (i + 1) as f32));
+        }
+        let lib = ReferenceLibrary::try_from(timsquery::serde::TargetTable::Mzpaf {
+            geom: builder.seal(crate::models::DecoyPolicy::Force).unwrap(),
+            frag_intens: Some(intensities),
+        })
+        .unwrap();
+        let mut scratch = ScratchBufs::new();
+        let mut allocation = None;
+        for query in lib.iter() {
+            let checked = ExpectedIntensities::try_from_pairs(
+                query.iter_expected_fragments(),
+                query.expected_precursor_envelope(),
+            )
+            .unwrap();
+            // Add a stale precursor; the smaller row also checks fragment clearing.
+            scratch.expected.precursor_intensities.push((-1, 42.0));
+            scratch.fill_from(&query);
+            assert_eq!(
+                scratch.expected.fragment_intensities,
+                checked.fragment_intensities
+            );
+            assert_eq!(
+                scratch.expected.precursor_intensities,
+                checked.precursor_intensities
+            );
+            let current = scratch.expected.fragment_intensities.as_ptr();
+            if let Some(previous) = allocation {
+                assert_eq!(
+                    current, previous,
+                    "reuse spilled storage across rows and variants"
+                );
+            }
+            allocation = Some(current);
+        }
+    }
+
+    #[test]
     fn scratch_eg_filled_from_flyweight_matches_geometry() {
         let lib = tiny_lazy_lib();
         // Variant 1 (+decoy): geometry is mass-shifted, so this exercises the
         // by-value shifted-fragment path through reset_from.
-        let q = lib.item_at(lib.geom.flats().nth(1).unwrap());
+        let q = lib.item_at(lib.geometry().flats().nth(1).unwrap());
         let mut scratch = Target::<IonAnnot>::empty_like();
         fill_scratch_from(&mut scratch, &q);
 
@@ -1153,7 +1178,7 @@ mod tests {
     #[test]
     fn calibrant_heap_ties_are_reduction_order_independent() {
         let lib = tiny_lazy_lib();
-        let mut flats = lib.geom.flats();
+        let mut flats = lib.geometry().flats();
         let first = flats.next().unwrap();
         let second = flats.next().unwrap();
         let candidate = |speclib_index| CalibrantCandidate {
@@ -1179,7 +1204,7 @@ mod tests {
     #[test]
     fn stratified_calibrant_merge_matches_direct_fold() {
         let lib = tiny_lazy_lib();
-        let flats: Vec<_> = lib.geom.flats().collect();
+        let flats: Vec<_> = lib.geometry().flats().collect();
         let candidates: Vec<_> = (0..12)
             .map(|index| CalibrantCandidate {
                 score: index as f32 + 1.0,

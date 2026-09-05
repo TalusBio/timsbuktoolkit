@@ -203,7 +203,7 @@ impl ElutionGroupData {
     /// arena index, and it is checked against the arena.
     pub fn flat(&self, idx: usize) -> FlatIdx {
         self.inner
-            .geom
+            .geometry()
             .flats()
             .nth(idx)
             .expect("row ordinal past the end of the library")

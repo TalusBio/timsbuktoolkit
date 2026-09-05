@@ -54,10 +54,10 @@ impl std::error::Error for DuplicateKeyError {}
 ///
 /// Keys within each field must be unique. [`linear_get`] and
 /// [`ExpectedIntensities::remove_fragment`]/`remove_precursor` return only
-/// the first match; a duplicate silently hides data. All construction paths
-/// go through [`ExpectedIntensities::try_from_pairs`] which enforces this.
-/// Direct struct-literal construction bypasses the check -- avoid it outside
-/// tests where uniqueness is obvious.
+/// the first match; a duplicate silently hides data. Arbitrary pairs should use
+/// [`ExpectedIntensities::try_from_pairs`]. Scoring scratch buffers refill from
+/// validated library rows without repeating the check. Public fields and
+/// deserialization can bypass validation; their callers must ensure uniqueness.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ExpectedIntensities<T: KeyLike + Default> {
     pub fragment_intensities: FragmentIntensityVec<T>,
