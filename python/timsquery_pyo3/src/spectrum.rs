@@ -12,12 +12,19 @@ use timsquery::{
 /// NOTE: Uses `usize` fragment keys and `f32` intensities.
 #[pyclass(frozen)]
 pub struct PySpectralResult {
+    source_id: timsquery::models::OwnedSourceId,
     collector: SpectralCollector<usize, f32>,
 }
 
 impl PySpectralResult {
-    pub fn new(collector: SpectralCollector<usize, f32>) -> Self {
-        Self { collector }
+    pub fn new(
+        collector: SpectralCollector<usize, f32>,
+        source_id: timsquery::models::SourceId<'_>,
+    ) -> Self {
+        Self {
+            collector,
+            source_id: source_id.to_owned_id(),
+        }
     }
 }
 
@@ -59,10 +66,10 @@ impl PySpectralResult {
             .collect()
     }
 
-    /// The elution group id.
+    /// The source ID.
     #[getter]
     fn id<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        crate::source_id_to_py(py, &self.collector.id)
+        crate::source_id_to_py(py, &self.source_id)
     }
 
     fn __repr__(&self) -> String {
@@ -70,7 +77,7 @@ impl PySpectralResult {
         let frag_sum: f32 = self.collector.iter_fragments().map(|(_, v)| v).sum();
         format!(
             "SpectralResult(id={}, precursors={}, fragments={}, prec_total={:.1}, frag_total={:.1})",
-            self.collector.id,
+            self.source_id,
             self.collector.precursor_labels.len(),
             self.collector.fragment_labels.len(),
             prec_sum,
@@ -104,12 +111,19 @@ fn stats_to_tuple(stats: &MzMobilityStatsCollector) -> (f64, f64, f64) {
 /// NOTE: Uses `usize` fragment keys.
 #[pyclass(frozen)]
 pub struct PyMzMobilityResult {
+    source_id: timsquery::models::OwnedSourceId,
     collector: SpectralCollector<usize, MzMobilityStatsCollector>,
 }
 
 impl PyMzMobilityResult {
-    pub fn new(collector: SpectralCollector<usize, MzMobilityStatsCollector>) -> Self {
-        Self { collector }
+    pub fn new(
+        collector: SpectralCollector<usize, MzMobilityStatsCollector>,
+        source_id: timsquery::models::SourceId<'_>,
+    ) -> Self {
+        Self {
+            collector,
+            source_id: source_id.to_owned_id(),
+        }
     }
 }
 
@@ -151,16 +165,16 @@ impl PyMzMobilityResult {
             .collect()
     }
 
-    /// The elution group id.
+    /// The source ID.
     #[getter]
     fn id<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        crate::source_id_to_py(py, &self.collector.id)
+        crate::source_id_to_py(py, &self.source_id)
     }
 
     fn __repr__(&self) -> String {
         format!(
             "MzMobilityResult(id={}, precursors={}, fragments={})",
-            self.collector.id,
+            self.source_id,
             self.collector.precursor_labels.len(),
             self.collector.fragment_labels.len(),
         )

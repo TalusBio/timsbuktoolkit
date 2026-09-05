@@ -2,7 +2,7 @@ use pyo3::prelude::*;
 use timsquery::Target;
 use timsquery::tinyvec::tiny_vec;
 
-/// An elution group defines a query target: one precursor and its fragments.
+/// A query target consists of one precursor and its fragments.
 ///
 /// NOTE: Fragment labels are `usize` only in this binding. This is a deliberate
 /// simplification -- the Rust side is generic over `T: KeyLike` but we monomorphize
@@ -10,16 +10,16 @@ use timsquery::tinyvec::tiny_vec;
 /// may be added in future versions.
 #[pyclass(skip_from_py_object)]
 #[derive(Debug, Clone)]
-pub struct PyElutionGroup {
+pub struct PyTarget {
     pub(crate) inner: Target<usize>,
 }
 
 #[pymethods]
-impl PyElutionGroup {
-    /// Create a new ElutionGroup.
+impl PyTarget {
+    /// Create a new Target.
     ///
     /// Args:
-    ///     id: Unique identifier.
+    ///     id: Numeric source ID for this target.
     ///     precursor_mz: Monoisotopic precursor m/z.
     ///     precursor_charge: Charge state.
     ///     rt_seconds: Expected retention time in seconds.
@@ -45,7 +45,7 @@ impl PyElutionGroup {
         };
         let fragment_labels_tv = fragment_labels.into_iter().collect();
 
-        let eg = Target::builder()
+        let target = Target::builder()
             .id(id)
             .precursor(precursor_mz, precursor_charge)
             .mobility_ook0(mobility)
@@ -56,7 +56,7 @@ impl PyElutionGroup {
             .try_build()
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{:?}", e)))?;
 
-        Ok(Self { inner: eg })
+        Ok(Self { inner: target })
     }
 
     #[getter]
@@ -96,7 +96,7 @@ impl PyElutionGroup {
 
     fn __repr__(&self) -> String {
         format!(
-            "ElutionGroup(id={}, mz={:.4}, charge={}, rt={:.1}s, mob={:.3}, frags={}, precs={})",
+            "Target(id={}, mz={:.4}, charge={}, rt={:.1}s, mob={:.3}, frags={}, precs={})",
             self.inner.id(),
             self.inner.precursor_mz(),
             self.inner.precursor_charge(),

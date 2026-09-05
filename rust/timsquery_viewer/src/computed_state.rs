@@ -293,8 +293,9 @@ impl ComputedState {
     ) -> Result<ChromatogramOutput, ViewerError> {
         index.add_query(collector, tolerance);
 
-        let mut output = ChromatogramOutput::try_new(collector, index.ms1_cycle_mapping())
-            .map_err(|e| {
+        let mut output =
+            ChromatogramOutput::try_new(collector, index.ms1_cycle_mapping(), elution_group.id())
+                .map_err(|e| {
                 let msg = match e {
                     timsquery::errors::DataProcessingError::ExpectedNonEmptyData => {
                         "No data found with the current tolerances. \
@@ -319,11 +320,12 @@ impl ComputedState {
         Ok(output)
     }
 
-    #[instrument(skip_all, fields(eg_id = %context.chromatograms.id))]
+    #[instrument(skip_all, fields(eg_id = %source_id))]
     fn find_apex(
         trace_scorer: &mut TraceScorer,
         context: &Extraction<IonAnnot>,
         index: &IndexedPeaksHandle,
+        source_id: timsquery::models::SourceId<'_>,
     ) -> Result<ApexBlocks, ViewerError> {
         trace_scorer.find_apex(context, &|idx| {
             index
@@ -335,14 +337,14 @@ impl ComputedState {
                 DataProcessingError::ExpectedNonEmptyData { context: err_context } => {
                     tracing::warn!(
                         "collector id={} rt={} mob={} prec_mz={}",
-                        context.chromatograms.id,
+                        source_id,
                         context.chromatograms.rt_seconds,
                         context.chromatograms.mobility_ook0,
                         context.chromatograms.precursor_mono_mz,
                     );
                     tracing::warn!(
                         "Apex finding failed for elution group {}: No valid data found in context {:?}",
-                        context.chromatograms.id,
+                        source_id,
                         err_context
                     );
                     "No data found with the current tolerances. \
@@ -353,7 +355,7 @@ impl ComputedState {
                 _ => {
                     tracing::error!(
                         "Apex finding failed for elution group {}: {:?}",
-                        context.chromatograms.id,
+                        source_id,
                         x
                     );
                     format!("Apex finding failed: {:?}", x)
@@ -433,19 +435,20 @@ impl ComputedState {
             chromatograms: collector.clone(),
         };
 
-        let apex_score = match Self::find_apex(trace_scorer, &scoring_ctx, index) {
-            Ok(score) => {
-                tracing::info!("Apex found at RT={:.2}ms", score.retention_time_ms);
-                score
-            }
-            Err(e) => {
-                tracing::warn!(
-                    "Apex scoring skipped (chromatogram data still available): {:?}",
-                    e
-                );
-                return None;
-            }
-        };
+        let apex_score =
+            match Self::find_apex(trace_scorer, &scoring_ctx, index, output.id.as_ref()) {
+                Ok(score) => {
+                    tracing::info!("Apex found at RT={:.2}ms", score.retention_time_ms);
+                    score
+                }
+                Err(e) => {
+                    tracing::warn!(
+                        "Apex scoring skipped (chromatogram data still available): {:?}",
+                        e
+                    );
+                    return None;
+                }
+            };
 
         let apex_rt_seconds = apex_score.retention_time_ms as f64 / 1000.0;
 

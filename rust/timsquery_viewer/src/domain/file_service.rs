@@ -18,20 +18,11 @@ use crate::file_loader::ElutionGroupData;
 pub struct FileService;
 
 impl FileService {
-    /// Load elution groups from a JSON file
-    ///
-    /// # Arguments
-    /// * `path` - Path to the elution groups file (.json or .txt)
-    ///
-    /// # Returns
-    /// Parsed elution group data
+    /// Load a scoring library through the same reader and validation path as
+    /// timsseek. Requires ion-annotated fragments and reference intensities;
+    /// the query reader's `Target`/`ElutionGroupInput` JSON-array paths currently
+    /// load geometry without the reference-intensity sidecar required here.
     pub fn load_elution_groups(path: &Path) -> Result<ElutionGroupData, ViewerError> {
-        // Load the SAME shared columnar arena the timsseek CLI scores, so the
-        // viewer displays exactly what gets scored (one isotope model, one
-        // intensity source). String-labelled JSON elution-group files no longer
-        // load here: scoring requires ion-annotated fragments + reference
-        // intensities, which only the DIA-NN family (.speclib/TSV/parquet)
-        // carry.
         let lib = timsseek::ReferenceLibrary::from_file(path, timsseek::LoadPolicy::default())
             .map_err(|e| ViewerError::General(format!("Failed to load library: {e:?}")))?;
         info!(

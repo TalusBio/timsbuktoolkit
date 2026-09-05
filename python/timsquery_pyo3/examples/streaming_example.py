@@ -12,7 +12,7 @@ Streaming chromatogram extraction from timsTOF data.
 
 This example demonstrates the three query modes in timsquery_pyo3:
 
-  1. Single query           -- one elution group at a time
+  1. Single query           -- one target at a time
   2. Aggregator reuse       -- reuse allocations across sequential queries
   3. Streaming iterator     -- iterator-in, iterator-out with chunked parallelism
 
@@ -28,7 +28,7 @@ import timsquery_pyo3 as tq
 
 
 # ---------------------------------------------------------------------------
-# Example elution groups (from the timsquery_cli templates)
+# Example targets (from the timsquery_cli templates)
 # ---------------------------------------------------------------------------
 
 EXAMPLE_ELUTION_GROUPS = [
@@ -71,11 +71,11 @@ EXAMPLE_ELUTION_GROUPS = [
 ]
 
 
-def make_elution_groups(n: int):
-    """Generate n elution groups by cycling through the templates with shifted RTs."""
+def make_targets(n: int):
+    """Generate n targets by cycling through the templates with shifted RTs."""
     for i in range(n):
         template = EXAMPLE_ELUTION_GROUPS[i % len(EXAMPLE_ELUTION_GROUPS)]
-        yield tq.PyElutionGroup(
+        yield tq.PyTarget(
             id=i,
             precursor_mz=template["precursor_mz"],
             precursor_charge=template["precursor_charge"],
@@ -119,11 +119,11 @@ def main():
     # Mode 1: Single queries
     # ------------------------------------------------------------------
     print(f"\n--- Mode 1: Single queries ({n_queries} queries) ---")
-    egs = list(make_elution_groups(n_queries))
+    targets = list(make_targets(n_queries))
 
     t0 = time.perf_counter()
-    for eg in egs:
-        result = index.query_chromatogram(eg, tolerance)
+    for target in targets:
+        result = index.query_chromatogram(target, tolerance)
     dt = time.perf_counter() - t0
     print(f"  {dt:.3f}s total, {dt / n_queries * 1000:.2f}ms per query")
     print(f"  last result: {result}")
@@ -134,9 +134,9 @@ def main():
     print(f"\n--- Mode 2: Aggregator reuse ({n_queries} queries) ---")
 
     t0 = time.perf_counter()
-    result = index.query_chromatogram(egs[0], tolerance)
-    for eg in egs[1:]:
-        index.query_chromatogram_into(result, eg, tolerance)
+    result = index.query_chromatogram(targets[0], tolerance)
+    for target in targets[1:]:
+        index.query_chromatogram_into(result, target, tolerance)
     dt = time.perf_counter() - t0
     print(f"  {dt:.3f}s total, {dt / n_queries * 1000:.2f}ms per query")
     print(f"  last result: {result}")
@@ -150,7 +150,7 @@ def main():
     total_signal = 0.0
     count = 0
     for arrays in index.query_chromatograms_iter(
-        make_elution_groups(n_queries), tolerance, chunk_size=64
+        make_targets(n_queries), tolerance, chunk_size=64
     ):
         total_signal += arrays.fragment_intensities.sum()
         count += 1
@@ -162,9 +162,9 @@ def main():
     # Inspect one result in detail
     # ------------------------------------------------------------------
     print("\n--- Inspecting a single result ---")
-    eg = egs[0]
-    result = index.query_chromatogram(eg, tolerance)
-    print(f"  Elution group: {eg}")
+    target = targets[0]
+    result = index.query_chromatogram(target, tolerance)
+    print(f"  Target: {target}")
     print(f"  Result: {result}")
     print(f"  Precursor shape: {result.precursor_intensities.shape}")
     print(f"  Fragment shape:  {result.fragment_intensities.shape}")

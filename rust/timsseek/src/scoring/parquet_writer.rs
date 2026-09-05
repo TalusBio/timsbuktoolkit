@@ -98,9 +98,8 @@ impl ScoreBlock for Ids<'_> {
 /// Emit one result's columns into the sink (all scoring blocks, then the
 /// post-model meta block, then the ids resolved from the arena).
 ///
-/// The ids are not on the result: a candidate carries opaque handles so nothing
-/// on the scoring path can print one or invent one, and this is the boundary
-/// where they become the values a reader joins on.
+/// Resolve `library_id` and `decoy_group_id` through the result's arena row.
+/// The owned source ID retained for rescoring order does not supply these columns.
 fn emit_row(r: &FinalResult, geom: &TargetColumns<IonAnnot>, sink: &mut ColSink) {
     r.scoring.columns(sink);
     r.result_meta().columns(sink);
@@ -151,9 +150,8 @@ pub fn build_record_batch(
 // Buffered Parquet writer
 // ---------------------------------------------------------------------------
 
-/// Borrows the arena the results were scored against, because a `FinalResult`
-/// carries opaque handles rather than ids and the arena is what turns them back
-/// into the values a reader joins on.
+/// Borrows the arena the results were scored against to resolve each result's
+/// row handle into the external library and competition-group IDs.
 pub struct ResultParquetWriter<'a> {
     writer: ArrowWriter<File>,
     buffer: Vec<FinalResult>,
@@ -315,9 +313,7 @@ mod tests {
         );
     }
 
-    /// The ids are not carried on a result any more, so this is what pins that
-    /// they still reach the file -- and that the row a result points at is the
-    /// row whose id gets written.
+    /// Output IDs must come from the arena row referenced by the result.
     #[test]
     fn ids_resolve_from_the_arena_row() {
         use arrow::array::StringArray;

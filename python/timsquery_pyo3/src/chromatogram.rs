@@ -10,12 +10,19 @@ use crate::numpy_utils::array2d_to_numpy;
 /// across retention time cycles. Shaped (n_ions, n_cycles).
 #[pyclass]
 pub struct PyChromatogramResult {
+    pub(crate) source_id: timsquery::models::OwnedSourceId,
     pub(crate) collector: ChromatogramCollector<usize, f32>,
 }
 
 impl PyChromatogramResult {
-    pub fn new(collector: ChromatogramCollector<usize, f32>) -> Self {
-        Self { collector }
+    pub fn new(
+        collector: ChromatogramCollector<usize, f32>,
+        source_id: timsquery::models::SourceId<'_>,
+    ) -> Self {
+        Self {
+            collector,
+            source_id: source_id.to_owned_id(),
+        }
     }
 }
 
@@ -64,13 +71,13 @@ impl PyChromatogramResult {
 
     #[getter]
     fn id<'py>(&self, py: Python<'py>) -> PyResult<Bound<'py, PyAny>> {
-        crate::source_id_to_py(py, &self.collector.id)
+        crate::source_id_to_py(py, &self.source_id)
     }
 
     fn __repr__(&self) -> String {
         format!(
             "ChromatogramResult(id={}, precursors={}x{}, fragments={}x{}, rt_ms=({}, {}))",
-            self.collector.id,
+            self.source_id,
             self.collector.precursors.arr.nrows(),
             self.collector.precursors.arr.ncols(),
             self.collector.fragments.arr.nrows(),

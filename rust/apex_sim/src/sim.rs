@@ -17,7 +17,6 @@ use rand::{
 };
 use rand_chacha::ChaCha8Rng;
 
-use timsquery::models::OwnedSourceId;
 use timsquery::{
     ChromatogramCollector,
     MzMajorIntensityArray,
@@ -341,7 +340,6 @@ pub fn build(params: &SimParams) -> SimData {
         TupleRange::try_new(map(0), map(n - 1)).expect("start < end for positive period");
 
     let chromatograms = ChromatogramCollector::<String, f32> {
-        id: OwnedSourceId::placeholder(),
         mobility_ook0: 1.0,
         rt_seconds: (map((realized_apex as usize).min(n - 1)) as f32) / 1000.0,
         precursor_mono_mz: dummy_mz,

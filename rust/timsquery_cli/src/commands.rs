@@ -351,7 +351,7 @@ pub fn process_and_serialize<L: KeyLike + Display + DecoyShift>(
         )?;
 
         container.add_query(index, tolerance);
-        container.serialize_to_seq(&mut ser, index.ms1_cycle_mapping())?;
+        container.serialize_to_seq(&mut ser, index.ms1_cycle_mapping(), &queries)?;
     }
 
     ser.finish()?;

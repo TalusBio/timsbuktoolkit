@@ -169,11 +169,9 @@ impl ElutionGroupCollection {
 ///
 /// `frag_intens` is the reference-intensity sidecar, parallel to
 /// `geom.frag_labels`/`geom.frag_mzs` (same length). The columnar store itself
-/// stays intensity-free (extraction does not need intensities); the DIA-NN
-/// family readers (`.speclib`/TSV/parquet) populate the sidecar (`Some`) so the
-/// timsseek bridge can zip in reference intensities, while the intensity-free
-/// mzpaf path and string-labelled JSON leave it `None`. Extraction (cli)
-/// ignores it.
+/// stores query geometry; readers that supply reference intensities populate
+/// the sidecar for scoring. Geometry-only `Mzpaf` inputs leave it `None`;
+/// the `Str` variant has no intensity sidecar. Extraction ignores intensities.
 pub enum TargetTable {
     Mzpaf {
         geom: TargetColumns<IonAnnot>,

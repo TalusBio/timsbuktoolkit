@@ -22,15 +22,15 @@ use crate::scoring::blocks::{
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Identity {
     pub peptide: Peptide,
-    /// The arena row this result came from, and the group it competes in. Both
-    /// opaque and unserializable: the row orders the q-value tie-break without
-    /// a caller-supplied id reaching the sort, and the group is only ever
-    /// compared. The ids a reader wants are resolved from the arena at the
-    /// writer -- see [`crate::scoring::parquet_writer`].
+    /// Stored arena row, used for row-based tie-breaking and output lookup.
+    /// Opaque and excluded from serialization.
     #[serde(skip)]
     pub row: RowIdx,
+    /// Opaque competition-group handle; combined with charge for competition.
     #[serde(skip)]
     pub group: GroupCode,
+    /// Owned source-row key used to canonicalize rescoring order across library
+    /// reloads. Parquet resolves its ID columns from `row`, not this copy.
     #[serde(skip)]
     pub source_id: OwnedSourceId,
     pub precursor_mz: f64,
