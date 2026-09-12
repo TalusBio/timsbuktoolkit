@@ -26,13 +26,14 @@ use crate::fragment_mass::{
     isotope_dist_or_averagine,
 };
 use crate::models::DecoyMarking;
+use crate::scoring::plan;
 
 #[derive(Debug, Clone)]
 pub struct ReferenceLibrary {
     geom: TargetColumns<IonAnnot>,
     /// Parallel to `geom.frag_labels` / `geom.frag_mzs`; same `frag_off` ranges.
     frag_intens: Vec<f32>,
-    plan: crate::scoring::plan::ScoringPlan,
+    plan: plan::ScoringPlan,
 }
 
 pub trait ExpectedIntensity {
@@ -176,7 +177,7 @@ impl ReferenceLibrary {
                         ),
                     });
                 }
-                let plan = crate::scoring::plan::ScoringPlan::resolve(&geom);
+                let plan = plan::ScoringPlan::resolve(&geom);
                 Ok(ReferenceLibrary {
                     geom,
                     frag_intens,
@@ -424,13 +425,13 @@ impl ReferenceLibrary {
     }
 
     /// The immutable operation plan resolved for this library's stored rows and variants.
-    pub fn scoring_plan(&self) -> &crate::scoring::plan::ScoringPlan {
+    pub fn scoring_plan(&self) -> &plan::ScoringPlan {
         &self.plan
     }
 
-    /// Compatibility summary: both residue and modification-count operations are enabled.
+    /// Whether both residue and modification counts are enabled for the whole library.
     /// Execution uses the individual plan decisions, never this combined flag.
-    pub fn parsable_sequences(&self) -> bool {
+    pub fn all_sequence_counts_enabled(&self) -> bool {
         self.plan
             .operations()
             .iter()
@@ -499,6 +500,7 @@ impl ReferenceLibrary {
             }
         }
 
+        tracing::info!("{}", self.plan.summary());
         for operation in self.plan.operations() {
             tracing::info!("{operation}");
         }
@@ -720,7 +722,7 @@ mod tests {
         assert_eq!(peptide.residues, "PEPTIDE");
         assert!(matches!(peptide.modifications, PropertyRef::Missing));
         assert!(peptide.sequence().is_none());
-        assert!(!lib.parsable_sequences());
+        assert!(!lib.all_sequence_counts_enabled());
         let expected = isotope_dist_or_averagine("PEPTIDE", 0.0).1;
         for query in lib.iter() {
             for (i, intensity) in query.expected_precursor_envelope() {
@@ -1012,7 +1014,7 @@ mod load_tests {
             // normalizer used to expand into a form mzcore rejects -- turning
             // sequence features off for the whole library.
             assert!(
-                lib.parsable_sequences(),
+                lib.all_sequence_counts_enabled(),
                 "{what}: sequence features disabled by an unparsable row"
             );
         }
@@ -1480,7 +1482,7 @@ mod load_tests {
             .expect("an mzpaf arena carrying intensities narrows");
 
             assert!(
-                !library.parsable_sequences(),
+                !library.all_sequence_counts_enabled(),
                 "one unparsable row turns the gate off for the whole library"
             );
         }
@@ -1497,7 +1499,7 @@ mod load_tests {
         .expect("an mzpaf arena carrying intensities narrows");
 
         assert!(
-            library.parsable_sequences(),
+            library.all_sequence_counts_enabled(),
             "every sequence parses, so the whole library keeps its features"
         );
     }
@@ -1512,7 +1514,7 @@ mod load_tests {
         .expect("an mzpaf arena carrying intensities narrows");
 
         assert!(
-            !library.parsable_sequences(),
+            !library.all_sequence_counts_enabled(),
             "even internal narrowing resolves coverage from stored facts"
         );
     }
@@ -1566,7 +1568,7 @@ mod load_tests {
         assert_eq!(lib.geom.n_fragments(), 5);
         assert_eq!(lib.frag_intens.len(), 5, "the sidecar stays parallel");
         assert!(
-            !lib.parsable_sequences(),
+            !lib.all_sequence_counts_enabled(),
             "a small molecule has no sequence"
         );
     }

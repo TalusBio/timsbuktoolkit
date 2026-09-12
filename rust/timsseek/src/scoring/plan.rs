@@ -23,6 +23,7 @@ use serde::Serialize;
 use std::sync::Arc;
 use timsquery::chemistry::analyte::{
     AnalyteRef,
+    PeptideRef,
     PropertyRef,
 };
 use timsquery::ion::IonAnnot;
@@ -33,6 +34,37 @@ use timsquery::models::TargetColumns;
 pub enum Requirement {
     ResidueSequence,
     ModificationCount,
+}
+
+// One registration supplies operation identity, metadata and dispatch. Requirements
+// describe input facts; several operations may depend on the same requirement.
+macro_rules! operations {
+    ($($operation:ident => $block:ty, $label:literal);+ $(;)?) => {
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+        #[serde(rename_all = "snake_case")]
+        pub enum Operation { $($operation),+ }
+        impl Operation {
+            const ALL: &'static [Self] = &[$(Self::$operation),+];
+            fn requirement(self) -> Requirement {
+                match self { $(Self::$operation => <$block as ScoreBlock>::requirement().expect("operation must declare its requirement")),+ }
+            }
+            fn names(self) -> Vec<Arc<str>> {
+                let mut names = NameSink::new();
+                match self { $(Self::$operation => <$block as ScoreBlock>::nonlinear_feature_names(&mut names)),+ }
+                names.into_names()
+            }
+            fn label(self) -> &'static str {
+                match self { $(Self::$operation => $label),+ }
+            }
+            fn project(self, peptide: PeptideRef<'_>, emit: &mut impl FnMut(&[f64])) {
+                match self { $(Self::$operation => emit(&<$block>::compute(peptide).nonlinear_feature_array())),+ }
+            }
+        }
+    };
+}
+operations! {
+    ResidueCounts => ResidueCounts, "Residue counts";
+    ModificationCounts => ModificationCounts, "Modification counts";
 }
 
 #[derive(Debug, Clone, Default, Serialize)]
@@ -64,6 +96,7 @@ impl Coverage {
 
 #[derive(Debug, Clone, Serialize)]
 pub struct OperationDecision {
+    pub operation: Operation,
     pub requirement: Requirement,
     pub enabled: bool,
     pub coverage: Coverage,
@@ -72,16 +105,14 @@ pub struct OperationDecision {
 
 impl std::fmt::Display for OperationDecision {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let label = match self.requirement {
-            Requirement::ResidueSequence => "Residue counts",
-            Requirement::ModificationCount => "Modification counts",
-        };
+        let label = self.operation.label();
         let c = &self.coverage;
         write!(
             f,
-            "{label}: {} ({} usable; {} missing, {} not applicable, {} unresolved)",
+            "{label}: {} ({} known, {} recovered; {} missing, {} not applicable, {} unresolved)",
             if self.enabled { "enabled" } else { "disabled" },
-            c.known + c.recovered,
+            c.known,
+            c.recovered,
             c.missing,
             c.not_applicable,
             c.unresolved
@@ -118,37 +149,56 @@ impl ScoringPlan {
                 modifications.record(analyte.peptide, false);
             }
         }
-        fn decision<B: ScoreBlock>(coverage: Coverage, rows: usize) -> OperationDecision {
-            let enabled = coverage.available(rows);
-            let mut names = NameSink::new();
-            if enabled {
-                B::nonlinear_feature_names(&mut names);
-            }
-            OperationDecision {
-                requirement: B::requirement().expect("operation must declare its requirement"),
-                enabled,
-                coverage,
-                columns: names.into_names(),
-            }
-        }
+        let rows = geom.n_rows();
+        let operations = Operation::ALL
+            .iter()
+            .map(|&operation| {
+                let requirement = operation.requirement();
+                let coverage = match requirement {
+                    Requirement::ResidueSequence => residues.clone(),
+                    Requirement::ModificationCount => modifications.clone(),
+                };
+                let enabled = coverage.available(rows);
+                OperationDecision {
+                    operation,
+                    requirement,
+                    enabled,
+                    coverage,
+                    columns: if enabled {
+                        operation.names()
+                    } else {
+                        Vec::new()
+                    },
+                }
+            })
+            .collect();
         Self {
-            rows: geom.n_rows(),
+            rows,
             unmodified_rows,
-            operations: vec![
-                decision::<ResidueCounts>(residues, geom.n_rows()),
-                decision::<ModificationCounts>(modifications, geom.n_rows()),
-            ],
+            operations,
         }
+    }
+
+    /// Plan-level counts, shared by CLI and viewer reporting.
+    pub fn summary(&self) -> String {
+        format!(
+            "{} library entries; {} unmodified (known empty modification list)",
+            self.rows, self.unmodified_rows
+        )
+    }
+
+    pub fn unmodified_rows(&self) -> usize {
+        self.unmodified_rows
     }
 
     pub fn operations(&self) -> &[OperationDecision] {
         &self.operations
     }
 
-    pub fn enabled(&self, requirement: Requirement) -> bool {
+    pub fn enabled(&self, operation: Operation) -> bool {
         self.operations
             .iter()
-            .any(|o| o.requirement == requirement && o.enabled)
+            .any(|o| o.operation == operation && o.enabled)
     }
 
     pub fn width(&self) -> usize {
@@ -176,14 +226,7 @@ impl ScoringPlan {
             if !operation.enabled {
                 continue;
             }
-            match operation.requirement {
-                Requirement::ResidueSequence => {
-                    emit(&ResidueCounts::compute(peptide).nonlinear_feature_array())
-                }
-                Requirement::ModificationCount => {
-                    emit(&ModificationCounts::compute(peptide).nonlinear_feature_array())
-                }
-            }
+            operation.operation.project(peptide, &mut emit);
         }
     }
 }
@@ -226,8 +269,8 @@ mod tests {
         ] {
             let geom = arena(&Analyte::from_sequence(sequence));
             let plan = ScoringPlan::resolve(&geom);
-            assert!(plan.enabled(Requirement::ResidueSequence), "{sequence}");
-            assert!(plan.enabled(Requirement::ModificationCount), "{sequence}");
+            assert!(plan.enabled(Operation::ResidueCounts), "{sequence}");
+            assert!(plan.enabled(Operation::ModificationCounts), "{sequence}");
             assert_eq!(plan.width(), 22);
             assert_eq!(geom.n_rows(), 100);
             assert_eq!(geom.flats().count(), 300);
@@ -242,8 +285,8 @@ mod tests {
         ] {
             let geom = arena(&analyte);
             let plan = ScoringPlan::resolve(&geom);
-            assert!(plan.enabled(Requirement::ResidueSequence));
-            assert!(!plan.enabled(Requirement::ModificationCount));
+            assert!(plan.enabled(Operation::ResidueCounts));
+            assert!(!plan.enabled(Operation::ModificationCounts));
             assert_eq!(plan.width(), 21);
             assert!(!plan.names().any(|n| n.contains("peptide_n_mods")));
             for flat in geom.flats() {
@@ -326,6 +369,17 @@ mod tests {
         });
         let plan = ScoringPlan::resolve(&geom);
         assert_eq!(plan.operations()[0].coverage.recovered, 1);
+        assert!(
+            plan.operations()[0]
+                .to_string()
+                .contains("99 known, 1 recovered")
+        );
+        assert_eq!(plan.unmodified_rows(), 99);
+        assert!(plan.summary().contains("99 unmodified"));
+        let metadata = serde_json::to_value(&plan).unwrap();
+        assert_eq!(metadata["operations"][0]["operation"], "residue_counts");
+        assert_eq!(metadata["operations"][0]["requirement"], "residue_sequence");
+
         assert_eq!(plan.operations()[1].coverage.unresolved, 1);
         assert_eq!(plan.width(), 21);
     }

@@ -224,8 +224,8 @@ impl<'a> ResultParquetWriter<'a> {
                 ),
             },
             KeyValue {
-                key: "parsable_sequences".to_string(),
-                value: Some(library.parsable_sequences().to_string()),
+                key: "all_sequence_counts_enabled".to_string(),
+                value: Some(library.all_sequence_counts_enabled().to_string()),
             },
             KeyValue {
                 key: "results_format_version".to_string(),
@@ -491,7 +491,7 @@ mod tests {
     }
 
     #[test]
-    fn parsable_sequences_key_in_parquet_metadata() {
+    fn all_sequence_counts_enabled_key_in_parquet_metadata() {
         let tmp = tempfile::NamedTempFile::new().expect("tmpfile");
         let path = tmp.path().to_path_buf();
         // Close the NamedTempFile so ResultParquetWriter can create the file
@@ -527,19 +527,20 @@ mod tests {
             21
         );
         assert_eq!(plan["operations"][1]["enabled"], true);
+        assert!(!kv_list.iter().any(|k| k.key == "parsable_sequences"));
         let found: Vec<_> = kv_list
             .iter()
-            .filter(|k| k.key == "parsable_sequences")
+            .filter(|k| k.key == "all_sequence_counts_enabled")
             .collect();
         assert_eq!(
             found.len(),
             1,
-            "expected exactly one parsable_sequences key"
+            "expected exactly one all_sequence_counts_enabled key"
         );
         assert_eq!(
             found[0].value.as_deref(),
             Some("true"),
-            "parsable_sequences value should be 'true'"
+            "all_sequence_counts_enabled value should be 'true'"
         );
     }
 }

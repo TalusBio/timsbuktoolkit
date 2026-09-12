@@ -141,7 +141,18 @@ impl<T> PropertyRef<'_, T> {
         }
     }
 
-    /// Known or partially recovered data; completeness must be checked at the required level.
+    /// Return the value from `Known`, or the partial value from `Unresolved`.
+    /// Unlike `known()`, this does not promise completeness. For example, a
+    /// recovered peptide may have known residues but an incomplete modification list.
+    ///
+    /// ```
+    /// use timsquery::chemistry::analyte::PropertyRef;
+    /// let partial = PropertyRef::Unresolved {
+    ///     recovered: Some("PEPTIDE"), annotation: "unresolved chemistry",
+    /// };
+    /// assert_eq!(partial.known(), None);
+    /// assert_eq!(partial.recovered(), Some("PEPTIDE"));
+    /// ```
     pub fn recovered(self) -> Option<T> {
         match self {
             Self::Known(v) => Some(v),

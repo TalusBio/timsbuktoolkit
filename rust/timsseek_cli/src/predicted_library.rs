@@ -661,7 +661,7 @@ mod tests {
                 .map_or("", |p| p.residues),
             "PEPCIDEK"
         );
-        assert!(lib.library.parsable_sequences());
+        assert!(lib.library.all_sequence_counts_enabled());
     }
 
     #[test]

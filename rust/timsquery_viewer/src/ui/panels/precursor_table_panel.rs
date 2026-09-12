@@ -96,6 +96,7 @@ impl TablePanel {
 
         ui.collapsing("Library rescoring features", |ui| {
             ui.label("Availability applies to every target and decoy in the library.");
+            ui.label(elution_groups.scoring_plan().summary());
             for operation in elution_groups.scoring_plan().operations() {
                 ui.label(operation.to_string());
             }

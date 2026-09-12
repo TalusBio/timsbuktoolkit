@@ -2,84 +2,38 @@
 use timsquery::chemistry::analyte::PeptideRef;
 use timsseek_macros::ScoreBlock;
 
-#[allow(non_snake_case)]
-#[derive(ScoreBlock)]
-#[score(requires(ResidueSequence))]
-pub struct ResidueCounts {
-    #[feat(raw, linear = false)]
-    peptide_length: f64,
-    #[feat(raw, linear = false)]
-    aa_count_A: f64,
-    #[feat(raw, linear = false)]
-    aa_count_C: f64,
-    #[feat(raw, linear = false)]
-    aa_count_D: f64,
-    #[feat(raw, linear = false)]
-    aa_count_E: f64,
-    #[feat(raw, linear = false)]
-    aa_count_F: f64,
-    #[feat(raw, linear = false)]
-    aa_count_G: f64,
-    #[feat(raw, linear = false)]
-    aa_count_H: f64,
-    #[feat(raw, linear = false)]
-    aa_count_I: f64,
-    #[feat(raw, linear = false)]
-    aa_count_K: f64,
-    #[feat(raw, linear = false)]
-    aa_count_L: f64,
-    #[feat(raw, linear = false)]
-    aa_count_M: f64,
-    #[feat(raw, linear = false)]
-    aa_count_N: f64,
-    #[feat(raw, linear = false)]
-    aa_count_P: f64,
-    #[feat(raw, linear = false)]
-    aa_count_Q: f64,
-    #[feat(raw, linear = false)]
-    aa_count_R: f64,
-    #[feat(raw, linear = false)]
-    aa_count_S: f64,
-    #[feat(raw, linear = false)]
-    aa_count_T: f64,
-    #[feat(raw, linear = false)]
-    aa_count_V: f64,
-    #[feat(raw, linear = false)]
-    aa_count_W: f64,
-    #[feat(raw, linear = false)]
-    aa_count_Y: f64,
+// Declare each residue once; generate both its field and count assignment.
+macro_rules! residue_counts {
+    ($($field:ident: $residue:literal),+ $(,)?) => {
+        #[allow(non_snake_case)]
+        #[derive(ScoreBlock)]
+        #[score(requires(ResidueSequence))]
+        pub struct ResidueCounts {
+            #[feat(raw, linear = false)]
+            peptide_length: f64,
+            $(#[feat(raw, linear = false)] $field: f64,)+
+        }
+        impl ResidueCounts {
+            pub fn compute(peptide: PeptideRef<'_>) -> Self {
+                let mut counts = [0.0; 26];
+                for residue in peptide.residues.bytes() {
+                    counts[(residue - b'A') as usize] += 1.0;
+                }
+                let count = |aa: u8| counts[(aa - b'A') as usize];
+                Self {
+                    peptide_length: peptide.residues.len() as f64,
+                    $($field: count($residue),)+
+                }
+            }
+        }
+    };
 }
-impl ResidueCounts {
-    pub fn compute(peptide: PeptideRef<'_>) -> Self {
-        let mut counts = [0.0; 26];
-        for residue in peptide.residues.bytes() {
-            counts[(residue - b'A') as usize] += 1.0;
-        }
-        let count = |aa: u8| counts[(aa - b'A') as usize];
-        Self {
-            peptide_length: peptide.residues.len() as f64,
-            aa_count_A: count(b'A'),
-            aa_count_C: count(b'C'),
-            aa_count_D: count(b'D'),
-            aa_count_E: count(b'E'),
-            aa_count_F: count(b'F'),
-            aa_count_G: count(b'G'),
-            aa_count_H: count(b'H'),
-            aa_count_I: count(b'I'),
-            aa_count_K: count(b'K'),
-            aa_count_L: count(b'L'),
-            aa_count_M: count(b'M'),
-            aa_count_N: count(b'N'),
-            aa_count_P: count(b'P'),
-            aa_count_Q: count(b'Q'),
-            aa_count_R: count(b'R'),
-            aa_count_S: count(b'S'),
-            aa_count_T: count(b'T'),
-            aa_count_V: count(b'V'),
-            aa_count_W: count(b'W'),
-            aa_count_Y: count(b'Y'),
-        }
-    }
+residue_counts! {
+    aa_count_A: b'A', aa_count_C: b'C', aa_count_D: b'D', aa_count_E: b'E',
+    aa_count_F: b'F', aa_count_G: b'G', aa_count_H: b'H', aa_count_I: b'I',
+    aa_count_K: b'K', aa_count_L: b'L', aa_count_M: b'M', aa_count_N: b'N',
+    aa_count_P: b'P', aa_count_Q: b'Q', aa_count_R: b'R', aa_count_S: b'S',
+    aa_count_T: b'T', aa_count_V: b'V', aa_count_W: b'W', aa_count_Y: b'Y',
 }
 #[derive(ScoreBlock)]
 #[score(requires(ModificationCount))]
