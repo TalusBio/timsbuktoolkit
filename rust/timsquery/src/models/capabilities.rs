@@ -5,22 +5,15 @@ use serde::{
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TargetCapabilities {
-    pub sequence_features: SeqFeatureState,
     pub fragment_features: FragmentFeatureState,
     pub isotopes: IsotopeStrategy,
     pub decoys: DecoyStrategy,
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum SeqFeatureState {
-    Available,
-    Unavailable,
-}
-
 /// Runtime reflection of whether this arena's label carries ion chemistry
 /// (`FragmentLabel`). `IonAnnot` arenas => `Available`; string-labelled
-/// arenas => `Unavailable`. Mirror of the `sequence_features` gate; consumed
-/// later by annotation-dependent ML features.
+/// arenas => `Unavailable`. Sequence-operation eligibility is resolved from
+/// stored analyte facts by the scoring library.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FragmentFeatureState {
     Available,
@@ -231,7 +224,6 @@ impl TargetCapabilities {
     /// `commands.rs` is what holds that.
     pub fn default_diann() -> Self {
         Self {
-            sequence_features: SeqFeatureState::Available,
             fragment_features: FragmentFeatureState::Available,
             isotopes: IsotopeStrategy::FromComposition { n_isotopes: 3 },
             decoys: DecoyStrategy::Stored,
@@ -243,7 +235,6 @@ impl TargetCapabilities {
     /// [`default_diann`](Self::default_diann).
     pub fn default_unlabeled() -> Self {
         Self {
-            sequence_features: SeqFeatureState::Unavailable,
             fragment_features: FragmentFeatureState::Unavailable,
             ..Self::default_diann()
         }

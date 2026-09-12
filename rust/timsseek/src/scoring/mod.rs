@@ -7,6 +7,7 @@ pub mod extraction;
 pub mod offsets;
 pub mod parquet_writer;
 pub mod pipeline;
+pub mod plan;
 pub mod results;
 mod scores;
 pub mod skip;

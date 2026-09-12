@@ -27,7 +27,6 @@ use crate::scoring::blocks::result_meta::ResultMeta;
 use crate::scoring::blocks::{
     NameSink,
     ScoreBlock,
-    sequence_counts,
 };
 use crate::scoring::results::{
     CompetedCandidate,
@@ -40,6 +39,8 @@ use std::sync::Arc;
 
 #[cfg(test)]
 use super::cv::RowMajorDataset;
+#[cfg(test)]
+use crate::scoring::blocks::sequence_counts;
 use tracing::debug;
 
 /// Failure to produce a valid discriminant score for every rescore fold.
@@ -380,11 +381,11 @@ pub fn rescore(mut data: Vec<CompetedCandidate>, library: &ReferenceLibrary) -> 
     // The ALL-lane matrix (linear ++ nonlinear), built over `data` in its
     // post-shuffle order -- see `canonicalize_and_shuffle` for why that order is
     // load-bearing.
-    let names = all_feature_name_set();
-    debug_assert_eq!(names.len(), ALL_NCOLS);
+    let names = all_feature_name_set(library);
+    debug_assert_eq!(names.len(), all_ncols(library));
     let feat = build_all_matrix(library, competed_rows(&data));
     let responses: Vec<f64> = data.iter().map(|c| c.get_y()).collect();
-    let precomputed = PrecomputedFeatures::from_row_major(feat, ALL_NCOLS, responses);
+    let precomputed = PrecomputedFeatures::from_row_major(feat, all_ncols(library), responses);
 
     let mut scorer =
         CrossValidatedScorer::<CompetedCandidate, GbmFoldModel>::new_from_shuffled_with_precomputed(
@@ -493,14 +494,14 @@ fn hybrid_frame(
     );
     assert_eq!(responses.len(), nrows, "responses must be one per row");
 
-    let ncols = NONLINEAR_NCOLS + 1;
+    let ncols = nonlinear_ncols(library) + 1;
     let nl = build_nonlinear_matrix(library, data);
     let mut feat = Vec::with_capacity(nrows * ncols);
-    for (row, s) in nl.chunks_exact(NONLINEAR_NCOLS).zip(score) {
+    for (row, s) in nl.chunks_exact(nonlinear_ncols(library)).zip(score) {
         feat.extend_from_slice(row);
         feat.push(s);
     }
-    let mut names = nonlinear_feature_name_set();
+    let mut names = nonlinear_feature_name_set(library);
     names.push(Arc::from(score_name));
     debug_assert_eq!(names.len(), ncols);
     debug_assert_eq!(feat.len(), nrows * ncols);
@@ -574,8 +575,8 @@ fn rescore_mlp_with(
     // Fold assignment remains positional after this shuffle. Feature values are
     // streamed one row at a time into the MLP's two reusable batch buffers;
     // there is deliberately no raw or transformed fold matrix on this path.
-    let names = all_feature_name_set();
-    let ncols = ALL_NCOLS;
+    let names = all_feature_name_set(library);
+    let ncols = all_ncols(library);
     debug_assert_eq!(names.len(), ncols);
 
     let write_row = |candidate: &CompetedCandidate, out: &mut [f64]| {
@@ -616,7 +617,7 @@ pub fn rescore_mlp(data: Vec<CompetedCandidate>, library: &ReferenceLibrary) -> 
 //
 // GBM consumers retain a flat row-major `Vec<f64>`; LDA and MLP project the same
 // rows into one-row scratch and retain no raw frame. Every contributing block's
-// width is an inherent const, so the lane widths below are compile-time constants.
+// widths are inherent constants; selected operation widths are resolved per library.
 //
 // The per-row walk order is fixed -- scoring blocks (composition order) ->
 // `ResultMeta` -> `Derived` -> (nonlinear only) `sequence_counts` -- and the
@@ -629,19 +630,22 @@ const LINEAR_NCOLS: usize =
     ScoringFields::LINEAR_LEN + ResultMeta::LINEAR_LEN + Derived::LINEAR_LEN;
 
 /// NONLINEAR-lane width: the rest (context, counts, sequence).
-const NONLINEAR_NCOLS: usize = ScoringFields::NONLINEAR_LEN
-    + ResultMeta::NONLINEAR_LEN
-    + Derived::NONLINEAR_LEN
-    + sequence_counts::LEN;
+const BASE_NONLINEAR_NCOLS: usize =
+    ScoringFields::NONLINEAR_LEN + ResultMeta::NONLINEAR_LEN + Derived::NONLINEAR_LEN;
+fn nonlinear_ncols(library: &ReferenceLibrary) -> usize {
+    BASE_NONLINEAR_NCOLS + library.scoring_plan().width()
+}
+fn all_ncols(library: &ReferenceLibrary) -> usize {
+    LINEAR_NCOLS + nonlinear_ncols(library)
+}
+const _: () = assert!(LINEAR_NCOLS > 0 && BASE_NONLINEAR_NCOLS > 0);
 
-/// ALL-lane width (GBM) = linear ++ nonlinear.
+#[cfg(test)]
+const NONLINEAR_NCOLS: usize = BASE_NONLINEAR_NCOLS
+    + sequence_counts::ResidueCounts::NONLINEAR_LEN
+    + sequence_counts::ModificationCounts::NONLINEAR_LEN;
+#[cfg(test)]
 const ALL_NCOLS: usize = LINEAR_NCOLS + NONLINEAR_NCOLS;
-
-// Neither lane may collapse to nothing. Now that the widths are consts this is
-// a build failure rather than a test failure -- a lane that lost every feature
-// would otherwise train a model on a zero-column matrix.
-const _: () = assert!(LINEAR_NCOLS > 0, "linear lane collapsed");
-const _: () = assert!(NONLINEAR_NCOLS > 0, "nonlinear lane collapsed");
 
 trait ValueSink {
     fn push(&mut self, values: &[f64]);
@@ -703,18 +707,10 @@ fn project_nonlinear_row(
     out.push(&scoring.nonlinear_feature_array());
     out.push(&meta.nonlinear_feature_array());
     out.push(&derived.nonlinear_feature_array());
-    out.push(&sequence_counts::nonlinear_feature_array(
-        library
-            .parsable_sequences()
-            .then(|| {
-                library
-                    .geometry()
-                    .analyte(scoring.identity.row)
-                    .peptide
-                    .known()
-            })
-            .flatten(),
-    ));
+    library.scoring_plan().project(
+        || library.geometry().analyte(scoring.identity.row),
+        |values| out.push(values),
+    );
 }
 
 /// Write one competed candidate's all-lane row into caller-owned scratch.
@@ -725,7 +721,7 @@ fn write_competed_all_row(
     candidate: &CompetedCandidate,
     out: &mut [f64],
 ) {
-    assert_eq!(out.len(), ALL_NCOLS);
+    assert_eq!(out.len(), all_ncols(library));
     let scoring = &candidate.scoring;
     let meta = candidate.result_meta();
     let derived = Derived::compute(scoring);
@@ -759,7 +755,7 @@ fn build_linear_matrix(data: &[CompetedCandidate]) -> Vec<f64> {
 
 /// The NONLINEAR-lane matrix for `data`, `NONLINEAR_NCOLS` wide.
 fn build_nonlinear_matrix(library: &ReferenceLibrary, data: &[CompetedCandidate]) -> Vec<f64> {
-    let mut out = Vec::with_capacity(data.len() * NONLINEAR_NCOLS);
+    let mut out = Vec::with_capacity(data.len() * nonlinear_ncols(library));
     for c in data {
         let meta = c.result_meta();
         project_nonlinear_row(
@@ -782,7 +778,7 @@ fn build_all_matrix<'a>(
     library: &ReferenceLibrary,
     rows: impl ExactSizeIterator<Item = (&'a ScoringFields, ResultMeta)>,
 ) -> Vec<f64> {
-    let mut out = Vec::with_capacity(rows.len() * ALL_NCOLS);
+    let mut out = Vec::with_capacity(rows.len() * all_ncols(library));
     for (s, meta) in rows {
         let derived = Derived::compute(s);
         project_linear_row(s, &meta, &derived, &mut out);
@@ -807,7 +803,10 @@ pub fn feature_frame(
     data: &[FinalResult],
 ) -> (Vec<Arc<str>>, Vec<f64>) {
     let rows = data.iter().map(|r| (&r.scoring, r.result_meta()));
-    (all_feature_name_set(), build_all_matrix(library, rows))
+    (
+        all_feature_name_set(library),
+        build_all_matrix(library, rows),
+    )
 }
 
 /// LINEAR-lane feature names (LDA), in `project_linear_row`'s order.
@@ -820,22 +819,22 @@ pub fn linear_feature_name_set() -> Vec<Arc<str>> {
 }
 
 /// NONLINEAR-lane feature names, in `project_nonlinear_row`'s order. The
-/// `sequence_counts` names are unconditional -- a peptide with no parsed
-/// sequence contributes NaN values under them, not a shorter row.
-pub fn nonlinear_feature_name_set() -> Vec<Arc<str>> {
+/// library plan selects sequence operations once for all rows.
+pub fn nonlinear_feature_name_set(library: &ReferenceLibrary) -> Vec<Arc<str>> {
     let mut n = NameSink::new();
     <ScoringFields as ScoreBlock>::nonlinear_feature_names(&mut n);
     <ResultMeta as ScoreBlock>::nonlinear_feature_names(&mut n);
     <Derived as ScoreBlock>::nonlinear_feature_names(&mut n);
-    sequence_counts::nonlinear_feature_names(&mut n);
-    n.into_names()
+    let mut names = n.into_names();
+    names.extend(library.scoring_plan().names().cloned());
+    names
 }
 
 /// The ALL-lane feature names (GBM) = linear ++ nonlinear, matching
 /// `build_all_matrix`'s column order.
-pub fn all_feature_name_set() -> Vec<Arc<str>> {
+pub fn all_feature_name_set(library: &ReferenceLibrary) -> Vec<Arc<str>> {
     let mut v = linear_feature_name_set();
-    v.extend(nonlinear_feature_name_set());
+    v.extend(nonlinear_feature_name_set(library));
     v
 }
 
@@ -984,6 +983,11 @@ mod tests {
 #[cfg(test)]
 mod feature_tests {
     fn library_with_sequence(sequence: &str) -> ReferenceLibrary {
+        library_with_analyte(timsquery::chemistry::analyte::Analyte::from_sequence(
+            sequence,
+        ))
+    }
+    fn library_with_analyte(analyte: timsquery::chemistry::analyte::Analyte) -> ReferenceLibrary {
         use timsquery::models::{
             Row,
             TargetColumnsBuilder,
@@ -992,7 +996,6 @@ mod feature_tests {
         let mut builder = TargetColumnsBuilder::with_capabilities(
             timsquery::models::TargetCapabilities::default_diann(),
         );
-        let analyte = timsquery::chemistry::analyte::Analyte::from_sequence(sequence);
         let frags = [(timsquery::ion::IonAnnot::try_from("y1").unwrap(), 300.0)];
         for _ in 0..1024 {
             builder.push_row(Row {
@@ -1067,24 +1070,26 @@ mod feature_tests {
     /// misattributes feature importances and stats.
     ///
     /// Checked with an UNPARSED peptide as well as a parsed one: the sequence
-    /// block is unconditional now, so a row must be exactly as wide either way
-    /// -- the width being a compile-time const is what makes that structural.
+    /// operation selection changes the width, but names and values must agree.
     #[test]
     fn lane_matrix_widths_match_name_sets() {
         for context in [library_with_sequence("PEPTIDEK"), library_with_sequence("")] {
             let data = vec![sample_competed_candidate()];
             assert_eq!(linear_feature_name_set().len(), LINEAR_NCOLS);
-            assert_eq!(nonlinear_feature_name_set().len(), NONLINEAR_NCOLS);
-            assert_eq!(all_feature_name_set().len(), ALL_NCOLS);
+            assert_eq!(
+                nonlinear_feature_name_set(&context).len(),
+                nonlinear_ncols(&context)
+            );
+            assert_eq!(all_feature_name_set(&context).len(), all_ncols(&context));
 
             assert_eq!(build_linear_matrix(&data).len(), LINEAR_NCOLS);
             assert_eq!(
                 build_nonlinear_matrix(&context, &data).len(),
-                NONLINEAR_NCOLS
+                nonlinear_ncols(&context)
             );
             assert_eq!(
                 build_all_matrix(&context, competed_rows(&data)).len(),
-                ALL_NCOLS
+                all_ncols(&context)
             );
         }
     }
@@ -1127,33 +1132,59 @@ mod feature_tests {
         }
     }
 
-    /// An unparsed peptide preserves the feature width by emitting NaNs.
+    /// Missing chemistry removes operations and their columns for the entire library.
     #[test]
-    fn unparsed_sequence_emits_nan_not_a_narrower_row() {
-        let names = nonlinear_feature_name_set();
-        let seq_start = NONLINEAR_NCOLS - sequence_counts::LEN;
-        assert_eq!(&*names[seq_start], "peptide_length");
-        assert_eq!(&*names[NONLINEAR_NCOLS - 1], "peptide_n_mods");
-
-        let unparsed =
-            build_nonlinear_matrix(&library_with_sequence(""), &[sample_competed_candidate()]);
+    fn missing_sequence_removes_columns_in_materialized_and_streamed_paths() {
+        let missing = library_with_sequence("");
+        let data = [sample_competed_candidate()];
+        let names = all_feature_name_set(&missing);
+        assert_eq!(names.len(), LINEAR_NCOLS + BASE_NONLINEAR_NCOLS);
         assert!(
-            unparsed[seq_start..].iter().all(|v| v.is_nan()),
-            "unparsed sequence features must all be NaN: {:?}",
-            &unparsed[seq_start..]
+            !names
+                .iter()
+                .any(|n| n.starts_with("peptide_") || n.starts_with("aa_count_"))
         );
+        let matrix = build_all_matrix(&missing, competed_rows(&data));
+        let mut streamed = vec![0.0; names.len()];
+        write_competed_all_row(&missing, &data[0], &mut streamed);
+        assert_eq!(
+            matrix.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            streamed.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+        );
+        let (_, hybrid_names) = hybrid_frame(&missing, &data, vec![1.0], "lda_score", vec![0.0]);
+        assert_eq!(hybrid_names.len(), BASE_NONLINEAR_NCOLS + 1);
+    }
 
-        let parsed = build_nonlinear_matrix(library(), &[sample_competed_candidate()]);
-        // PEPTIDEK: 8 residues, no mods.
-        assert_eq!(parsed[seq_start], 8.0);
-        assert_eq!(parsed[NONLINEAR_NCOLS - 1], 0.0);
+    #[test]
+    fn partial_chemistry_layout_matches_streaming_hybrid_and_dashboard() {
+        let library = library_with_analyte(
+            timsquery::chemistry::analyte::Analyte::from_sequence_fields("", "PEPTIDEK").unwrap(),
+        );
+        let data = [sample_competed_candidate()];
+        let names = all_feature_name_set(&library);
+        assert_eq!(names.len(), ALL_NCOLS - 1);
+        assert!(!names.iter().any(|n| n.contains("peptide_n_mods")));
+        let matrix = build_all_matrix(&library, competed_rows(&data));
+        let length = names.iter().position(|n| &**n == "peptide_length").unwrap();
+        assert_eq!(matrix[length], 8.0);
+        let mut streamed = vec![0.0; names.len()];
+        write_competed_all_row(&library, &data[0], &mut streamed);
+        assert_eq!(
+            matrix.iter().map(|v| v.to_bits()).collect::<Vec<_>>(),
+            streamed.iter().map(|v| v.to_bits()).collect::<Vec<_>>()
+        );
+        let (_, hybrid_names) = hybrid_frame(&library, &data, vec![1.0], "lda_score", vec![0.0]);
+        assert_eq!(hybrid_names.len(), nonlinear_ncols(&library) + 1);
+        assert!(!hybrid_names.iter().any(|n| n.contains("peptide_n_mods")));
+        let (dashboard_names, _) = feature_frame(&library, &[]);
+        assert_eq!(dashboard_names, names);
     }
 
     #[test]
     fn feature_names_are_unique() {
         // Exact counts may change, but duplicate names make reports ambiguous.
         let mut seen = std::collections::HashSet::new();
-        for n in all_feature_name_set() {
+        for n in all_feature_name_set(library()) {
             assert!(seen.insert(n.clone()), "dup feature name: {n}");
         }
     }
@@ -1759,7 +1790,7 @@ mod feature_tests {
 
     fn assert_nonlinear_lane_is_flat(fixture: &[CompetedCandidate], column: &str) {
         let nl = build_nonlinear_matrix(library(), fixture);
-        for (j, name) in nonlinear_feature_name_set().iter().enumerate() {
+        for (j, name) in nonlinear_feature_name_set(library()).iter().enumerate() {
             let first = nl[j].to_bits();
             assert!(
                 (0..fixture.len()).all(|i| nl[i * NONLINEAR_NCOLS + j].to_bits() == first),
@@ -1822,7 +1853,7 @@ mod feature_tests {
         cand.scoring.neutralize_mobility();
         let after = build_all_matrix(library(), competed_rows(&[cand]));
 
-        let names = all_feature_name_set();
+        let names = all_feature_name_set(library());
         assert_eq!(names.len(), ALL_NCOLS);
         assert_eq!(before.len(), ALL_NCOLS);
         assert_eq!(after.len(), ALL_NCOLS);

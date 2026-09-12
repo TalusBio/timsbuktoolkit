@@ -10,7 +10,7 @@
 //! [f64; Self::LEN]` in a trait needs unstable `generic_const_exprs`, while the
 //! same signature on a concrete type is stable -- and inherent consts compose
 //! (`Fields::LINEAR_LEN = A::LINEAR_LEN + B::LINEAR_LEN`), which is what lets
-//! the whole feature matrix be a compile-time width.
+//! each block retain a compile-time width while the run selects operations.
 //!
 //! The same derive covers LEAF blocks (fields are scalars/arrays annotated
 //! `#[feat(...)]`) and COMPOSITIONS of blocks (fields annotated `#[block]`,
@@ -605,6 +605,24 @@ fn sample_field_calls(fields: &[Field]) -> Vec<TokenStream> {
 /// (`timsseek_cli`), compiled against timsseek's normal build. Unit-testable
 /// without a proc-macro context -- see `tests` below.
 pub(crate) fn derive_score_block(input: DeriveInput) -> Result<TokenStream> {
+    let mut requirement = quote! { None };
+    let mut has_requirement = false;
+    for attr in input.attrs.iter().filter(|a| a.path().is_ident("score")) {
+        attr.parse_nested_meta(|meta| {
+            if !meta.path.is_ident("requires") || has_requirement {
+                return Err(meta.error("expected one requires(Requirement)"));
+            }
+            let content;
+            syn::parenthesized!(content in meta.input);
+            let name: Ident = content.parse()?;
+            if !content.is_empty() {
+                return Err(content.error("expected one requirement"));
+            }
+            requirement = quote! { Some(crate::scoring::plan::Requirement::#name) };
+            has_requirement = true;
+            Ok(())
+        })?;
+    }
     let fields = collect_fields(&input)?;
     let name = &input.ident;
     let (generics_impl, generics_ty, generics_where) = input.generics.split_for_impl();
@@ -622,6 +640,9 @@ pub(crate) fn derive_score_block(input: DeriveInput) -> Result<TokenStream> {
 
     Ok(quote! {
         impl #generics_impl crate::scoring::blocks::ScoreBlock for #name #generics_ty #generics_where {
+            fn requirement() -> Option<crate::scoring::plan::Requirement> {
+                #requirement
+            }
             fn column_schema(out: &mut crate::scoring::blocks::SchemaSink) {
                 #(#schema_calls)*
             }
@@ -798,7 +819,10 @@ pub(crate) fn derive_score_block(input: DeriveInput) -> Result<TokenStream> {
 ///
 /// gives `AllScores::LINEAR_LEN == <MyScores>::LINEAR_LEN +
 /// <OtherScores>::LINEAR_LEN`, and every walk visits `mine` then `theirs`.
-#[proc_macro_derive(ScoreBlock, attributes(feat, block))]
+/// A leaf operation may declare `#[score(requires(ResidueSequence))]` or
+/// `#[score(requires(ModificationCount))]`. This emits `ScoreBlock::requirement()`;
+/// the run's dispatcher must gate the computation and all its projections together.
+#[proc_macro_derive(ScoreBlock, attributes(feat, block, score))]
 pub fn score_block_derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let di = syn::parse_macro_input!(input as DeriveInput);
     derive_score_block(di)
@@ -808,6 +832,23 @@ pub fn score_block_derive(input: proc_macro::TokenStream) -> proc_macro::TokenSt
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn requirement_applies_to_all_operation_projections() {
+        let input = syn::parse_quote! {
+            #[score(requires(ResidueSequence))]
+            struct Counts { #[feat(raw, isna, linear = false)] count: f64 }
+        };
+        let output = super::derive_score_block(input).unwrap().to_string();
+        assert!(output.contains("Requirement :: ResidueSequence"));
+        assert!(output.contains("count_isna"));
+        for input in [
+            syn::parse_quote! { #[score(requires(ResidueSequence), requires(ModificationCount))] struct Bad { count: f64 } },
+            syn::parse_quote! { #[score(requires(ResidueSequence, ModificationCount))] struct Bad { count: f64 } },
+        ] {
+            assert!(super::derive_score_block(input).is_err());
+        }
+    }
+
     use super::derive_score_block;
     use quote::quote;
 

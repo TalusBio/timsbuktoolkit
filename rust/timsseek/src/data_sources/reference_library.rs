@@ -10,10 +10,7 @@ use timsquery::serde::{
 };
 
 use crate::errors::TargetReadingError;
-use timsquery::models::capabilities::{
-    IsotopeStrategy,
-    SeqFeatureState,
-};
+use timsquery::models::capabilities::IsotopeStrategy;
 use timsquery::models::{
     FlatIdx,
     GroupCode,
@@ -35,7 +32,7 @@ pub struct ReferenceLibrary {
     geom: TargetColumns<IonAnnot>,
     /// Parallel to `geom.frag_labels` / `geom.frag_mzs`; same `frag_off` ranges.
     frag_intens: Vec<f32>,
-    sequence_features: SeqFeatureState,
+    plan: crate::scoring::plan::ScoringPlan,
 }
 
 pub trait ExpectedIntensity {
@@ -121,10 +118,8 @@ impl ReferenceLibrary {
     /// Readers that supply reference intensities preserve them in the sidecar;
     /// this includes the DIA-NN TSV/Parquet adapters.
     ///
-    /// Narrowing only, and crate-internal for that reason: none of the load-time
-    /// finalize runs, so `caps.sequence_features` keeps the reader's optimistic
-    /// default and sequence-derived features get claimed for rows that will not
-    /// parse. [`Self::from_sealed_arena`] is the way in from an arena.
+    /// Resolves the operation plan from the validated arena. The public load
+    /// boundary additionally reports decoys, operation coverage, and isotope fallbacks.
     pub(crate) fn from_arena(arena: TargetTable) -> Result<Self, TargetReadingError> {
         match arena {
             TargetTable::Mzpaf { geom, frag_intens } => {
@@ -181,11 +176,11 @@ impl ReferenceLibrary {
                         ),
                     });
                 }
-                let sequence_features = geom.capabilities().sequence_features;
+                let plan = crate::scoring::plan::ScoringPlan::resolve(&geom);
                 Ok(ReferenceLibrary {
                     geom,
                     frag_intens,
-                    sequence_features,
+                    plan,
                 })
             }
             TargetTable::Str { .. } => Err(TargetReadingError::UnsupportedFormat {
@@ -196,8 +191,7 @@ impl ReferenceLibrary {
     }
 }
 
-/// The public conversion spelling; finalize included, so no `.try_into()`
-/// yields a library whose parse gate never ran.
+/// Public conversion includes invariant validation, plan resolution and reporting.
 impl TryFrom<TargetTable> for ReferenceLibrary {
     type Error = TargetReadingError;
 
@@ -384,18 +378,15 @@ fn retired_format(path: &Path) -> Option<&'static str> {
 /// Loading: the one path from a path on disk to a scored-against arena.
 impl ReferenceLibrary {
     /// Narrow a sealed [`TargetTable`] and finish it: decoy reporting, the
-    /// whole-library parse gate, the averagine tally.
+    /// operation report, and the averagine tally.
     ///
     /// The one definition of a finished library. `TargetTable`'s variants and
     /// fields are public, so a caller outside timsseek can assemble an arena
-    /// itself, and routing it here is what keeps its `caps.sequence_features`
-    /// from standing at the reader's optimistic default -- claiming
-    /// sequence-derived features for rows that will not parse. Every route in,
-    /// [`Self::from_file`] included, ends here.
+    /// itself; all public loading routes finish here and report the resolved plan.
     pub(crate) fn from_sealed_arena(arena: TargetTable) -> Result<Self, TargetReadingError> {
-        let mut lib = Self::from_arena(arena)?;
+        let lib = Self::from_arena(arena)?;
         lib.report_decoys();
-        lib.gate_sequence_features();
+        lib.report_scoring_plan();
         lib.log_entry_stats();
         Ok(lib)
     }
@@ -432,10 +423,18 @@ impl ReferenceLibrary {
         Self::from_sealed_arena(arena)
     }
 
-    /// Whether every row supplies supported sequence structure (gates sequence-derived
-    /// scoring features). Reads the sealed arena's `sequence_features` state.
+    /// The immutable operation plan resolved for this library's stored rows and variants.
+    pub fn scoring_plan(&self) -> &crate::scoring::plan::ScoringPlan {
+        &self.plan
+    }
+
+    /// Compatibility summary: both residue and modification-count operations are enabled.
+    /// Execution uses the individual plan decisions, never this combined flag.
     pub fn parsable_sequences(&self) -> bool {
-        self.sequence_features == SeqFeatureState::Available
+        self.plan
+            .operations()
+            .iter()
+            .all(|operation| operation.enabled)
     }
 
     /// Mean number of fragments per entry (0.0 for an empty library).
@@ -481,36 +480,11 @@ impl ReferenceLibrary {
         }
     }
 
-    /// Decide sequence-feature eligibility once for the whole library, using
-    /// stored residues and modification definitions. Also tally the existing
-    /// residue-only isotope model's averagine fallbacks.
-    ///
-    /// Keep the historical Unimod/mass and length limits in this migration.
-    /// Partial or unsupported structure disables the sequence lane globally.
-    fn gate_sequence_features(&mut self) {
+    /// Report independently resolved operations and the existing isotope fallback tally.
+    fn report_scoring_plan(&self) {
         let n_rows = self.geom.n_rows();
-        let mut n_unparsable = 0usize;
-        let mut first_unparsable: Option<String> = None;
         let mut n_averagine_fallback = 0usize;
         for tgt in self.geom.rows() {
-            let peptide = self.geom.analyte(tgt).peptide.known();
-            if !peptide.is_some_and(|p| {
-                p.residues.len() <= 254
-                    && p.modifications.known().is_some_and(|mods| {
-                        mods.iter().all(|(_, m)| match m.kind() {
-                            timsquery::chemistry::analyte::ModificationKind::Unimod(id) => {
-                                u16::try_from(*id).is_ok()
-                            }
-                            timsquery::chemistry::analyte::ModificationKind::Mass(m) => {
-                                m.is_finite()
-                            }
-                            timsquery::chemistry::analyte::ModificationKind::Other => false,
-                        })
-                    })
-            }) {
-                n_unparsable += 1;
-                first_unparsable.get_or_insert_with(|| self.geom.output_id(tgt).to_string());
-            }
             let stripped = self
                 .geom
                 .analyte(tgt)
@@ -525,20 +499,8 @@ impl ReferenceLibrary {
             }
         }
 
-        self.sequence_features = if n_unparsable == 0 {
-            SeqFeatureState::Available
-        } else {
-            SeqFeatureState::Unavailable
-        };
-
-        if let Some(example) = &first_unparsable {
-            tracing::warn!(
-                "{}/{} library entries lack sequence structure supported by the scoring lane; \
-                 sequence features are off for the whole library (first source ID: {:?})",
-                n_unparsable,
-                n_rows,
-                example
-            );
+        for operation in self.plan.operations() {
+            tracing::info!("{operation}");
         }
         if n_averagine_fallback > 0 {
             tracing::warn!(
@@ -553,11 +515,11 @@ impl ReferenceLibrary {
     fn log_entry_stats(&self) {
         tracing::info!(
             "Library ready: {} stored rows ({} flat scoring entries, {} fragment slots), \
-             sequence_features={:?}",
+             scoring_plan={:?}",
             self.geom.n_rows(),
             self.len(),
             self.geom.n_fragments(),
-            self.sequence_features,
+            self.plan,
         );
     }
 }
@@ -1506,27 +1468,11 @@ mod load_tests {
         ));
     }
 
-    /// The OFF branch of the library-scale parse gate, and the only test of it.
-    ///
-    /// One row parses (`PEPTIDEK`) and one does not (`GARBAGE!!!`, which both
-    /// the byte-walk parser and the mzcore fallback reject). Feature
-    /// availability is library-scale on purpose, so the one bad row has to
-    /// disable sequence features for the good one too: targets and decoys
-    /// scored with different features make FDR meaningless.
-    ///
-    /// Driven through the public seam rather than a file, since the gate is a
-    /// property of the load path and not of any format, and the seam is the only
-    /// way an out-of-crate caller reaches it.
+    /// One row without recoverable residues disables sequence operations globally,
+    /// including for otherwise usable targets and decoys. Exercise the public load seam.
     #[test]
     fn one_unparsable_sequence_disables_sequence_features_library_wide() {
-        for sequence in [
-            "GARBAGE!!!",
-            "PEPTK[MOD:00046]IDEK",
-            "PEPTK[XLMOD:02001]IDEK",
-            "PEPTK[RESID:AA0038]IDEK",
-            "PEPTN[Glycan:HexNAc]IDEK",
-            "PEPTN[GNO:G59626AS]IDEK",
-        ] {
+        for sequence in ["GARBAGE!!!", "PEPTN[GNO:G59626AS]IDEK"] {
             let library = ReferenceLibrary::from_sealed_arena(hand_assembled_arena(
                 crate::models::DecoyPolicy::default(),
                 &[RowSpec::target("PEPTIDEK"), RowSpec::target(sequence)],
@@ -1556,14 +1502,9 @@ mod load_tests {
         );
     }
 
-    /// Narrowing alone runs no gate: the arena keeps the reader's optimistic
-    /// default, unparsable rows and all.
-    ///
-    /// The difference between the two constructors, stated where it can fail
-    /// rather than only in a doc comment. Also why the narrowing one is
-    /// crate-internal.
+    /// Internal narrowing also resolves the plan; reader defaults cannot bypass it.
     #[test]
-    fn narrowing_an_arena_leaves_sequence_features_at_the_readers_default() {
+    fn narrowing_an_arena_already_resolves_its_scoring_plan() {
         let library = ReferenceLibrary::from_arena(hand_assembled_arena(
             crate::models::DecoyPolicy::default(),
             &[RowSpec::target("PEPTIDEK"), RowSpec::target("GARBAGE!!!")],
@@ -1571,8 +1512,8 @@ mod load_tests {
         .expect("an mzpaf arena carrying intensities narrows");
 
         assert!(
-            library.parsable_sequences(),
-            "the optimistic default stands until the gate reads the rows"
+            !library.parsable_sequences(),
+            "even internal narrowing resolves coverage from stored facts"
         );
     }
 
@@ -1612,7 +1553,7 @@ mod load_tests {
     /// above has nothing to refuse and the library is searchable.
     ///
     /// Five peaks, one row, and no sequence -- a small molecule has none, so the
-    /// parse gate closes over the sequence-derived scores and leaves the rest.
+    /// plan disables sequence operations while preserving spectrum features.
     #[test]
     fn the_default_policy_makes_that_same_library_searchable() {
         let lib = ReferenceLibrary::from_file(

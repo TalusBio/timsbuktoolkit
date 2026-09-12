@@ -1,58 +1,115 @@
-//! Sequence-derived features (nonlinear lane, features-only -- no Parquet
-//! column).
-//!
-//! UNCONDITIONAL: always [`LEN`] features wide. A peptide with no parsed
-//! sequence emits `f64::NAN` for all of them rather than emitting nothing --
-//! NaN is exactly what forust reads as "missing", and a fixed width is what
-//! lets this block's contribution to the feature matrix be a compile-time
-//! constant like every other block's. Emitted LAST, so these names stay at the
-//! tail.
+//! Independently dispatched residue and modification counts; ML-only output.
+use timsquery::chemistry::analyte::PeptideRef;
+use timsseek_macros::ScoreBlock;
 
-use crate::models::sequence::{
-    AA_COUNT_NAMES,
-    CANONICAL_AA_LETTERS,
-};
-use crate::scoring::blocks::NameSink;
-
-/// `peptide_length`, one count per canonical amino acid, `peptide_n_mods`.
-pub const LEN: usize = AA_COUNT_NAMES.len() + 2;
-
-/// The [`LEN`] nonlinear-lane (tree-only) sequence feature *values*, or all
-/// `f64::NAN` when the peptide has no parsed sequence. `counts` and
-/// `CANONICAL_AA_LETTERS` are both fixed 20-element arrays, so the middle
-/// slice is compile-time guaranteed to cover all 20 counts.
-pub fn nonlinear_feature_array(
-    peptide: Option<timsquery::chemistry::analyte::PeptideRef<'_>>,
-) -> [f64; LEN] {
-    let mut out = [f64::NAN; LEN];
-    if let Some(peptide) = peptide
-        && let Some(modifications) = peptide.modifications.known()
-    {
+#[allow(non_snake_case)]
+#[derive(ScoreBlock)]
+#[score(requires(ResidueSequence))]
+pub struct ResidueCounts {
+    #[feat(raw, linear = false)]
+    peptide_length: f64,
+    #[feat(raw, linear = false)]
+    aa_count_A: f64,
+    #[feat(raw, linear = false)]
+    aa_count_C: f64,
+    #[feat(raw, linear = false)]
+    aa_count_D: f64,
+    #[feat(raw, linear = false)]
+    aa_count_E: f64,
+    #[feat(raw, linear = false)]
+    aa_count_F: f64,
+    #[feat(raw, linear = false)]
+    aa_count_G: f64,
+    #[feat(raw, linear = false)]
+    aa_count_H: f64,
+    #[feat(raw, linear = false)]
+    aa_count_I: f64,
+    #[feat(raw, linear = false)]
+    aa_count_K: f64,
+    #[feat(raw, linear = false)]
+    aa_count_L: f64,
+    #[feat(raw, linear = false)]
+    aa_count_M: f64,
+    #[feat(raw, linear = false)]
+    aa_count_N: f64,
+    #[feat(raw, linear = false)]
+    aa_count_P: f64,
+    #[feat(raw, linear = false)]
+    aa_count_Q: f64,
+    #[feat(raw, linear = false)]
+    aa_count_R: f64,
+    #[feat(raw, linear = false)]
+    aa_count_S: f64,
+    #[feat(raw, linear = false)]
+    aa_count_T: f64,
+    #[feat(raw, linear = false)]
+    aa_count_V: f64,
+    #[feat(raw, linear = false)]
+    aa_count_W: f64,
+    #[feat(raw, linear = false)]
+    aa_count_Y: f64,
+}
+impl ResidueCounts {
+    pub fn compute(peptide: PeptideRef<'_>) -> Self {
         let mut counts = [0.0; 26];
-        for residue in peptide.residues.bytes().filter(u8::is_ascii_uppercase) {
+        for residue in peptide.residues.bytes() {
             counts[(residue - b'A') as usize] += 1.0;
         }
-        out[0] = peptide.residues.len() as f64;
-        for (i, &aa) in CANONICAL_AA_LETTERS.iter().enumerate() {
-            out[i + 1] = counts[(aa - b'A') as usize];
+        let count = |aa: u8| counts[(aa - b'A') as usize];
+        Self {
+            peptide_length: peptide.residues.len() as f64,
+            aa_count_A: count(b'A'),
+            aa_count_C: count(b'C'),
+            aa_count_D: count(b'D'),
+            aa_count_E: count(b'E'),
+            aa_count_F: count(b'F'),
+            aa_count_G: count(b'G'),
+            aa_count_H: count(b'H'),
+            aa_count_I: count(b'I'),
+            aa_count_K: count(b'K'),
+            aa_count_L: count(b'L'),
+            aa_count_M: count(b'M'),
+            aa_count_N: count(b'N'),
+            aa_count_P: count(b'P'),
+            aa_count_Q: count(b'Q'),
+            aa_count_R: count(b'R'),
+            aa_count_S: count(b'S'),
+            aa_count_T: count(b'T'),
+            aa_count_V: count(b'V'),
+            aa_count_W: count(b'W'),
+            aa_count_Y: count(b'Y'),
         }
-        out[LEN - 1] = modifications.len() as f64;
     }
-    out
+}
+#[derive(ScoreBlock)]
+#[score(requires(ModificationCount))]
+pub struct ModificationCounts {
+    #[feat(raw, linear = false)]
+    peptide_n_mods: f64,
+}
+impl ModificationCounts {
+    pub fn compute(peptide: PeptideRef<'_>) -> Self {
+        Self {
+            peptide_n_mods: peptide
+                .modifications
+                .known()
+                .expect("plan promised complete modification count")
+                .len() as f64,
+        }
+    }
 }
 
-/// Nonlinear-lane names for [`nonlinear_feature_array`], same order.
-pub fn nonlinear_feature_names(o: &mut NameSink) {
-    o.push("peptide_length");
-    for &n in AA_COUNT_NAMES.iter() {
-        o.push(n);
-    }
-    o.push("peptide_n_mods");
-}
+#[cfg(test)]
+const LEN: usize = ResidueCounts::NONLINEAR_LEN + ModificationCounts::NONLINEAR_LEN;
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::models::sequence::CANONICAL_AA_LETTERS;
+    use crate::scoring::blocks::{
+        NameSink,
+        ScoreBlock,
+    };
     use timsquery::chemistry::analyte::Analyte;
     use timsquery::models::capabilities::DecoyPolicy;
     use timsquery::models::{
@@ -63,6 +120,9 @@ mod tests {
 
     #[test]
     fn stored_counts_match_expected_residues_and_modifications() {
+        let mut names = NameSink::new();
+        ResidueCounts::nonlinear_feature_names(&mut names);
+        let names = names.into_names();
         for (sequence, residues, n_mods) in [
             ("PEPTIDEK", "PEPTIDEK", 0),
             ("_AC(UniMod:4)M(UniMod:35)K_", "ACMK", 2),
@@ -80,15 +140,25 @@ mod tests {
                 ..Default::default()
             });
             let geom = builder.seal(DecoyPolicy::Never).unwrap();
-            let values =
-                nonlinear_feature_array(geom.analyte(geom.rows().next().unwrap()).peptide.known());
+            let values = {
+                let peptide = geom
+                    .analyte(geom.rows().next().unwrap())
+                    .peptide
+                    .known()
+                    .unwrap();
+                let mut values = ResidueCounts::compute(peptide)
+                    .nonlinear_feature_array()
+                    .to_vec();
+                values.extend(ModificationCounts::compute(peptide).nonlinear_feature_array());
+                values
+            };
             assert_eq!(values[0], residues.len() as f64, "{sequence}");
             for (i, &aa) in CANONICAL_AA_LETTERS.iter().enumerate() {
                 assert_eq!(
                     values[i + 1],
                     residues.bytes().filter(|&r| r == aa).count() as f64
                 );
-                assert_eq!(AA_COUNT_NAMES[i], format!("aa_count_{}", aa as char));
+                assert_eq!(&*names[i + 1], format!("aa_count_{}", aa as char));
             }
             assert_eq!(values[LEN - 1], n_mods as f64, "{sequence}");
         }

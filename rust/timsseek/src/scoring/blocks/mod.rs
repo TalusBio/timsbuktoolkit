@@ -78,6 +78,11 @@ pub mod sequence_counts;
 /// `columns` is the only method every block must provide; the schema and name
 /// walks are defaulted to no-ops for blocks that don't participate.
 pub trait ScoreBlock {
+    /// Requirement for an independently dispatched operation; projections alone do not gate computation.
+    fn requirement() -> Option<crate::scoring::plan::Requirement> {
+        None
+    }
+
     fn columns(&self, out: &mut ColSink);
 
     /// Parquet-adjacent schema (dtype/nullability only, no data) for the same

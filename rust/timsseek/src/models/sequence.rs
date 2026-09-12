@@ -20,30 +20,6 @@ pub fn parse_proforma(
 
 pub use timsquery::chemistry::CANONICAL_AA_LETTERS;
 
-const AA_COUNT_NAME_BYTES: [[u8; 10]; 20] = {
-    let mut names = [*b"aa_count_A"; 20];
-    let mut i = 0;
-    while i < names.len() {
-        names[i][9] = CANONICAL_AA_LETTERS[i];
-        i += 1;
-    }
-    names
-};
-
-/// Compile-time feature names in canonical residue order; no allocations.
-pub const AA_COUNT_NAMES: [&str; 20] = {
-    let mut names = [""; 20];
-    let mut i = 0;
-    while i < names.len() {
-        names[i] = match std::str::from_utf8(&AA_COUNT_NAME_BYTES[i]) {
-            Ok(name) => name,
-            Err(_) => panic!("canonical residues must be ASCII"),
-        };
-        i += 1;
-    }
-    names
-};
-
 #[cfg(test)]
 mod tests {
     use super::*;

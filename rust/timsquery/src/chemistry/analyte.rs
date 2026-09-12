@@ -36,11 +36,12 @@
 //! coexistence alone does not certify chemical consistency.
 //!
 //! Search candidates carry a row and competition metadata, not copied sequences.
-//! Rescorers and the dashboard receive the owning `ReferenceLibrary`. The existing
-//! library-wide sequence gate reads stored structure: supported Unimod/mass
-//! modifications and at most 254 residues. Missing, partial or unsupported structure
-//! disables sequence features for the entire library. Global/labile/ambiguous
-//! modifications are preserved as unresolved instead of silently omitted. The isotope
+//! Rescorers and the dashboard receive the owning `ReferenceLibrary`. Its library-wide
+//! plan enables residue and modification-count operations independently. Unknown
+//! modification composition does not prevent counting a complete modification set;
+//! one row lacking residues disables residue features for all targets and decoys.
+//! Disabled operations have no ML projections. Global/labile/ambiguous modifications
+//! remain unresolved where their complete set cannot be represented. The isotope
 //! model still uses residues and its existing averagine fallback, not modification
 //! or declared-formula composition.
 //!
@@ -140,7 +141,8 @@ impl<T> PropertyRef<'_, T> {
         }
     }
 
-    fn recovered(self) -> Option<T> {
+    /// Known or partially recovered data; completeness must be checked at the required level.
+    pub fn recovered(self) -> Option<T> {
         match self {
             Self::Known(v) => Some(v),
             Self::Unresolved { recovered, .. } => recovered,
