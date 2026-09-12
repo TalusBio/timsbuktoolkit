@@ -2,39 +2,51 @@
 use timsquery::chemistry::analyte::PeptideRef;
 use timsseek_macros::ScoreBlock;
 
-// Declare each residue once; generate both its field and count assignment.
-macro_rules! residue_counts {
-    ($($field:ident: $residue:literal),+ $(,)?) => {
-        #[allow(non_snake_case)]
-        #[derive(ScoreBlock)]
-        #[score(requires(ResidueSequence))]
-        pub struct ResidueCounts {
-            #[feat(raw, linear = false)]
-            peptide_length: f64,
-            $(#[feat(raw, linear = false)] $field: f64,)+
+use super::{
+    ColSink,
+    NameSink,
+};
+use crate::scoring::plan::Requirement;
+use timsquery::chemistry::CANONICAL_AA_LETTERS;
+
+pub struct ResidueCounts([f64; Self::NONLINEAR_LEN]);
+
+impl ResidueCounts {
+    pub const NONLINEAR_LEN: usize = CANONICAL_AA_LETTERS.len() + 1;
+
+    pub fn compute(peptide: PeptideRef<'_>) -> Self {
+        let mut counts = [0.0; 26];
+        for residue in peptide.residues.bytes() {
+            counts[(residue - b'A') as usize] += 1.0;
         }
-        impl ResidueCounts {
-            pub fn compute(peptide: PeptideRef<'_>) -> Self {
-                let mut counts = [0.0; 26];
-                for residue in peptide.residues.bytes() {
-                    counts[(residue - b'A') as usize] += 1.0;
-                }
-                let count = |aa: u8| counts[(aa - b'A') as usize];
-                Self {
-                    peptide_length: peptide.residues.len() as f64,
-                    $($field: count($residue),)+
-                }
-            }
+        let mut values = [0.0; Self::NONLINEAR_LEN];
+        values[0] = peptide.residues.len() as f64;
+        for (i, &aa) in CANONICAL_AA_LETTERS.iter().enumerate() {
+            values[i + 1] = counts[(aa - b'A') as usize];
         }
-    };
+        Self(values)
+    }
+
+    pub fn nonlinear_feature_array(&self) -> [f64; Self::NONLINEAR_LEN] {
+        self.0
+    }
 }
-residue_counts! {
-    aa_count_A: b'A', aa_count_C: b'C', aa_count_D: b'D', aa_count_E: b'E',
-    aa_count_F: b'F', aa_count_G: b'G', aa_count_H: b'H', aa_count_I: b'I',
-    aa_count_K: b'K', aa_count_L: b'L', aa_count_M: b'M', aa_count_N: b'N',
-    aa_count_P: b'P', aa_count_Q: b'Q', aa_count_R: b'R', aa_count_S: b'S',
-    aa_count_T: b'T', aa_count_V: b'V', aa_count_W: b'W', aa_count_Y: b'Y',
+
+impl super::ScoreBlock for ResidueCounts {
+    fn requirement() -> Option<Requirement> {
+        Some(Requirement::ResidueSequence)
+    }
+
+    fn columns(&self, _: &mut ColSink) {}
+
+    fn nonlinear_feature_names(out: &mut NameSink) {
+        out.push("peptide_length");
+        for aa in CANONICAL_AA_LETTERS {
+            out.push(&format!("aa_count_{}", aa as char));
+        }
+    }
 }
+
 #[derive(ScoreBlock)]
 #[score(requires(ModificationCount))]
 pub struct ModificationCounts {
