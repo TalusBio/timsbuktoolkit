@@ -19,7 +19,6 @@ pub use capabilities::{
     DecoyStrategy,
     FragmentFeatureState,
     IsotopeStrategy,
-    SeqFeatureState,
     TargetCapabilities,
 };
 pub use query_handle::{

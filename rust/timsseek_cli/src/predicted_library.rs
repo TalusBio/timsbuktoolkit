@@ -386,7 +386,6 @@ mod tests {
     use timsquery::models::{
         DecoyStrategy,
         RowIdx,
-        SeqFeatureState,
         TargetColumns,
     };
 
@@ -662,10 +661,7 @@ mod tests {
                 .map_or("", |p| p.residues),
             "PEPCIDEK"
         );
-        assert_eq!(
-            lib.library.geometry().capabilities().sequence_features,
-            SeqFeatureState::Available,
-        );
+        assert!(lib.library.all_sequence_counts_enabled());
     }
 
     #[test]

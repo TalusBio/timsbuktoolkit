@@ -190,6 +190,10 @@ impl ElutionGroupData {
         Self { inner }
     }
 
+    pub fn scoring_plan(&self) -> &timsseek::scoring::plan::ScoringPlan {
+        self.inner.scoring_plan()
+    }
+
     // No public `is_empty`: callers only ever ask for the row count.
     #[allow(clippy::len_without_is_empty)]
     pub fn len(&self) -> usize {

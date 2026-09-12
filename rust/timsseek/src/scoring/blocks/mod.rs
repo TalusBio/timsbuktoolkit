@@ -78,6 +78,11 @@ pub mod sequence_counts;
 /// `columns` is the only method every block must provide; the schema and name
 /// walks are defaulted to no-ops for blocks that don't participate.
 pub trait ScoreBlock {
+    /// Requirement for an independently dispatched operation; projections alone do not gate computation.
+    fn requirement() -> Option<crate::scoring::plan::Requirement> {
+        None
+    }
+
     fn columns(&self, out: &mut ColSink);
 
     /// Parquet-adjacent schema (dtype/nullability only, no data) for the same
@@ -217,6 +222,13 @@ impl ColSink {
         }
     }
 
+    /// Expand an f64 array using the same non-nullable representation as scalar f64.
+    pub fn f64_array<const N: usize>(&mut self, prefix: &str, values: &[f64; N]) {
+        for (i, value) in values.iter().enumerate() {
+            self.f64(&format!("{prefix}_{i}"), *value);
+        }
+    }
+
     pub fn end_row(&mut self) {
         self.cursor = 0;
     }
@@ -305,6 +317,13 @@ impl SchemaSink {
         }
     }
 
+    /// Schema matching the scalar-f64 array projection.
+    pub fn f64_array(&mut self, prefix: &str, n: usize) {
+        for i in 0..n {
+            self.f64(&format!("{prefix}_{i}"));
+        }
+    }
+
     pub fn into_fields(self) -> Vec<Field> {
         self.fields
     }
@@ -381,8 +400,63 @@ impl<const N: usize> BlockFixture for [f32; N] {
     }
 }
 
+impl<const N: usize> BlockFixture for [f64; N] {
+    fn fixture() -> Self {
+        [0.5; N]
+    }
+}
+
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn lane_membership_and_transforms_are_independent_of_array_storage() {
+        use super::*;
+        const SELECTED: [usize; 2] = [3, 0];
+        const NAMES: [&str; 2] = ["last", "first"];
+        #[derive(timsseek_macros::ScoreBlock)]
+        struct Linear {
+            #[feat(raw, indices = SELECTED, names = NAMES)]
+            values: [f64; 4],
+        }
+        #[derive(timsseek_macros::ScoreBlock)]
+        struct Nonlinear {
+            #[feat(raw, isna, linear = false, indices = SELECTED, names = NAMES)]
+            values: [f64; 4],
+        }
+        let linear = Linear {
+            values: [7.0, 8.0, 9.0, f64::NAN],
+        };
+        let nonlinear = Nonlinear {
+            values: linear.values,
+        };
+        assert_eq!(Linear::LINEAR_LEN, 2);
+        assert_eq!(Linear::NONLINEAR_LEN, 0);
+        assert_eq!(Nonlinear::LINEAR_LEN, 0);
+        assert_eq!(Nonlinear::NONLINEAR_LEN, 4);
+        assert!(linear.linear_feature_array()[0].is_nan());
+        assert_eq!(linear.linear_feature_array()[1], 7.0);
+        let values = nonlinear.nonlinear_feature_array();
+        assert!(values[0].is_nan());
+        assert_eq!(&values[1..], &[7.0, 1.0, 0.0]);
+        let mut names = NameSink::new();
+        Nonlinear::nonlinear_feature_names(&mut names);
+        assert_eq!(
+            names.into_names().iter().map(|n| &**n).collect::<Vec<_>>(),
+            ["last", "first", "last_isna", "first_isna"]
+        );
+        let mut schema = SchemaSink::new();
+        Nonlinear::column_schema(&mut schema);
+        let mut columns = ColSink::new();
+        nonlinear.columns(&mut columns);
+        columns.end_row();
+        let (fields, _) = columns.finish();
+        assert_eq!(fields, schema.into_fields());
+        assert_eq!(
+            fields.len(),
+            4,
+            "ML selection does not alter stored-field projection"
+        );
+    }
     use super::*;
 
     #[test]

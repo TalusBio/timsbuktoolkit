@@ -10,7 +10,7 @@
 //! [f64; Self::LEN]` in a trait needs unstable `generic_const_exprs`, while the
 //! same signature on a concrete type is stable -- and inherent consts compose
 //! (`Fields::LINEAR_LEN = A::LINEAR_LEN + B::LINEAR_LEN`), which is what lets
-//! the whole feature matrix be a compile-time width.
+//! each block retain a compile-time width while the run selects operations.
 //!
 //! The same derive covers LEAF blocks (fields are scalars/arrays annotated
 //! `#[feat(...)]`) and COMPOSITIONS of blocks (fields annotated `#[block]`,
@@ -189,7 +189,7 @@ impl Scalar {
 /// arbitrary expression, emitted verbatim).
 enum FieldShape {
     Scalar(Scalar),
-    Array { len: Expr },
+    Array { len: Expr, element: Scalar },
 }
 
 impl FieldShape {
@@ -198,7 +198,10 @@ impl FieldShape {
     fn type_tokens(&self) -> TokenStream {
         match self {
             FieldShape::Scalar(scalar) => scalar.type_tokens(),
-            FieldShape::Array { len } => quote! { [f32; #len] },
+            FieldShape::Array { len, element } => {
+                let ty = element.type_tokens();
+                quote! { [#ty; #len] }
+            }
         }
     }
 
@@ -207,20 +210,14 @@ impl FieldShape {
             return Ok(FieldShape::Scalar(scalar));
         }
         if let Type::Array(arr) = ty {
-            let Type::Path(elem) = arr.elem.as_ref() else {
-                return Err(Error::new(
-                    ty.span(),
-                    "array fields must have element type `f32`",
-                ));
-            };
-            if elem.path.get_ident().map(|i| i.to_string()).as_deref() != Some("f32") {
-                return Err(Error::new(
-                    ty.span(),
-                    "array fields must have element type `f32`",
-                ));
-            }
+            let element = Scalar::from_type(&arr.elem)
+                .filter(|s| matches!(s, Scalar::F32 | Scalar::F64))
+                .ok_or_else(|| {
+                    Error::new(ty.span(), "array fields must have element type f32 or f64")
+                })?;
             return Ok(FieldShape::Array {
                 len: arr.len.clone(),
+                element,
             });
         }
         Err(Error::new(
@@ -243,6 +240,8 @@ struct GeneratorSpec {
 struct FeatureAttr {
     generators: Vec<GeneratorSpec>,
     linear: bool,
+    names: Option<syn::Path>,
+    indices: Option<syn::Path>,
 }
 
 /// Parses `#[feat(gen, gen, ..., linear = <bool>)]`: a comma-separated
@@ -251,8 +250,24 @@ struct FeatureAttr {
 fn parse_feature_attr(attr: &syn::Attribute) -> Result<FeatureAttr> {
     let mut generators: Vec<GeneratorSpec> = Vec::new();
     let mut linear: Option<bool> = None;
+    let mut names = None;
+    let mut indices = None;
 
     attr.parse_nested_meta(|meta| {
+        if meta.path.is_ident("indices") {
+            if indices.is_some() {
+                return Err(meta.error("duplicate indices"));
+            }
+            indices = Some(meta.value()?.parse()?);
+            return Ok(());
+        }
+        if meta.path.is_ident("names") {
+            if names.is_some() {
+                return Err(meta.error("duplicate names"));
+            }
+            names = Some(meta.value()?.parse()?);
+            return Ok(());
+        }
         if meta.path.is_ident("linear") {
             if linear.is_some() {
                 return Err(meta.error("duplicate `linear = ...` in #[feat(...)]"));
@@ -284,6 +299,8 @@ fn parse_feature_attr(attr: &syn::Attribute) -> Result<FeatureAttr> {
     Ok(FeatureAttr {
         generators,
         linear: linear.unwrap_or(true),
+        names,
+        indices,
     })
 }
 
@@ -294,7 +311,7 @@ enum FieldKind {
     Leaf {
         shape: FieldShape,
         /// `None` => column-only field (no `#[feat(...)]`).
-        feature: Option<(Vec<GeneratorSpec>, Lane)>,
+        feature: Option<FeatureAttr>,
     },
     /// `#[block]`: the field's own type is a `ScoreBlock`, so every walk
     /// DELEGATES to it -- widths sum its consts, lane arrays splice its arrays
@@ -366,12 +383,15 @@ fn collect_fields(input: &DeriveInput) -> Result<Vec<Field>> {
                         "#[feat(...)] requires at least one generator",
                     ));
                 }
-                let lane = if parsed.linear {
-                    Lane::Linear
-                } else {
-                    Lane::Nonlinear
-                };
-                Some((parsed.generators, lane))
+                if (parsed.names.is_some() || parsed.indices.is_some())
+                    && !matches!(shape, FieldShape::Array { .. })
+                {
+                    return Err(Error::new(
+                        attr.span(),
+                        "names/indices require an array field",
+                    ));
+                }
+                Some(parsed)
             }
             [_, dup, ..] => {
                 return Err(Error::new(
@@ -409,11 +429,12 @@ fn schema_and_column_calls(fields: &[Field]) -> (Vec<TokenStream>, Vec<TokenStre
                 column_calls.push(quote! { out.#method(#name, self.#ident); });
             }
             FieldKind::Leaf {
-                shape: FieldShape::Array { len },
+                shape: FieldShape::Array { len, element },
                 ..
             } => {
-                schema_calls.push(quote! { out.f32_array(#name, #len); });
-                column_calls.push(quote! { out.f32_array(#name, &self.#ident); });
+                let method = format_ident!("{}_array", element.type_tokens().to_string());
+                schema_calls.push(quote! { out.#method(#name, #len); });
+                column_calls.push(quote! { out.#method(#name, &self.#ident); });
             }
             FieldKind::Block { ty } => {
                 schema_calls.push(quote! {
@@ -433,8 +454,8 @@ fn schema_and_column_calls(fields: &[Field]) -> (Vec<TokenStream>, Vec<TokenStre
 /// fill the `[f64; LEN]` value array, and the set-level name pushes.
 struct LaneCode {
     /// Summands of the lane's `LEN` const -- `1usize` per scalar generator,
-    /// the array's own length expression (verbatim, so a const path like
-    /// `NUM_MS2_IONS` stays a const path) per array generator, and the nested
+    /// the selected array width (or its symbolic storage length when unselected)
+    /// per array generator, and the nested
     /// block's own `LEN` const per `#[block]` field.
     len_terms: Vec<TokenStream>,
     /// Writes into `out` at the running `at` cursor; each advances `at` by
@@ -460,7 +481,7 @@ fn lane_code(fields: &[Field], lane: Lane) -> Result<LaneCode> {
 
         // A `#[block]` field contributes to BOTH lanes (its own type decides
         // what lands in each), so it is handled before the lane filter.
-        let (shape, generators) = match &field.kind {
+        let (shape, generators, names, indices) = match &field.kind {
             FieldKind::Block { ty } => {
                 let (len_const, array_method, names_method) = lane.members();
                 code.len_terms.push(quote! { <#ty>::#len_const });
@@ -477,13 +498,13 @@ fn lane_code(fields: &[Field], lane: Lane) -> Result<LaneCode> {
                 continue;
             }
             FieldKind::Leaf { shape, feature } => {
-                let Some((generators, field_lane)) = feature else {
+                let Some(feature) = feature else {
                     continue;
                 };
-                if *field_lane != lane {
+                if feature.linear != (lane == Lane::Linear) {
                     continue;
                 }
-                (shape, generators)
+                (shape, &feature.generators, &feature.names, &feature.indices)
             }
         };
 
@@ -503,7 +524,7 @@ fn lane_code(fields: &[Field], lane: Lane) -> Result<LaneCode> {
                     });
                     code.name_calls.push(quote! { out.push(#feat_name); });
                 }
-                FieldShape::Array { len } => {
+                FieldShape::Array { len, .. } => {
                     let (elem, suffix) = match generator {
                         Generator::Raw => (quote! { *v as f64 }, ""),
                         Generator::Isna => {
@@ -522,17 +543,44 @@ fn lane_code(fields: &[Field], lane: Lane) -> Result<LaneCode> {
                     // Field names are identifiers, so the only brace in this
                     // format string is the `{i}` the generated loop fills in.
                     let name_fmt = format!("{name}_{{i}}{suffix}");
-                    code.len_terms.push(quote! { (#len) });
-                    code.fills.push(quote! {
-                        for (k, v) in self.#ident.iter().enumerate() {
-                            out[at + k] = #elem;
+                    let width = indices
+                        .as_ref()
+                        .map_or_else(|| quote! { #len }, |indices| quote! { #indices.len() });
+                    let bounds = indices.as_ref().map(|indices| {
+                        quote! {
+                            let mut i = 0;
+                            while i < #indices.len() {
+                                assert!(#indices[i] < #len, "feature index exceeds array storage");
+                                let mut j = 0;
+                                while j < i {
+                                    assert!(#indices[i] != #indices[j], "duplicate feature index");
+                                    j += 1;
+                                }
+                                i += 1;
+                            }
                         }
-                        at += #len;
                     });
-                    code.name_calls.push(quote! {
-                        for i in 0..#len {
-                            out.push(&format!(#name_fmt));
+                    let name_check = names.as_ref().map(|names| quote! {
+                        assert!(#names.len() == #width, "feature names must match selected width");
+                    });
+                    code.len_terms
+                        .push(quote! { { #bounds #name_check #width } });
+                    code.fills.push(if let Some(indices) = indices {
+                        quote! { for &i in #indices.iter() {
+                            let v = &self.#ident[i]; out[at] = #elem; at += 1;
+                        } }
+                    } else {
+                        quote! {
+                            for (k, v) in self.#ident.iter().enumerate() { out[at + k] = #elem; }
+                            at += #len;
                         }
+                    });
+                    code.name_calls.push(if let Some(names) = names {
+                        quote! { for name in #names { out.push(&format!("{}{}", name, #suffix)); } }
+                    } else if let Some(indices) = indices {
+                        quote! { for &i in #indices.iter() { out.push(&format!(#name_fmt)); } }
+                    } else {
+                        quote! { for i in 0..#len { out.push(&format!(#name_fmt)); } }
                     });
                 }
             }
@@ -562,7 +610,7 @@ fn lane_methods(code: &LaneCode, len_const: Ident, method: Ident) -> TokenStream
     };
     quote! {
         /// This lane's feature count -- the sum of one per scalar generator and
-        /// `N` per `[f32; N]` generator, so the lane's width is a compile-time
+        /// the selected array width per array generator, so the lane's width is a compile-time
         /// constant that composes into the whole matrix's width.
         pub const #len_const: usize = 0usize #( + #len_terms )*;
 
@@ -605,6 +653,24 @@ fn sample_field_calls(fields: &[Field]) -> Vec<TokenStream> {
 /// (`timsseek_cli`), compiled against timsseek's normal build. Unit-testable
 /// without a proc-macro context -- see `tests` below.
 pub(crate) fn derive_score_block(input: DeriveInput) -> Result<TokenStream> {
+    let mut requirement = quote! { None };
+    let mut has_requirement = false;
+    for attr in input.attrs.iter().filter(|a| a.path().is_ident("score")) {
+        attr.parse_nested_meta(|meta| {
+            if !meta.path.is_ident("requires") || has_requirement {
+                return Err(meta.error("expected one requires(Requirement)"));
+            }
+            let content;
+            syn::parenthesized!(content in meta.input);
+            let name: Ident = content.parse()?;
+            if !content.is_empty() {
+                return Err(content.error("expected one requirement"));
+            }
+            requirement = quote! { Some(crate::scoring::plan::Requirement::#name) };
+            has_requirement = true;
+            Ok(())
+        })?;
+    }
     let fields = collect_fields(&input)?;
     let name = &input.ident;
     let (generics_impl, generics_ty, generics_where) = input.generics.split_for_impl();
@@ -622,6 +688,9 @@ pub(crate) fn derive_score_block(input: DeriveInput) -> Result<TokenStream> {
 
     Ok(quote! {
         impl #generics_impl crate::scoring::blocks::ScoreBlock for #name #generics_ty #generics_where {
+            fn requirement() -> Option<crate::scoring::plan::Requirement> {
+                #requirement
+            }
             fn column_schema(out: &mut crate::scoring::blocks::SchemaSink) {
                 #(#schema_calls)*
             }
@@ -666,7 +735,7 @@ pub(crate) fn derive_score_block(input: DeriveInput) -> Result<TokenStream> {
 ///
 /// A field's **name is its name**: field `apex_lazyscore` becomes Parquet
 /// column `apex_lazyscore` and (if featurized) feature `apex_lazyscore`, with
-/// a per-generator suffix appended. There is no rename attribute.
+/// a per-generator suffix appended. Array features may supply explicit names.
 ///
 /// Every field becomes a Parquet column. Fields *without* `#[feat(...)]` are
 /// Parquet-column-only: they are emitted by `column_schema`/`columns` and
@@ -674,7 +743,7 @@ pub(crate) fn derive_score_block(input: DeriveInput) -> Result<TokenStream> {
 /// field into the ML matrix.
 ///
 /// Supported LEAF field types: `f32`, `f64`, `u8`, `u32`, `bool`, and
-/// `[f32; N]` (`N` may be any const expression; it is emitted verbatim). A
+/// `[f32; N]` and `[f64; N]` (`N` may be any const expression; it is emitted verbatim). A
 /// field of any other type must be a `#[block]`.
 ///
 /// # `#[block]` -- delegation
@@ -728,11 +797,20 @@ pub(crate) fn derive_score_block(input: DeriveInput) -> Result<TokenStream> {
 ///
 /// ## Array fields
 ///
-/// `[f32; N]` fields accept only `raw` and `isna` -- any other generator is a
+/// Array fields accept only `raw` and `isna` -- any other generator is a
 /// compile error pointing at the generator token. They fan out to one feature
 /// per element, `{field}_0 .. {field}_{N-1}` (and `{field}_{i}_isna` for
 /// `isna`), matching the `{field}_{i}` naming their Parquet columns already
 /// use.
+///
+/// `indices = CONST_PATH` selects storage slots in the declared order;
+/// `names = CONST_PATH` supplies their feature names (generator suffixes still
+/// apply). Indices must be unique and in bounds, and the names must match the
+/// selected width; these constraints are checked at compile time. Without
+/// indices, all slots are selected. These options affect ML projection only;
+/// Parquet still emits every storage slot under its ordinal name.
+/// Lane widths count selected slots per generator in their declared lane,
+/// independently of the array's storage size.
 ///
 /// # What is generated
 ///
@@ -798,7 +876,10 @@ pub(crate) fn derive_score_block(input: DeriveInput) -> Result<TokenStream> {
 ///
 /// gives `AllScores::LINEAR_LEN == <MyScores>::LINEAR_LEN +
 /// <OtherScores>::LINEAR_LEN`, and every walk visits `mine` then `theirs`.
-#[proc_macro_derive(ScoreBlock, attributes(feat, block))]
+/// A leaf operation may declare `#[score(requires(ResidueSequence))]` or
+/// `#[score(requires(ModificationCount))]`. This emits `ScoreBlock::requirement()`;
+/// the run's dispatcher must gate the computation and all its projections together.
+#[proc_macro_derive(ScoreBlock, attributes(feat, block, score))]
 pub fn score_block_derive(input: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let di = syn::parse_macro_input!(input as DeriveInput);
     derive_score_block(di)
@@ -808,6 +889,23 @@ pub fn score_block_derive(input: proc_macro::TokenStream) -> proc_macro::TokenSt
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn requirement_applies_to_all_operation_projections() {
+        let input = syn::parse_quote! {
+            #[score(requires(ResidueSequence))]
+            struct Counts { #[feat(raw, isna, linear = false)] count: f64 }
+        };
+        let output = super::derive_score_block(input).unwrap().to_string();
+        assert!(output.contains("Requirement :: ResidueSequence"));
+        assert!(output.contains("count_isna"));
+        for input in [
+            syn::parse_quote! { #[score(requires(ResidueSequence), requires(ModificationCount))] struct Bad { count: f64 } },
+            syn::parse_quote! { #[score(requires(ResidueSequence, ModificationCount))] struct Bad { count: f64 } },
+        ] {
+            assert!(super::derive_score_block(input).is_err());
+        }
+    }
+
     use super::derive_score_block;
     use quote::quote;
 
@@ -1070,7 +1168,7 @@ mod tests {
         let f = flat(&ts);
         assert!(ts.contains("f32_array"));
         assert!(
-            f.contains("pubconstLINEAR_LEN:usize=0usize+(NUM_MS2_IONS);"),
+            f.contains("pubconstLINEAR_LEN:usize=0usize+{NUM_MS2_IONS};"),
             "{ts}"
         );
         assert!(

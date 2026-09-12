@@ -201,9 +201,9 @@ impl<'a> ResultParquetWriter<'a> {
     pub fn new(
         path: impl AsRef<Path>,
         row_group_size: usize,
-        parsable_sequences: bool,
-        geom: &'a TargetColumns<IonAnnot>,
+        library: &'a crate::data_sources::reference_library::ReferenceLibrary,
     ) -> std::io::Result<Self> {
+        let geom = library.geometry();
         let file = match File::create_new(path.as_ref()) {
             Ok(f) => f,
             Err(err) => {
@@ -218,8 +218,14 @@ impl<'a> ResultParquetWriter<'a> {
 
         let kv = vec![
             KeyValue {
-                key: "parsable_sequences".to_string(),
-                value: Some(parsable_sequences.to_string()),
+                key: "scoring_plan".into(),
+                value: Some(
+                    serde_json::to_string(library.scoring_plan()).map_err(std::io::Error::other)?,
+                ),
+            },
+            KeyValue {
+                key: "all_sequence_counts_enabled".to_string(),
+                value: Some(library.all_sequence_counts_enabled().to_string()),
             },
             KeyValue {
                 key: "results_format_version".to_string(),
@@ -485,7 +491,7 @@ mod tests {
     }
 
     #[test]
-    fn parsable_sequences_key_in_parquet_metadata() {
+    fn all_sequence_counts_enabled_key_in_parquet_metadata() {
         let tmp = tempfile::NamedTempFile::new().expect("tmpfile");
         let path = tmp.path().to_path_buf();
         // Close the NamedTempFile so ResultParquetWriter can create the file
@@ -494,26 +500,47 @@ mod tests {
         drop(tmp);
         {
             let geom = one_row_arena();
-            let writer = ResultParquetWriter::new(&path, 1024, true, &geom).expect("create writer");
+            let library = crate::data_sources::reference_library::ReferenceLibrary::try_from(
+                timsquery::serde::TargetTable::Mzpaf {
+                    frag_intens: Some(vec![1.0; geom.n_fragments()]),
+                    geom,
+                },
+            )
+            .unwrap();
+            let writer = ResultParquetWriter::new(&path, 1024, &library).expect("create writer");
             writer.close().expect("close");
         }
         let file = File::open(&path).expect("open");
         let reader = SerializedFileReader::new(file).expect("reader");
         let meta = reader.metadata().file_metadata();
         let kv_list = meta.key_value_metadata().expect("kv metadata present");
+        let plan = kv_list
+            .iter()
+            .find(|k| k.key == "scoring_plan")
+            .expect("plan metadata");
+        let plan: serde_json::Value = serde_json::from_str(plan.value.as_deref().unwrap()).unwrap();
+        assert_eq!(plan["rows"], 1);
+        assert_eq!(plan["unmodified_rows"], 1);
+        assert_eq!(plan["operations"][0]["requirement"], "residue_sequence");
+        assert_eq!(
+            plan["operations"][0]["columns"].as_array().unwrap().len(),
+            21
+        );
+        assert_eq!(plan["operations"][1]["enabled"], true);
+        assert!(!kv_list.iter().any(|k| k.key == "parsable_sequences"));
         let found: Vec<_> = kv_list
             .iter()
-            .filter(|k| k.key == "parsable_sequences")
+            .filter(|k| k.key == "all_sequence_counts_enabled")
             .collect();
         assert_eq!(
             found.len(),
             1,
-            "expected exactly one parsable_sequences key"
+            "expected exactly one all_sequence_counts_enabled key"
         );
         assert_eq!(
             found[0].value.as_deref(),
             Some("true"),
-            "parsable_sequences value should be 'true'"
+            "all_sequence_counts_enabled value should be 'true'"
         );
     }
 }
