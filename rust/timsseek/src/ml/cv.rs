@@ -309,7 +309,7 @@ pub(crate) struct StreamingDataset<'a, T> {
     data: &'a [T],
     names: Vec<Arc<str>>,
     n_folds: usize,
-    write_row: fn(&T, &mut [f64]),
+    write_row: &'a (dyn Fn(&T, &mut [f64]) + Sync),
 }
 
 impl<'a, T> StreamingDataset<'a, T> {
@@ -317,7 +317,7 @@ impl<'a, T> StreamingDataset<'a, T> {
         data: &'a [T],
         names: Vec<Arc<str>>,
         n_folds: usize,
-        write_row: fn(&T, &mut [f64]),
+        write_row: &'a (dyn Fn(&T, &mut [f64]) + Sync),
     ) -> Self {
         assert!(n_folds > 0, "n_folds must be positive");
         Self {
@@ -417,13 +417,13 @@ pub(crate) struct RowMajorDataset {
 
 /// How a [`CrossValidatedScorer`] obtains feature rows. Tree/LDA callers keep
 /// their precomputed matrix; the MLP uses the streaming arm so the raw
-/// `f64` frame never exists. The function pointer writes one complete row into
+/// `f64` frame never exists. The borrowed projector writes one complete row into
 /// caller-owned scratch.
-enum FeatureSource<T> {
+enum FeatureSource<'a, T> {
     Precomputed(RowMajorDataset),
     Streaming {
         names: Vec<Arc<str>>,
-        write_row: fn(&T, &mut [f64]),
+        write_row: &'a (dyn Fn(&T, &mut [f64]) + Sync),
         n_folds: usize,
     },
 }
@@ -433,7 +433,7 @@ enum FeatureSource<T> {
 /// streaming feature source reach it.
 struct ScorerDataset<'a, T> {
     data: &'a [T],
-    source: &'a FeatureSource<T>,
+    source: &'a FeatureSource<'a, T>,
 }
 
 impl<T: FeatureLike + Sync> FoldDataset for ScorerDataset<'_, T> {
@@ -830,10 +830,10 @@ pub(crate) fn fold_feature_stats<D: FoldDataset, M: FoldModel>(
 ///
 /// `M` is the model being cross-fitted ([`FoldModel`]); the partition above is
 /// the scorer's and does not vary with it.
-pub(crate) struct CrossValidatedScorer<T: FeatureLike + Sync, M: FoldModel> {
+pub(crate) struct CrossValidatedScorer<'a, T: FeatureLike + Sync, M: FoldModel> {
     n_folds: u8,
     data: Vec<T>,
-    feature_source: FeatureSource<T>,
+    feature_source: FeatureSource<'a, T>,
     /// `fold_rows[f]` contains fold `f`'s row indices in ascending order.
     /// Materialized once because every fit and scoring pass needs it.
     fold_rows: Vec<Vec<usize>>,
@@ -841,7 +841,7 @@ pub(crate) struct CrossValidatedScorer<T: FeatureLike + Sync, M: FoldModel> {
     config: M::Config,
 }
 
-impl<T: FeatureLike + Sync, M: FoldModel> CrossValidatedScorer<T, M> {
+impl<'a, T: FeatureLike + Sync, M: FoldModel> CrossValidatedScorer<'a, T, M> {
     /// Create a new CrossValidatedScorer
     ///
     /// NOTE: THIS ASSUMES YOUR DATA IS ALREADY SHUFFLED
@@ -884,7 +884,7 @@ impl<T: FeatureLike + Sync, M: FoldModel> CrossValidatedScorer<T, M> {
         data: Vec<T>,
         config: M::Config,
         names: Vec<Arc<str>>,
-        write_row: fn(&T, &mut [f64]),
+        write_row: &'a (dyn Fn(&T, &mut [f64]) + Sync),
     ) -> Self {
         assert_valid_cv_fold_count(n_folds);
         let fold_rows = partition_rows(data.len(), n_folds as usize);

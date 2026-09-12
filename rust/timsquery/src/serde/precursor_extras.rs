@@ -9,11 +9,8 @@ use crate::ion::IonAnnot;
 /// new format is wired in by producing this and nothing else.
 #[derive(Debug, Clone)]
 pub struct PrecursorExtras {
-    /// The peptidoform as the file spelled it, modifications included. The
-    /// timsseek parse gate reads this one.
-    pub modified_peptide: String,
-    /// The bare residues, for the composition-isotope path.
-    pub stripped_peptide: String,
+    pub analyte: crate::chemistry::analyte::Analyte,
+    pub entry_name: Option<String>,
     pub protein_id: String,
     /// A decoy the library shipped, as opposed to one the arena derives.
     pub is_decoy: bool,

@@ -37,6 +37,8 @@ use super::results::FinalResult;
 /// - 3: both became Utf8, because an id keeps the shape its source used and
 ///   DIA-NN names its precursors with a string (`transition_group_id`). A
 ///   numeric id is written as its digits.
+/// - 4: sequence is canonical and nullable, resolved from stored analyte facts;
+///   entry_name, molecular_formula and formula_basis are separate nullable columns.
 ///
 /// `decoy_group_id` equals `library_id` on a row whose library declared no
 /// competition group: the row competes only with its own mass-shift variants
@@ -44,7 +46,7 @@ use super::results::FinalResult;
 /// keys`), and then a target and its shipped decoy share one `decoy_group_id`
 /// across two `library_id`s. Other formats declare nothing, so for them the
 /// duplication is expected, not a bug.
-pub const RESULTS_FORMAT_VERSION: u32 = 3;
+pub const RESULTS_FORMAT_VERSION: u32 = 4;
 
 // ---------------------------------------------------------------------------
 // Build a RecordBatch from a slice of FinalResult
@@ -95,12 +97,49 @@ impl ScoreBlock for Ids<'_> {
     fn nonlinear_feature_names(_: &mut NameSink) {}
 }
 
+/// Context-dependent metadata; schema and values stay together like score blocks.
+pub(crate) struct AnalyteColumns<'a> {
+    analyte: timsquery::chemistry::analyte::AnalyteRef<'a>,
+    entry_name: Option<&'a str>,
+}
+impl ScoreBlock for AnalyteColumns<'_> {
+    fn columns(&self, sink: &mut ColSink) {
+        let sequence = self.analyte.peptide.known().and_then(|p| p.sequence());
+        let formula = self.analyte.formula.known().and_then(|f| f.notation());
+        sink.optional_str("sequence", sequence.as_deref());
+        sink.optional_str("entry_name", self.entry_name);
+        sink.optional_str("molecular_formula", formula.as_deref());
+        sink.optional_str(
+            "formula_basis",
+            self.analyte.formula.known().map(|f| f.basis.as_str()),
+        );
+    }
+
+    fn column_schema(sink: &mut SchemaSink) {
+        for name in [
+            "sequence",
+            "entry_name",
+            "molecular_formula",
+            "formula_basis",
+        ] {
+            sink.optional_str(name);
+        }
+    }
+
+    fn nonlinear_feature_names(_: &mut super::blocks::NameSink) {}
+}
+
 /// Emit one result's columns into the sink (all scoring blocks, then the
 /// post-model meta block, then the ids resolved from the arena).
 ///
 /// Resolve `library_id` and `decoy_group_id` through the result's arena row.
 /// The owned source ID retained for rescoring order does not supply these columns.
 fn emit_row(r: &FinalResult, geom: &TargetColumns<IonAnnot>, sink: &mut ColSink) {
+    AnalyteColumns {
+        analyte: geom.analyte(r.scoring.identity.row),
+        entry_name: geom.entry_name(r.scoring.identity.row),
+    }
+    .columns(sink);
     r.scoring.columns(sink);
     r.result_meta().columns(sink);
     Ids::for_row(geom, r.scoring.identity.row).columns(sink);
@@ -255,8 +294,7 @@ mod tests {
                 rt_seconds: 1.0,
                 mobility: 1.0,
                 frags: &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
-                seq_strip: seq,
-                seq_mod: seq,
+                analyte: timsquery::chemistry::analyte::Analyte::from_sequence(seq).as_input(),
                 id: id.map(Into::into),
                 ..Default::default()
             });
@@ -287,7 +325,10 @@ mod tests {
     /// (downstream reads by name). Add a column here only when you commit to
     /// keeping it stable.
     const GOLDEN_SCHEMA: &[(&str, &str, bool)] = &[
-        ("sequence", "Utf8", false),
+        ("sequence", "Utf8", true),
+        ("entry_name", "Utf8", true),
+        ("molecular_formula", "Utf8", true),
+        ("formula_basis", "Utf8", true),
         ("library_id", "Utf8", false),
         ("decoy_group_id", "Utf8", false),
         ("is_target", "Boolean", false),
@@ -297,6 +338,62 @@ mod tests {
         ("discriminant_score", "Float32", false),
         ("qvalue", "Float32", false),
     ];
+
+    #[test]
+    fn formula_only_output_keeps_label_and_has_null_sequence() {
+        use arrow::array::{
+            Array,
+            StringArray,
+        };
+        use mzcore::chemistry::Element::{
+            C,
+            H,
+            O,
+        };
+        use timsquery::chemistry::analyte::{
+            Analyte,
+            Formula,
+            FormulaBasis,
+            Property,
+        };
+        let analyte = Analyte {
+            formula: Property::Known(Formula {
+                elements: vec![(H, None, 6), (C, None, 2), (O, None, 1)],
+                basis: FormulaBasis::NeutralMolecule,
+            }),
+            ..Default::default()
+        };
+        let mut builder =
+            TargetColumnsBuilder::with_capabilities(TargetCapabilities::default_diann());
+        builder.push_row(Row {
+            analyte: analyte.as_input(),
+            id: Some("source/123".into()),
+            entry_name: Some("Compound label / not sequence"),
+            ..Default::default()
+        });
+        let geom = builder.seal(crate::models::DecoyPolicy::Never).unwrap();
+        let batch = build_record_batch(&[sample_in(&geom)], &geom).unwrap();
+        let column = |name: &str| {
+            batch
+                .column_by_name(name)
+                .unwrap()
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .unwrap()
+        };
+        assert!(column("sequence").is_null(0));
+        assert_eq!(column("library_id").value(0), "source/123");
+        assert_eq!(
+            column("entry_name").value(0),
+            "Compound label / not sequence"
+        );
+        assert_eq!(column("molecular_formula").value(0), "C2H6O1");
+        assert_eq!(column("formula_basis").value(0), "neutral_molecule");
+        assert_eq!(
+            batch.schema(),
+            build_record_batch(&[], &geom).unwrap().schema()
+        );
+    }
 
     #[test]
     fn schema_first_matches_populated_data_path() {

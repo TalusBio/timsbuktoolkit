@@ -1,17 +1,13 @@
-//! Identity family -- peptide + precursor metadata. Hand-written because it is
-//! irreducibly mixed-dtype (`Peptide`, `bool`, `f64`, `u32`, `u8`, `f32`); you
-//! never add a *score* here.
+//! Candidate identity and precursor metadata. Chemistry is resolved from the
+//! owning library by row; source_id remains owned for canonical rescoring order.
 
-use std::sync::Arc;
 use timsquery::models::{
     GroupCode,
     OwnedSourceId,
     RowIdx,
 };
 
-use crate::models::DecoyMarking;
-use crate::models::sequence::Peptide;
-use crate::scoring::apex_finding::PeptideMetadata;
+use crate::scoring::apex_finding::CandidateMetadata;
 use crate::scoring::blocks::{
     ColSink,
     NameSink,
@@ -21,7 +17,6 @@ use crate::scoring::blocks::{
 
 #[derive(Debug, Clone, serde::Serialize)]
 pub struct Identity {
-    pub peptide: Peptide,
     /// Stored arena row, used for row-based tie-breaking and output lookup.
     /// Opaque and excluded from serialization.
     #[serde(skip)]
@@ -48,16 +43,15 @@ impl Identity {
     /// resolves from `row`.
     pub const NONLINEAR_LEN: usize = 3;
 
-    pub fn compute(metadata: &PeptideMetadata) -> Self {
+    pub fn compute(metadata: &CandidateMetadata) -> Self {
         Self {
-            peptide: metadata.digest.clone(),
             row: metadata.handles.row,
             group: metadata.handles.group,
             source_id: metadata.source_id.clone(),
             precursor_mz: metadata.ref_precursor_mz,
             precursor_charge: metadata.charge,
             precursor_mobility: metadata.ref_mobility_ook0,
-            is_target: metadata.digest.decoy.is_target(),
+            is_target: metadata.is_target,
         }
     }
 
@@ -95,11 +89,6 @@ impl Identity {
 
     pub fn sample_default() -> Self {
         Self {
-            peptide: Peptide {
-                raw: Arc::from("PEPTIDEK"),
-                decoy: DecoyMarking::Target,
-                sequence_features: false,
-            },
             row: RowIdx::default(),
             group: GroupCode::default(),
             source_id: OwnedSourceId::placeholder(),
@@ -113,7 +102,6 @@ impl Identity {
 
 impl ScoreBlock for Identity {
     fn columns(&self, o: &mut ColSink) {
-        o.str("sequence", self.peptide.as_str());
         o.f64("precursor_mz", self.precursor_mz);
         o.u8("precursor_charge", self.precursor_charge);
         o.f32("precursor_mobility", self.precursor_mobility);
@@ -121,7 +109,6 @@ impl ScoreBlock for Identity {
     }
 
     fn column_schema(o: &mut SchemaSink) {
-        o.str("sequence");
         o.f64("precursor_mz");
         o.u8("precursor_charge");
         o.f32("precursor_mobility");

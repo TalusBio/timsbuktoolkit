@@ -38,7 +38,6 @@ use crate::models::capabilities::DecoyPolicy;
 use crate::models::{
     Row,
     TargetCapabilities,
-    TargetColumns,
     TargetColumnsBuilder,
 };
 use std::fs::File;
@@ -639,7 +638,7 @@ fn residue_count(stripped: &str) -> usize {
 
 /// Concatenate `src` onto `dst` in place, rebasing every CSR offset by `dst`'s
 /// current arena lengths and each structured-mod registry index by `dst`'s mod
-/// registry length. The empty arena is the identity, so this is the associative
+/// registry. The empty arena is the identity, so this is the associative
 /// reduce operator that merges the per-worker shards back into file order.
 ///
 /// `dst.caps` is preserved (all shards share `default_diann`), so merging an
@@ -648,10 +647,6 @@ fn append_arena(dst: &mut TargetColumnsBuilder<IonAnnot>, src: TargetColumnsBuil
     let (dst, mut src) = (&mut dst.inner, src.inner);
     // Bases captured BEFORE the backing arenas are appended.
     let frag_base = dst.frag_labels.len();
-    let strip_base = dst.seq_strip_blob.len();
-    let mod_seq_base = dst.seq_mod_blob.len();
-    let mods_base = dst.mods.len();
-    let reg_base = dst.mod_registry.len();
 
     dst.precursor_mz.append(&mut src.precursor_mz);
     dst.charge.append(&mut src.charge);
@@ -662,62 +657,14 @@ fn append_arena(dst: &mut TargetColumnsBuilder<IonAnnot>, src: TargetColumnsBuil
     dst.pending_groups.append(&mut src.pending_groups);
     dst.frag_labels.append(&mut src.frag_labels);
     dst.frag_mzs.append(&mut src.frag_mzs);
-    dst.seq_strip_blob.push_str(&src.seq_strip_blob);
-    dst.seq_mod_blob.push_str(&src.seq_mod_blob);
-
-    for &(pos, reg) in &src.mods {
-        let rebased =
-            u16::try_from(reg as usize + reg_base).expect("mod registry index exceeds u16 range");
-        dst.mods.push((pos, rebased));
-    }
-    dst.mod_registry.append(&mut src.mod_registry);
-
+    dst.analytes.append(std::mem::take(&mut src.analytes));
+    dst.entry_names.append(&mut src.entry_names);
     // CSR offset arrays carry a leading 0; skip it and rebase the remainder onto
     // the running arena length. `try_from` mirrors the checked pushes in
     // `TargetColumns` -- an overflow fails loud rather than wrapping an offset.
     dst.frag_off.extend(src.frag_off[1..].iter().map(|&o| {
         u32::try_from(o as usize + frag_base).expect("fragment arena exceeds u32 offset range")
     }));
-    dst.seq_strip_off
-        .extend(src.seq_strip_off[1..].iter().map(|&o| {
-            u32::try_from(o as usize + strip_base)
-                .expect("stripped-seq blob exceeds u32 offset range")
-        }));
-    dst.seq_mod_off
-        .extend(src.seq_mod_off[1..].iter().map(|&o| {
-            u32::try_from(o as usize + mod_seq_base)
-                .expect("modified-seq blob exceeds u32 offset range")
-        }));
-    dst.mod_off.extend(src.mod_off[1..].iter().map(|&o| {
-        u32::try_from(o as usize + mods_base).expect("mods arena exceeds u32 offset range")
-    }));
-
-    // Exhaustive on purpose: a column added to `TargetColumns` fails to compile
-    // here instead of being silently dropped on every merge. `source_ids` and
-    // `decoy_groups` are built by `seal` from the pending columns, which runs on
-    // the merged arena, so a shard never holds either.
-    let TargetColumns {
-        caps: _,
-        precursor_mz: _,
-        charge: _,
-        rt_seconds: _,
-        mobility: _,
-        is_decoy: _,
-        pending_ids: _,
-        pending_groups: _,
-        source_ids: _,
-        decoy_groups: _,
-        frag_off: _,
-        seq_strip_off: _,
-        seq_mod_off: _,
-        mod_off: _,
-        frag_labels: _,
-        frag_mzs: _,
-        seq_strip_blob: _,
-        seq_mod_blob: _,
-        mods: _,
-        mod_registry: _,
-    } = src;
 }
 
 /// Map DIA-NN's neutral-loss code (`Product` byte 11) to a supported loss.
@@ -902,11 +849,11 @@ fn map_entry(
         rt_seconds: pep.i_rt(),
         mobility: pep.i_im(),
         frags: &frags,
-        seq_strip: &stripped_peptide,
-        seq_mod: &modified_peptide,
+        analyte: crate::chemistry::analyte::Analyte::from_sequence(&modified_peptide).as_input(),
+        entry_name: Some(&name),
         // The entry name is DIA-NN's `transition_group_id`, so results name the
         // precursor the way the library does rather than by a minted counter.
-        id: Some(name.into()),
+        id: Some(name.as_str().into()),
         ..Default::default()
     });
     // `entry.protein_id` is intentionally dropped: the columnar arena has no
@@ -1032,7 +979,10 @@ pub fn read_diann_speclib_library_file<T: AsRef<Path>>(
 mod tests {
     use super::*;
     use crate::KeyLike;
-    use crate::models::RowIdx;
+    use crate::models::{
+        RowIdx,
+        TargetColumns,
+    };
     use std::path::PathBuf;
 
     fn fixture_path() -> PathBuf {
@@ -1091,12 +1041,16 @@ mod tests {
 
         assert!(geom.n_rows() > 1, "one row would not catch a permutation");
         for row in geom.rows() {
-            let expected = format!("{}{}", geom.seq_mod(row), geom.charge(row));
+            let source = geom.source_id(row).unwrap().to_string();
+            let charge = geom.charge(row).to_string();
+            let annotation = source.strip_suffix(&charge).unwrap();
+            let expected = crate::chemistry::analyte::Analyte::from_sequence(annotation);
             assert_eq!(
-                geom.output_id(row),
-                crate::models::SourceId::Text(&expected),
-                "source id is not the one belonging to this row"
+                geom.analyte(row).to_owned(),
+                expected,
+                "source label stayed paired with its chemistry"
             );
+            assert_eq!(geom.entry_name(row), Some(source.as_str()));
         }
     }
 
@@ -1108,11 +1062,18 @@ mod tests {
         let geom = geom.seal(DecoyPolicy::Never).unwrap();
 
         assert_eq!(
-            &geom.seq_mod_blob[geom.seq_mod_range(row(&geom, 0))],
+            geom.analyte(row(&geom, 0))
+                .peptide
+                .known()
+                .and_then(|p| p.sequence())
+                .unwrap_or_default(),
             "AAAGAAATHLEVAR"
         );
         assert_eq!(
-            &geom.seq_strip_blob[geom.seq_strip_range(row(&geom, 0))],
+            geom.analyte(row(&geom, 0))
+                .peptide
+                .known()
+                .map_or("", |p| p.residues),
             "AAAGAAATHLEVAR"
         );
         assert_eq!(geom.charge[0], 2);
@@ -1170,7 +1131,11 @@ mod tests {
         let geom = geom.seal(DecoyPolicy::Never).unwrap();
 
         assert_eq!(
-            &geom.seq_mod_blob[geom.seq_mod_range(row(&geom, 532))],
+            geom.analyte(row(&geom, 532))
+                .peptide
+                .known()
+                .and_then(|p| p.sequence())
+                .unwrap_or_default(),
             "LEGNSPQGSNQGVK"
         );
         assert_eq!(geom.charge[532], 2);

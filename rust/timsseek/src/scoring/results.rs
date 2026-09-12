@@ -5,7 +5,7 @@ use timsseek_macros::ScoreBlock;
 
 use super::apex_finding::{
     ApexBlocks,
-    PeptideMetadata,
+    CandidateMetadata,
     RelativeIntensityCollector,
 };
 use super::blocks::apex_evidence::ApexEvidence;
@@ -32,14 +32,13 @@ use super::blocks::{
 };
 use super::offsets::MzMobilityOffsets;
 use super::pipeline::SecondaryLazyScoresRaw;
-use crate::models::sequence::Peptide;
 
 /// Inputs for the finalize-stage assembly of [`ScoringFields`]. Constructing
 /// this struct IS the completeness guarantee: a score that needs data not yet
 /// present forces one new field here plus one line at the single construction
 /// site (`pipeline::finalize_results`).
 pub struct FinalizeInputs<'a> {
-    pub metadata: &'a PeptideMetadata,
+    pub metadata: &'a CandidateMetadata,
     pub offsets: &'a MzMobilityOffsets,
     pub rel_inten: RelativeIntensityCollector,
     pub secondary_lazy: SecondaryLazyScoresRaw,
@@ -133,14 +132,6 @@ impl ScoringFields {
         self.mobility.neutralize();
         self.ion_errors.neutralize();
     }
-
-    /// Baseline test fixture with every field populated. Callers (including
-    /// other crates' tests) tweak the identity/score fields they care about.
-    pub fn sample(peptide: Peptide) -> Self {
-        let mut s = Self::sample_default();
-        s.identity.peptide = peptide;
-        s
-    }
 }
 
 /// Phase 3 output. All scoring fields guaranteed populated.
@@ -213,6 +204,7 @@ impl FinalResult {
     /// The ID columns have their own block because the writer resolves them
     /// from the arena, independently of scoring metadata. See `parquet_writer::Ids`.
     pub fn column_schema(o: &mut SchemaSink) {
+        <crate::scoring::parquet_writer::AnalyteColumns<'_> as ScoreBlock>::column_schema(o);
         <ScoringFields as ScoreBlock>::column_schema(o);
         <ResultMeta as ScoreBlock>::column_schema(o);
         <crate::scoring::parquet_writer::Ids<'_> as ScoreBlock>::column_schema(o);

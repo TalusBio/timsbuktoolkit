@@ -205,8 +205,8 @@ mod tests {
                 (IonAnnot::try_from("y1").unwrap(), 200.0), // ordinal 1 -> NOT shifted
                 (IonAnnot::try_from("y8").unwrap(), 896.5), // ordinal 8 -> shifted
             ],
-            seq_strip: "PEPTIDEK",
-            seq_mod: "PEPTIDEK",
+
+            analyte: crate::chemistry::analyte::Analyte::from_sequence("PEPTIDEK").as_input(),
             ..Default::default()
         });
         c.seal(DecoyPolicy::IfMissing)
@@ -295,8 +295,8 @@ mod tests {
             rt_seconds: 1.0,
             mobility: 1.0,
             frags: &[(Arc::<str>::from("f"), 300.0)],
-            seq_strip: "PEP",
-            seq_mod: "PEP",
+
+            analyte: crate::chemistry::analyte::Analyte::from_sequence("PEP").as_input(),
             ..Default::default()
         });
         // Sealed `IfMissing` with no shipped decoy, so the arena derives ±

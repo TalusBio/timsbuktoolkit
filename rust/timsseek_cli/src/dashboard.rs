@@ -57,6 +57,7 @@ fn mean_gain_per_feature(stats: &RescoreFeatureStats, feature_names: &[Arc<str>]
 /// without the env var pays nothing; whether stdout is a terminal is
 /// `rescore_dash::run`'s call, so that it is the one place that warns.
 pub fn build(
+    library: &timsseek::data_sources::reference_library::ReferenceLibrary,
     data: &[FinalResult],
     feature_stats: &RescoreFeatureStats,
     qval_report: &[ThresholdCounts],
@@ -65,7 +66,7 @@ pub fn build(
         return None;
     }
     let step = TimedStep::begin("Rescore dashboard precompute");
-    let (feature_names, matrix) = timsseek::ml::qvalues::feature_frame(data);
+    let (feature_names, matrix) = timsseek::ml::qvalues::feature_frame(library, data);
     let is_target: Vec<bool> = data.iter().map(|r| r.scoring.identity.is_target).collect();
     let score: Vec<f32> = data.iter().map(|r| r.discriminant_score).collect();
     let qvalue: Vec<f32> = data.iter().map(|r| r.qvalue).collect();

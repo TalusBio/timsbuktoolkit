@@ -271,7 +271,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
 
     // === PHASE 4: Target-decoy competition ===
     let step = TimedStep::begin("Phase 4: Compete");
-    let mut competed = target_decoy_compete(results);
+    let mut competed = target_decoy_compete(results, speclib);
     competed.sort_unstable_by(|x, y| {
         y.scoring
             .primary
@@ -289,7 +289,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     let step = TimedStep::begin("Phase 5: Rescore");
     // The CLI flag overrides the configured model; MLP is the default.
     info!("Phase 5 rescore model: {rescore_model:?}");
-    let (data, feature_stats) = rescore_with(rescore_model, competed)?;
+    let (data, feature_stats) = rescore_with(rescore_model, competed, speclib)?;
     let phase5_ms = step.finish().as_millis() as u64;
     alloc_track::snap!("Phase 5: Rescore");
 
@@ -319,7 +319,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     // precompute -- including its ~1 GB feature matrix -- runs while nothing is
     // on disk yet; only the blocking TUI is after the write.
     #[cfg(feature = "dashboard")]
-    let dashboard = crate::dashboard::build(&data, &feature_stats, &qval_report);
+    let dashboard = crate::dashboard::build(speclib, &data, &feature_stats, &qval_report);
 
     // === PHASE 6: Write Parquet output ===
     let step = TimedStep::begin("Phase 6: Write output");
@@ -441,55 +441,84 @@ fn phase3_score<I: ScorerQueriable>(
     feature = "instrumentation",
     tracing::instrument(skip_all, level = "trace")
 )]
-/// Sort by `(sequence, main_score desc, target-first, precursor_mz)` then
-/// collapse exact `(sequence, charge, precursor_mz)` duplicates, keeping the
-/// first. The trailing `precursor_mz` tiebreak makes the sort a TOTAL order:
-/// within a shared sequence the target and its ±decoys have distinct precursor
-/// m/z, so the survivor is deterministic regardless of the input vec's order
-/// (an unstable sort would otherwise leave a `(seq, score, is_target)` tie in
-/// arbitrary relative order).
-fn dedup_by_sequence(results: &mut Vec<ScoredCandidate>) {
-    results.sort_unstable_by(|x, y| {
-        let seq_ord = x
-            .scoring
-            .identity
+/// Group complete peptide structure + charge + m/z, then retain the best score,
+/// preferring a target on ties. Incomparable chemistry stays row-specific.
+fn dedup_by_sequence(results: &mut Vec<ScoredCandidate>, library: &ReferenceLibrary) {
+    let chemistry_cmp = |a: &ScoredCandidate, b: &ScoredCandidate| {
+        let a = &a.scoring.identity;
+        let b = &b.scoring.identity;
+        let pa = library
+            .geometry()
+            .analyte(a.row)
             .peptide
-            .as_str()
-            .cmp(y.scoring.identity.peptide.as_str());
-        // Then sort descending by main_score
-        // NOTE: same sequences should always have the same score EXCEPT when we apply a mass shift
-        // to some of them to make a "decoy"
-        let score_ord = y
-            .scoring
-            .primary
-            .main_score
-            .partial_cmp(&x.scoring.primary.main_score)
-            .expect("NaN main_score should have been filtered during Phase 3 scoring");
-        let ord = seq_ord.then(score_ord);
-
-        if ord == std::cmp::Ordering::Equal {
-            // Move to the first position the target
-            match (x.scoring.identity.is_target, y.scoring.identity.is_target) {
-                (true, false) => std::cmp::Ordering::Less,
-                (false, true) => std::cmp::Ordering::Greater,
-                // Total order: within a shared sequence the target and its
-                // ±decoys have distinct precursor m/z (mono / mono±shift/z),
-                // so this breaks the tie deterministically.
-                _ => x
-                    .scoring
+            .known()
+            .filter(|p| p.modifications.known().is_some());
+        let pb = library
+            .geometry()
+            .analyte(b.row)
+            .peptide
+            .known()
+            .filter(|p| p.modifications.known().is_some());
+        match (pa, pb) {
+            (Some(pa), Some(pb)) => pa.residues.cmp(pb.residues).then_with(|| {
+                pa.modifications
+                    .known()
+                    .unwrap()
+                    .iter()
+                    .map(|(site, m)| (site, m.annotation()))
+                    .cmp(
+                        pb.modifications
+                            .known()
+                            .unwrap()
+                            .iter()
+                            .map(|(site, m)| (site, m.annotation())),
+                    )
+            }),
+            (Some(_), None) => std::cmp::Ordering::Less,
+            (None, Some(_)) => std::cmp::Ordering::Greater,
+            (None, None) => a.row.cmp(&b.row),
+        }
+    };
+    // Sort by the entire duplicate key before ranking survivors. Otherwise a
+    // different charge/mz can separate equal keys and escape deduplication.
+    let key_cmp = |a: &ScoredCandidate, b: &ScoredCandidate| {
+        chemistry_cmp(a, b)
+            .then(
+                a.scoring
+                    .identity
+                    .precursor_charge
+                    .cmp(&b.scoring.identity.precursor_charge),
+            )
+            .then(
+                a.scoring
                     .identity
                     .precursor_mz
-                    .total_cmp(&y.scoring.identity.precursor_mz),
-            }
-        } else {
-            ord
-        }
+                    .total_cmp(&b.scoring.identity.precursor_mz),
+            )
+    };
+    results.sort_unstable_by(|a, b| {
+        key_cmp(a, b)
+            .then(
+                b.scoring
+                    .primary
+                    .main_score
+                    .total_cmp(&a.scoring.primary.main_score),
+            )
+            .then(
+                b.scoring
+                    .identity
+                    .is_target
+                    .cmp(&a.scoring.identity.is_target),
+            )
+            .then(
+                a.scoring
+                    .identity
+                    .source_id
+                    .cmp(&b.scoring.identity.source_id),
+            )
+            .then(a.scoring.identity.row.cmp(&b.scoring.identity.row))
     });
-    results.dedup_by(|x, y| {
-        (x.scoring.identity.peptide.as_str() == y.scoring.identity.peptide.as_str())
-            && (x.scoring.identity.precursor_charge == y.scoring.identity.precursor_charge)
-            && (x.scoring.identity.precursor_mz == y.scoring.identity.precursor_mz)
-    });
+    results.dedup_by(|a, b| key_cmp(a, b).is_eq());
 }
 
 /// Targets discarded because another target won their competition, which is the
@@ -518,7 +547,10 @@ fn targets_beaten_by_targets(sorted: &[ScoredCandidate]) -> usize {
         .sum()
 }
 
-fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandidate> {
+fn target_decoy_compete(
+    mut results: Vec<ScoredCandidate>,
+    library: &ReferenceLibrary,
+) -> Vec<CompetedCandidate> {
     // TODO: re-implement so we dont drop results but instead just flag them as rejected (maybe
     // a slice where we push rejected results to the end and keep the trailing slice as the "active")
 
@@ -528,7 +560,7 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
             .map(|x| {
                 format!(
                     "{} {} {} {}",
-                    x.scoring.identity.peptide.as_str(),
+                    x.scoring.identity.source_id,
                     x.scoring.identity.precursor_charge,
                     x.scoring.identity.precursor_mz,
                     x.scoring.primary.main_score
@@ -542,7 +574,7 @@ fn target_decoy_compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandid
         "First 10 result before deduplication for seq+charge+mz: {:#?}",
         glimpse_result_head(&results)
     );
-    dedup_by_sequence(&mut results);
+    dedup_by_sequence(&mut results, library);
     debug!(
         "First 10 result after deduplication for seq+charge+mz: {:#?}",
         glimpse_result_head(&results)
@@ -638,29 +670,51 @@ pub fn run_pipeline(
 
 #[cfg(test)]
 mod tests {
+    fn fixture_library(results: &mut [ScoredCandidate]) -> ReferenceLibrary {
+        use timsquery::models::{
+            Row,
+            TargetColumnsBuilder,
+        };
+        use timsquery::serde::TargetTable;
+        let mut builder = TargetColumnsBuilder::with_capabilities(
+            timsquery::models::TargetCapabilities::default_diann(),
+        );
+        let frags = [(timsquery::ion::IonAnnot::try_from("y1").unwrap(), 300.0)];
+        for (i, c) in results.iter_mut().enumerate() {
+            c.scoring.identity.row = test_handles::row(i as u32);
+            let analyte = timsquery::chemistry::analyte::Analyte::from_sequence(
+                &c.scoring.identity.source_id.to_string(),
+            );
+            builder.push_row(Row {
+                analyte: analyte.as_input(),
+                charge: 2,
+                precursor_mz: 500.0,
+                frags: &frags,
+                ..Default::default()
+            });
+        }
+        ReferenceLibrary::try_from(TargetTable::Mzpaf {
+            geom: builder.seal(Default::default()).unwrap(),
+            frag_intens: Some(vec![1.0; results.len()]),
+        })
+        .unwrap()
+    }
+    fn compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandidate> {
+        let library = fixture_library(&mut results);
+        target_decoy_compete(results, &library)
+    }
+
     use super::*;
-    use std::sync::Arc;
     use timsquery::models::test_handles;
-    use timsseek::models::DecoyMarking;
-    use timsseek::models::sequence::Peptide;
     use timsseek::scoring::results::ScoringFields;
 
     /// `group` names the competition group: candidates sharing one compete.
     /// Production reads it off the arena as an opaque code; a fixture only needs
     /// the codes to differ where the test wants different groups.
     fn candidate(seq: &str, mz: f64, is_target: bool, group: u32) -> ScoredCandidate {
-        let decoy = if is_target {
-            DecoyMarking::Target
-        } else {
-            DecoyMarking::MassShiftedDecoy
-        };
-        let peptide = Peptide {
-            raw: Arc::from(seq),
-            decoy,
-            sequence_features: false,
-        };
-        let mut scoring = ScoringFields::sample(peptide);
+        let mut scoring = ScoringFields::sample_default();
         scoring.identity.precursor_mz = mz;
+        scoring.identity.source_id = seq.into();
         scoring.identity.is_target = is_target;
         scoring.identity.group = test_handles::group(group);
         // All fixtures tie on score so the (seq, score, is_target) tiebreak arm
@@ -670,17 +724,50 @@ mod tests {
     }
 
     fn survivors(mut results: Vec<ScoredCandidate>) -> Vec<(String, u64, bool)> {
-        dedup_by_sequence(&mut results);
+        let library = fixture_library(&mut results);
+        dedup_by_sequence(&mut results, &library);
         results
             .iter()
             .map(|c| {
                 (
-                    c.scoring.identity.peptide.as_str().to_string(),
+                    c.scoring.identity.source_id.to_string(),
                     c.scoring.identity.precursor_mz.to_bits(),
                     c.scoring.identity.is_target,
                 )
             })
             .collect()
+    }
+
+    #[test]
+    fn structural_dedup_groups_charge_and_mz_before_ranking() {
+        let mut a = candidate("AC(UniMod:4)K", 500.0, false, 0);
+        let mut b = candidate("AC[UNIMOD:4]K", 500.0, true, 0);
+        let mut different_charge = candidate("AC[UNIMOD:4]K", 500.0, true, 1);
+        different_charge.scoring.identity.precursor_charge = 3;
+        a.scoring.primary.main_score = 5.0;
+        b.scoring.primary.main_score = 5.0;
+        different_charge.scoring.primary.main_score = 6.0;
+        let mut rows = vec![a, different_charge, b];
+        let library = fixture_library(&mut rows);
+        dedup_by_sequence(&mut rows, &library);
+        assert_eq!(rows.len(), 2);
+        assert!(rows.iter().all(|r| r.scoring.identity.is_target));
+        assert_eq!(rows[0].scoring.identity.precursor_charge, 2);
+        assert_eq!(rows[1].scoring.identity.precursor_charge, 3);
+    }
+
+    #[test]
+    fn missing_and_unresolved_chemistry_do_not_form_one_duplicate_key() {
+        let mut rows = vec![
+            candidate("", 500.0, true, 0),
+            candidate("", 500.0, false, 1),
+            candidate("unknown!", 500.0, true, 2),
+            candidate("unknown!", 500.0, false, 3),
+            candidate("PEPTIDE", 500.0, true, 4),
+        ];
+        let library = fixture_library(&mut rows);
+        dedup_by_sequence(&mut rows, &library);
+        assert_eq!(rows.len(), 5);
     }
 
     #[test]
@@ -702,12 +789,12 @@ mod tests {
         let sa = survivors(order_a);
         let sb = survivors(order_b);
         assert_eq!(sa, sb, "dedup survivors must be order-independent");
-        // Target first (target-first arm), then decoys ascending by m/z.
+        // Duplicate keys are adjacent; distinct m/z values sort ascending.
         assert_eq!(
             sa,
             vec![
-                ("PEPTIDEK".to_string(), 501.0f64.to_bits(), true),
                 ("PEPTIDEK".to_string(), 500.0f64.to_bits(), false),
+                ("PEPTIDEK".to_string(), 501.0f64.to_bits(), true),
                 ("PEPTIDEK".to_string(), 502.0f64.to_bits(), false),
             ]
         );
@@ -720,7 +807,7 @@ mod tests {
         let mut runner_up = candidate("RUNNER", 502.0, false, 7);
         runner_up.scoring.primary.main_score = 3.0;
 
-        let competed = target_decoy_compete(vec![runner_up, best]);
+        let competed = compete(vec![runner_up, best]);
         assert_eq!(competed.len(), 1);
         let winner = &competed[0];
         let best_ln1p = 8.0f32.ln_1p();
@@ -742,7 +829,7 @@ mod tests {
         let mut worst = candidate("WORST", 503.0, false, 7);
         worst.scoring.primary.main_score = 1.0;
 
-        let competed = target_decoy_compete(vec![worst, middle, best]);
+        let competed = compete(vec![worst, middle, best]);
         assert_eq!(competed.len(), 1, "one group, one survivor");
 
         let (b, m) = (8.0f32.ln_1p(), 3.0f32.ln_1p());
@@ -758,7 +845,7 @@ mod tests {
         let mut only = candidate("ALONE", 501.0, true, 7);
         only.scoring.primary.main_score = 8.0;
 
-        let competed = target_decoy_compete(vec![only]);
+        let competed = compete(vec![only]);
         assert_eq!(competed.len(), 1);
         assert!(competed[0].delta_group_ln1p_diff.is_nan());
         assert!(competed[0].delta_group_ln1p_ratio.is_nan());
@@ -799,7 +886,7 @@ mod tests {
         let mut b = candidate("B", 502.0, true, 2);
         b.scoring.primary.main_score = 3.0;
 
-        let competed = target_decoy_compete(vec![a, b]);
+        let competed = compete(vec![a, b]);
         assert_eq!(competed.len(), 2, "two groups, two survivors");
         assert!(competed.iter().all(|c| c.delta_group_ln1p_diff.is_nan()));
     }

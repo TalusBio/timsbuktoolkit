@@ -1,4 +1,9 @@
 use crate::KeyLike;
+use crate::chemistry::analyte::{
+    AnalyteColumns,
+    AnalyteInput,
+    AnalyteRef,
+};
 use crate::models::capabilities::{
     DecoyPolicy,
     DecoyStrategy,
@@ -150,7 +155,7 @@ pub struct DecoyGroups {
 ///     rt_seconds: 1.0,
 ///     mobility: 0.8,
 ///     frags: &frags,
-///     seq_mod: "PEPTIDEK",
+///     analyte: Default::default(),
 ///     ..Default::default()
 /// });
 /// ```
@@ -161,9 +166,8 @@ pub struct Row<'a, L: KeyLike> {
     pub rt_seconds: f32,
     pub mobility: f32,
     pub frags: &'a [(L, f64)],
-    pub seq_strip: &'a str,
-    pub seq_mod: &'a str,
-    pub mods: &'a [(u8, u16)],
+    pub analyte: AnalyteInput<'a>,
+    pub entry_name: Option<&'a str>,
     /// A decoy the library shipped, as opposed to one the arena derives.
     pub is_decoy: bool,
     /// What the source file called this row, in the shape it used. `None` for a
@@ -198,9 +202,8 @@ impl<L: KeyLike> Default for Row<'_, L> {
             rt_seconds: 0.0,
             mobility: 0.0,
             frags: &[],
-            seq_strip: "",
-            seq_mod: "",
-            mods: &[],
+            analyte: AnalyteInput::default(),
+            entry_name: None,
             is_decoy: false,
             id: None,
             decoy_group: None,
@@ -208,11 +211,12 @@ impl<L: KeyLike> Default for Row<'_, L> {
     }
 }
 
-#[derive(Debug, Clone)]
-pub struct ModDefinition {
-    pub token: String, // verbatim, e.g. "[UNIMOD:4]"
-    pub mono_delta: f64,
-    pub cs_delta: (i16, i16),
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum TargetBuildError {
+    #[error(transparent)]
+    Identity(#[from] SourceIdError),
+    #[error("invalid analyte: {message}")]
+    InvalidAnalyte { message: String },
 }
 
 #[derive(Debug, Clone)]
@@ -247,18 +251,11 @@ pub struct TargetColumns<L: KeyLike> {
     pub(crate) decoy_groups: Option<DecoyGroups>,
     // CSR prefix offsets (n+1)
     pub(crate) frag_off: Vec<u32>,
-    pub(crate) seq_strip_off: Vec<u32>,
-    pub(crate) seq_mod_off: Vec<u32>,
-    pub(crate) mod_off: Vec<u32>,
     // fragment arenas (len = total fragments)
     pub(crate) frag_labels: Vec<L>,
     pub(crate) frag_mzs: Vec<f64>,
-    // sequences
-    pub(crate) seq_strip_blob: String,
-    pub(crate) seq_mod_blob: String,
-    // structured mods
-    pub(crate) mods: Vec<(u8, u16)>,
-    pub(crate) mod_registry: Vec<ModDefinition>,
+    pub(crate) analytes: AnalyteColumns,
+    pub(crate) entry_names: Vec<Option<String>>,
 }
 
 /// The only mutable construction state for a [`TargetColumns`] arena.
@@ -290,7 +287,7 @@ impl<L: KeyLike> TargetColumnsBuilder<L> {
         self.inner.n_fragments()
     }
 
-    pub fn seal(self, decoys: DecoyPolicy) -> Result<TargetColumns<L>, SourceIdError> {
+    pub fn seal(self, decoys: DecoyPolicy) -> Result<TargetColumns<L>, TargetBuildError> {
         self.inner.seal(decoys)
     }
 }
@@ -309,20 +306,14 @@ impl<L: KeyLike> TargetColumns<L> {
             source_ids: SourceIds::default(),
             decoy_groups: None,
             frag_off: vec![0],
-            seq_strip_off: vec![0],
-            seq_mod_off: vec![0],
-            mod_off: vec![0],
+            analytes: AnalyteColumns::default(),
+            entry_names: Vec::new(),
             frag_labels: Vec::new(),
             frag_mzs: Vec::new(),
-            seq_strip_blob: String::new(),
-            seq_mod_blob: String::new(),
-            mods: Vec::new(),
-            mod_registry: Vec::new(),
         }
     }
 
-    /// Append one row. `mods` are (position, registry_idx) pairs; the caller
-    /// is responsible for having registered the mod tokens in `mod_registry`.
+    /// Append a row, owning its metadata and interning modification definitions.
     #[allow(clippy::too_many_arguments)]
     fn push_row(&mut self, row: Row<'_, L>) {
         let Row {
@@ -331,9 +322,8 @@ impl<L: KeyLike> TargetColumns<L> {
             rt_seconds,
             mobility,
             frags,
-            seq_strip,
-            seq_mod,
-            mods,
+            analyte,
+            entry_name,
             is_decoy,
             id,
             decoy_group,
@@ -354,19 +344,8 @@ impl<L: KeyLike> TargetColumns<L> {
         self.frag_off.push(
             u32::try_from(self.frag_labels.len()).expect("fragment arena exceeds u32 offset range"),
         );
-        self.seq_strip_blob.push_str(seq_strip);
-        self.seq_strip_off.push(
-            u32::try_from(self.seq_strip_blob.len())
-                .expect("stripped-seq blob exceeds u32 offset range"),
-        );
-        self.seq_mod_blob.push_str(seq_mod);
-        self.seq_mod_off.push(
-            u32::try_from(self.seq_mod_blob.len())
-                .expect("modified-seq blob exceeds u32 offset range"),
-        );
-        self.mods.extend_from_slice(mods);
-        self.mod_off
-            .push(u32::try_from(self.mods.len()).expect("mods arena exceeds u32 offset range"));
+        self.analytes.push(analyte);
+        self.entry_names.push(entry_name.map(str::to_owned));
         self.is_decoy.push(is_decoy);
     }
 
@@ -539,17 +518,15 @@ impl<L: KeyLike> TargetColumns<L> {
         &self.frag_mzs[self.frag_range(tgt)]
     }
 
-    /// This row's stripped (unmodified) sequence.
-    pub fn seq_strip(&self, tgt: RowIdx) -> &str {
-        &self.seq_strip_blob[self.seq_strip_range(tgt)]
+    /// Independent borrowed analyte facts for this row.
+    pub fn analyte(&self, row: RowIdx) -> AnalyteRef<'_> {
+        self.analytes.get(row.get())
     }
 
-    /// This row's modified sequence, the form sequence features are parsed from.
-    pub fn seq_mod(&self, tgt: RowIdx) -> &str {
-        &self.seq_mod_blob[self.seq_mod_range(tgt)]
+    pub fn entry_name(&self, row: RowIdx) -> Option<&str> {
+        self.entry_names[row.get()].as_deref()
     }
 
-    /// Fragments across every row, for whole-arena statistics.
     pub fn n_fragments(&self) -> usize {
         self.frag_labels.len()
     }
@@ -565,50 +542,18 @@ impl<L: KeyLike> TargetColumns<L> {
         self.frag_off[tgt] as usize..self.frag_off[tgt + 1] as usize
     }
 
-    pub fn seq_strip_range(&self, tgt: RowIdx) -> std::ops::Range<usize> {
-        let tgt = tgt.get();
-        self.seq_strip_off[tgt] as usize..self.seq_strip_off[tgt + 1] as usize
-    }
-
-    pub fn seq_mod_range(&self, tgt: RowIdx) -> std::ops::Range<usize> {
-        let tgt = tgt.get();
-        self.seq_mod_off[tgt] as usize..self.seq_mod_off[tgt + 1] as usize
-    }
-
-    pub fn mod_range(&self, tgt: RowIdx) -> std::ops::Range<usize> {
-        let tgt = tgt.get();
-        self.mod_off[tgt] as usize..self.mod_off[tgt + 1] as usize
-    }
-
-    /// Seal after build: resolve the decoy policy against the rows that
-    /// actually arrived, build the id column, then release excess capacity on
-    /// every arena.
-    ///
-    /// Consuming, and it takes the policy, so an arena is sealed exactly once
-    /// and `caps.decoys` is written exactly there. That is what makes the
-    /// invariant checkable rather than conventional: `MassShift` needs an
-    /// all-targets arena (decoys are an on-the-fly ±CH2 index transform, never
-    /// stored), and since the resolution happens after the rows are counted, a
-    /// file that shipped decoys resolves to `Stored` instead of being silently
-    /// re-decoyed. There is no later pass that could set it back.
-    ///
-    /// Fails when the pushed ids cannot make a column: two rows sharing an id
-    /// (a caller keys results by it, so a repeat hides a row), or a library
-    /// mixing numeric and text ids (storing both would coerce the numbers to
-    /// strings, and `7` and `"7"` would become two ids in one column).
-    ///
-    /// Fails too when a declared group holds two targets at one charge, which is
-    /// a group that cannot be competed: one result survives per group and
-    /// charge, so loading it would silently discard a real identification. That
-    /// is refused rather than warned about because the loss leaves no trace in
-    /// the output -- the run reports a lower target count and nothing else --
-    /// whereas a refusal names the file at the moment it is read.
-    fn seal(mut self, decoys: DecoyPolicy) -> Result<Self, SourceIdError> {
+    fn seal(mut self, decoys: DecoyPolicy) -> Result<Self, TargetBuildError> {
+        assert_eq!(self.analytes.len(), self.n_rows());
+        assert_eq!(self.entry_names.len(), self.n_rows());
+        self.analytes
+            .validate()
+            .map_err(|message| TargetBuildError::InvalidAnalyte { message })?;
         let stored_decoys = self.is_decoy.iter().filter(|&&is_decoy| is_decoy).count();
         if decoys == DecoyPolicy::Force && stored_decoys > 0 {
             return Err(SourceIdError::ForceWithStoredDecoys {
                 count: stored_decoys,
-            });
+            }
+            .into());
         }
         // Groups first: an undeclared row falls back to its own id, which is
         // still in `pending_ids` at this point.
@@ -681,15 +626,10 @@ impl<L: KeyLike> TargetColumns<L> {
         self.mobility.shrink_to_fit();
         self.is_decoy.shrink_to_fit();
         self.frag_off.shrink_to_fit();
-        self.seq_strip_off.shrink_to_fit();
-        self.seq_mod_off.shrink_to_fit();
-        self.mod_off.shrink_to_fit();
         self.frag_labels.shrink_to_fit();
         self.frag_mzs.shrink_to_fit();
-        self.seq_strip_blob.shrink_to_fit();
-        self.seq_mod_blob.shrink_to_fit();
-        self.mods.shrink_to_fit();
-        self.mod_registry.shrink_to_fit();
+        self.analytes.finish();
+        self.entry_names.shrink_to_fit();
     }
 }
 
@@ -845,8 +785,7 @@ mod tests {
                 rt_seconds: 1.0,
                 mobility: 0.8,
                 frags: &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
-                seq_strip: "PEP",
-                seq_mod: "PEP",
+                analyte: crate::chemistry::analyte::Analyte::from_sequence("PEP").as_input(),
                 is_decoy: spec.is_decoy,
                 decoy_group: spec.group.map(Into::into),
                 ..Default::default()
@@ -905,6 +844,7 @@ mod tests {
                 row: 1,
                 charge: 2,
             }
+            .into()
         );
     }
 
@@ -942,8 +882,7 @@ mod tests {
                 rt_seconds: 1.0,
                 mobility: 0.8,
                 frags: &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
-                seq_strip: "PEP",
-                seq_mod: "PEP",
+                analyte: crate::chemistry::analyte::Analyte::from_sequence("PEP").as_input(),
                 is_decoy,
                 id: Some(id.into()),
                 decoy_group: group.map(Into::into),
@@ -995,8 +934,7 @@ mod tests {
             rt_seconds: 1.0,
             mobility: 0.8,
             frags: &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
-            seq_strip: "PEP",
-            seq_mod: "PEP",
+            analyte: crate::chemistry::analyte::Analyte::from_sequence("PEP").as_input(),
             ..Default::default()
         });
         let c = c
@@ -1019,8 +957,7 @@ mod tests {
             rt_seconds: 1.0,
             mobility: 0.8,
             frags: &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
-            seq_strip: "PEP",
-            seq_mod: "PEP",
+            analyte: crate::chemistry::analyte::Analyte::from_sequence("PEP").as_input(),
             ..Default::default()
         });
         c.push_row(Row {
@@ -1029,8 +966,7 @@ mod tests {
             rt_seconds: 1.0,
             mobility: 0.8,
             frags: &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
-            seq_strip: "PEP",
-            seq_mod: "PEP",
+            analyte: crate::chemistry::analyte::Analyte::from_sequence("PEP").as_input(),
             is_decoy: true,
             ..Default::default()
         });
@@ -1057,8 +993,7 @@ mod tests {
                 (IonAnnot::try_from("y3").unwrap(), 300.0),
                 (IonAnnot::try_from("y4").unwrap(), 400.0),
             ],
-            seq_strip: "PEPTIDEK",
-            seq_mod: "PEPTIDEK",
+            analyte: crate::chemistry::analyte::Analyte::from_sequence("PEPTIDEK").as_input(),
             ..Default::default()
         });
         c.push_row(Row {
@@ -1071,8 +1006,7 @@ mod tests {
                 (IonAnnot::try_from("y5").unwrap(), 500.0),
                 (IonAnnot::try_from("y6").unwrap(), 600.0),
             ],
-            seq_strip: "SAMPLERK",
-            seq_mod: "SAMPLERK",
+            analyte: crate::chemistry::analyte::Analyte::from_sequence("SAMPLERK").as_input(),
             ..Default::default()
         });
         let c = c.seal(DecoyPolicy::Never).expect("fixture ids are usable");
@@ -1081,11 +1015,17 @@ mod tests {
         assert_eq!(c.frag_range(RowIdx::new(1)), 2..5);
         assert_eq!(c.frag_mzs[c.frag_range(RowIdx::new(1))][2], 600.0);
         assert_eq!(
-            &c.seq_strip_blob[c.seq_strip_range(RowIdx::new(0))],
+            c.analyte(RowIdx::new(0))
+                .peptide
+                .known()
+                .map_or("", |p| p.residues),
             "PEPTIDEK"
         );
         assert_eq!(
-            &c.seq_strip_blob[c.seq_strip_range(RowIdx::new(1))],
+            c.analyte(RowIdx::new(1))
+                .peptide
+                .known()
+                .map_or("", |p| p.residues),
             "SAMPLERK"
         );
     }
@@ -1101,8 +1041,7 @@ mod tests {
             rt_seconds: 1.0,
             mobility: 0.8,
             frags: &[(Arc::<str>::from("frag_a"), 300.0)],
-            seq_strip: "PEP",
-            seq_mod: "PEP",
+            analyte: crate::chemistry::analyte::Analyte::from_sequence("PEP").as_input(),
             ..Default::default()
         });
         c.push_row(Row {
@@ -1111,8 +1050,7 @@ mod tests {
             rt_seconds: 1.0,
             mobility: 0.8,
             frags: &[(Arc::<str>::from("frag_b"), 400.0)],
-            seq_strip: "TIDE",
-            seq_mod: "TIDE",
+            analyte: crate::chemistry::analyte::Analyte::from_sequence("TIDE").as_input(),
             is_decoy: true,
             ..Default::default()
         });

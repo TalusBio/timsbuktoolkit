@@ -175,8 +175,8 @@ pub struct ElutionGroupData {
 }
 
 const BASE_LABELS: [&str; 8] = [
-    "ID",
-    "Sequence",
+    "ID / name",
+    "Analyte",
     "Decoy",
     "RT (s)",
     "Mobility",
@@ -237,17 +237,29 @@ impl ElutionGroupData {
         }
     }
 
-    /// Writes the filterable key (id + sequence) for `idx` into `buffer`.
+    /// Writes source ID, independent entry name, and available chemistry for filtering.
     fn key_onto(&self, idx: usize, buffer: &mut String) {
         use std::fmt::Write;
         buffer.clear();
         let q = self.item_at(idx);
-        let peptide = q.materialize_peptide();
+        let analyte = self.inner.geometry().analyte(q.handles().row);
+        let sequence = analyte
+            .peptide
+            .known()
+            .and_then(|p| p.sequence())
+            .or_else(|| analyte.formula.known().and_then(|f| f.notation()))
+            .unwrap_or_default();
+        let name = self
+            .inner
+            .geometry()
+            .entry_name(q.handles().row)
+            .unwrap_or_default();
         let _ = write!(
             buffer,
-            "{}|{}|{}",
+            "{}|{}|{}|{}",
             q.output_id(),
-            peptide.raw,
+            name,
+            sequence,
             !q.is_target()
         );
     }
@@ -353,7 +365,13 @@ impl ElutionGroupData {
     ) {
         let q = self.item_at(idx);
         let is_selected = Some(idx) == *selected_index;
-        let peptide = q.materialize_peptide();
+        let analyte = self.inner.geometry().analyte(q.handles().row);
+        let sequence = analyte
+            .peptide
+            .known()
+            .and_then(|p| p.sequence())
+            .or_else(|| analyte.formula.known().and_then(|f| f.notation()))
+            .unwrap_or_default();
 
         let mut clicked = false;
         let mut add_col = |ui: &mut egui::Ui, text: &str| {
@@ -377,10 +395,17 @@ impl ElutionGroupData {
         };
 
         table_row.col(|ui| {
-            add_col(ui, &q.output_id().to_string());
+            let mut label = q.output_id().to_string();
+            if let Some(name) = self.inner.geometry().entry_name(q.handles().row)
+                && name != label
+            {
+                label.push_str(" | ");
+                label.push_str(name);
+            }
+            add_col(ui, &label);
         });
         table_row.col(|ui| {
-            add_col(ui, &peptide.raw);
+            add_col(ui, &sequence);
         });
         table_row.col(|ui| {
             add_col(ui, if q.is_target() { "No" } else { "Yes" });
@@ -432,8 +457,7 @@ mod tests {
                 (IonAnnot::try_from("y3").unwrap(), 300.0),
                 (IonAnnot::try_from("y5").unwrap(), 500.0),
             ],
-            seq_strip: "PEPBK",
-            seq_mod: "PEPBK",
+            analyte: timsquery::chemistry::analyte::Analyte::from_sequence("PEPBK").as_input(),
             ..Default::default()
         });
         let geom = geom
