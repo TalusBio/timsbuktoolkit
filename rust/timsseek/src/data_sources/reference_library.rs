@@ -737,6 +737,37 @@ mod tests {
     }
 
     #[test]
+    fn blank_modified_sequence_preserves_stripped_residues_without_enabling_sequence_features() {
+        use timsquery::chemistry::analyte::PropertyRef;
+
+        let file = tempfile::Builder::new().suffix(".tsv").tempfile().unwrap();
+        std::fs::write(
+            file.path(),
+            concat!(
+                "ModifiedPeptide\tStrippedPeptide\tPrecursorMz\tPrecursorCharge\tTr_recalibrated\tIonMobility\t",
+                "ProteinID\tDecoy\tFragmentMz\tFragmentType\tFragmentNumber\tFragmentCharge\tFragmentLossType\tRelativeIntensity\n",
+                "\tPEPTIDE\t500\t2\t1\t1\tP1\t0\t300\ty\t3\t1\tnoloss\t1\n",
+            ),
+        )
+        .unwrap();
+        let lib = ReferenceLibrary::try_from(timsquery::serde::read_targets(file.path()).unwrap())
+            .unwrap();
+        let geom = &lib.geom;
+        let row = geom.rows().next().unwrap();
+        let peptide = geom.analyte(row).peptide.known().unwrap();
+        assert_eq!(peptide.residues, "PEPTIDE");
+        assert!(matches!(peptide.modifications, PropertyRef::Missing));
+        assert!(peptide.sequence().is_none());
+        assert!(!lib.parsable_sequences());
+        let expected = isotope_dist_or_averagine("PEPTIDE", 0.0).1;
+        for query in lib.iter() {
+            for (i, intensity) in query.expected_precursor_envelope() {
+                assert_eq!(intensity, expected[i as usize]);
+            }
+        }
+    }
+
+    #[test]
     fn precursor_envelope_is_max_normalized_three_peaks() {
         let lib = tiny_ref_lib();
         let q = RefQuery::new(&lib, lib.geom.flat_for(row(&lib, 0), 0));

@@ -326,7 +326,12 @@ impl Analyte {
                 "modified and stripped sequence disagree: {sequence:?}, {stripped:?}"
             ));
         }
-        if !stripped.is_empty() && matches!(analyte.peptide, Property::Unresolved { .. }) {
+        if !stripped.is_empty() && matches!(analyte.peptide, Property::Missing) {
+            analyte.peptide = Property::Known(Peptide {
+                residues: stripped.into(),
+                modifications: Property::Missing,
+            });
+        } else if !stripped.is_empty() && matches!(analyte.peptide, Property::Unresolved { .. }) {
             analyte.peptide = Property::Known(Peptide {
                 residues: stripped.into(),
                 modifications: Property::Unresolved {
@@ -847,6 +852,23 @@ mod tests {
             let output = columns.get(0).peptide.known().unwrap().sequence().unwrap();
             assert_eq!(Analyte::from_sequence(&output), input);
         }
+    }
+
+    #[test]
+    fn stripped_residues_survive_missing_modified_sequence() {
+        let analyte = Analyte::from_sequence_fields("", "PEPTIDE").unwrap();
+        let peptide = analyte.peptide.known().unwrap();
+        assert_eq!(peptide.residues, "PEPTIDE");
+        assert!(matches!(peptide.modifications, Property::Missing));
+        let mut columns = AnalyteColumns::default();
+        columns.push(analyte.as_input());
+        columns.validate().unwrap();
+        assert!(columns.get(0).peptide.known().unwrap().sequence().is_none());
+        assert_eq!(columns.get(0).to_owned(), analyte);
+        assert!(matches!(
+            Analyte::from_sequence_fields("", "").unwrap().peptide,
+            Property::Missing
+        ));
     }
 
     #[test]
