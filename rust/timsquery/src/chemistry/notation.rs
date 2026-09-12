@@ -1,11 +1,4 @@
-/// Rewrite `[U:<digits>]` to `[UNIMOD:<digits>]`, leaving `[U:<name>]` alone.
-///
-/// ProForma 2.1 pairs a name with the one-letter prefix (§6.2.1) and an
-/// accession with the long one (§6.2.2), and calls the short-prefix accession
-/// `[U:35]` incorrect outright. So this canonicalizes a spelling the spec
-/// rejects into the one it wants, which is also the one the fast parser reads --
-/// and leaves a name alone, since moving it to the long prefix would produce a
-/// form the spec does not define.
+/// Expand numeric `U:` accessions; preserve named modifications.
 fn expand_unimod_accessions(s: &str) -> String {
     let mut out = String::with_capacity(s.len());
     let mut rest = s;
@@ -91,16 +84,45 @@ fn convert_paren_unimod(s: &str) -> String {
     out
 }
 
-/// Coerce DIA-NN / short-form modified-sequence strings into mzcore-parseable
-/// ProForma. Strips `_..._` wrapping used by DIA-NN, converts DIA-NN's
-/// parenthesised mods (`C(UniMod:4)`) to ProForma brackets (`C[UNIMOD:4]`), and
-/// normalizes UNIMOD accession casing (`[UniMod:4]` → `[UNIMOD:4]`) and
-/// expands numeric shorthand (`[U:35]` → `[UNIMOD:35]`). Valid named prefixes
-/// such as `[U:Oxidation]` and `[M:O-phospho-L-serine]` are preserved.
-/// A leading (N-terminal) mod is rewritten to `[UNIMOD:n]-SEQ` as ProForma
-/// requires. Pass-through for plain sequences.
+/// Normalize library sequence notation: strip `_` wrappers, convert DIA-NN
+/// parentheses, normalize UNIMOD accessions, and add missing terminal dashes.
 ///
-/// Off the hot path -- allocates on every replacement, which is fine at load.
+/// ProForma 2.1 requires full prefixes for accessions: `[U:21]` is invalid,
+/// but `M[U:Oxidation]` is valid because `Oxidation` is a name (§6.2.1–2, §7.8).
+/// This adapter repairs numeric shorthand; it is not a ProForma validator.
+///
+/// ```
+/// use timsquery::chemistry::normalize_to_proforma;
+///
+/// assert_eq!(normalize_to_proforma("S[U:21]"), "S[UNIMOD:21]");
+/// assert_eq!(normalize_to_proforma("M[U:Oxidation]"), "M[U:Oxidation]");
+/// ```
+///
+/// Other supported library spellings:
+/// ```
+/// use timsquery::chemistry::normalize_to_proforma;
+///
+/// for (input, expected) in [
+///     ("_PEPTIDEK_", "PEPTIDEK"),
+///     ("_LSHPGC[UniMod:4]K_", "LSHPGC[UNIMOD:4]K"),
+///     ("_C[Unimod:4]TVPGHK_", "C[UNIMOD:4]TVPGHK"),
+///     ("PEPTC[U:4]IDEK", "PEPTC[UNIMOD:4]IDEK"),
+///     ("AAC(UniMod:4)DEK", "AAC[UNIMOD:4]DEK"),
+///     ("AAC(unimod:4)DEK", "AAC[UNIMOD:4]DEK"),
+///     ("AAC(UNIMOD:4)DEK", "AAC[UNIMOD:4]DEK"),
+///     ("AAC(UniMod:4)M(UniMod:35)K", "AAC[UNIMOD:4]M[UNIMOD:35]K"),
+///     ("(UniMod:1)AACDEK", "[UNIMOD:1]-AACDEK"),
+///     ("AAC(UniMod:4)M[Oxidation (M)]K", "AAC[UNIMOD:4]M[Oxidation (M)]K"),
+///     ("_C[Carbamidomethyl (C)]PEPK_", "C[Carbamidomethyl (C)]PEPK"),
+///     ("[+42]AACDEK", "[+42]-AACDEK"),
+///     ("PEPTM[+15.995]IDEK", "PEPTM[+15.995]IDEK"),
+///     ("PEPTIDEK", "PEPTIDEK"),
+///     ("PEPTC[u:4]IDEK", "PEPTC[UNIMOD:4]IDEK"),
+///     ("PEPTC[U:Carbamidomethyl]IDEK", "PEPTC[U:Carbamidomethyl]IDEK"),
+/// ] {
+///     assert_eq!(normalize_to_proforma(input), expected);
+/// }
+/// ```
 pub fn normalize_to_proforma(raw: &str) -> String {
     let trimmed = raw.trim_matches('_');
     // Fast path: plain-AA sequences (no mod tags) skip the rewrite chain.
@@ -108,24 +130,11 @@ pub fn normalize_to_proforma(raw: &str) -> String {
         return trimmed.to_owned();
     }
 
-    // DIA-NN writes mods in parentheses, e.g. `C(UniMod:4)`; ProForma needs
-    // brackets, e.g. `C[UNIMOD:4]`. Convert each opener and ONLY its matching
-    // `)` (see `convert_paren_unimod`) -- never a blanket `)` replace, which would
-    // corrupt parens inside a bracket mod name, e.g. `C[Carbamidomethyl (C)]`.
+    // Preserve parentheses inside bracketed modification names.
     let s = convert_paren_unimod(trimmed);
 
     // Normalize any pre-existing bracket casing likewise.
     let mut s = replace_ascii_ci(&s, "[unimod:", "[UNIMOD:");
-    // Expanded only for an accession, which is the form the fast parser
-    // path reads. A NAME is left alone, because ProForma 2.1 keeps the two in
-    // separate namespaces: §6.2.1 gives names a ONE-LETTER prefix, and §6.2.2
-    // requires accessions to use the long one ("full accession numbers MUST be
-    // used in all cases"). So `[UNIMOD:Carbamidomethyl]` is in neither, and
-    // expanding a name produced a string no parser owes us an answer for.
-    //
-    // That is what made it a bug rather than a nicety: mzSpecLib names its
-    // modifications, the gate is library-wide, and one unparsable row turned
-    // sequence features off for a whole library.
     s = expand_unimod_accessions(&s);
 
     // A mod at the very start is N-terminal: ProForma wants `[UNIMOD:n]-SEQ`.

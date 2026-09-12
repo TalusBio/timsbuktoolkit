@@ -304,63 +304,6 @@ mod tests {
     }
 
     #[test]
-    fn normalize_strips_underscores() {
-        assert_eq!(normalize_to_proforma("_PEPTIDEK_"), "PEPTIDEK");
-    }
-
-    #[test]
-    fn normalize_diann_unimod_case() {
-        assert_eq!(
-            normalize_to_proforma("_LSHPGC[UniMod:4]K_"),
-            "LSHPGC[UNIMOD:4]K"
-        );
-        assert_eq!(
-            normalize_to_proforma("_C[Unimod:4]TVPGHK_"),
-            "C[UNIMOD:4]TVPGHK"
-        );
-    }
-
-    #[test]
-    fn normalize_short_u_form() {
-        assert_eq!(
-            normalize_to_proforma("PEPTC[U:4]IDEK"),
-            "PEPTC[UNIMOD:4]IDEK"
-        );
-    }
-
-    #[test]
-    fn normalize_diann_paren_unimod() {
-        // DIA-NN parenthesised mods -> ProForma brackets (internal residue mod).
-        assert_eq!(
-            normalize_to_proforma("AAC(UniMod:4)DEK"),
-            "AAC[UNIMOD:4]DEK"
-        );
-        // Case-insensitive on the tag.
-        assert_eq!(
-            normalize_to_proforma("AAC(unimod:4)DEK"),
-            "AAC[UNIMOD:4]DEK"
-        );
-        assert_eq!(
-            normalize_to_proforma("AAC(UNIMOD:4)DEK"),
-            "AAC[UNIMOD:4]DEK"
-        );
-        // Multiple mods in one peptide.
-        assert_eq!(
-            normalize_to_proforma("AAC(UniMod:4)M(UniMod:35)K"),
-            "AAC[UNIMOD:4]M[UNIMOD:35]K"
-        );
-    }
-
-    #[test]
-    fn normalize_diann_paren_nterm_gets_dash() {
-        // A leading (N-terminal) mod must become `[UNIMOD:n]-SEQ`.
-        assert_eq!(
-            normalize_to_proforma("(UniMod:1)AACDEK"),
-            "[UNIMOD:1]-AACDEK"
-        );
-    }
-
-    #[test]
     fn parse_diann_paren_unimod_roundtrips() {
         // The end-to-end path the load uses: normalize then parse. Parenthesised
         // DIA-NN mods must parse (else the parse gate disables sequence features).
@@ -369,64 +312,6 @@ mod tests {
         assert_eq!(p.residues.len(), 6);
         assert_eq!(p.mods.len(), 1);
         assert_eq!(p.mods[0].kind, Mod::Unimod(4));
-    }
-
-    #[test]
-    fn normalize_mixed_paren_unimod_and_bracket_paren_untouched() {
-        // A paren UNIMOD tag AND a bracket mod whose name contains `)`: only the
-        // UNIMOD `)` converts; the `(M)` inside the bracket name stays intact.
-        assert_eq!(
-            normalize_to_proforma("AAC(UniMod:4)M[Oxidation (M)]K"),
-            "AAC[UNIMOD:4]M[Oxidation (M)]K"
-        );
-    }
-
-    #[test]
-    fn normalize_spectronaut_parens_in_brackets_untouched() {
-        // Spectronaut writes mod names with parens INSIDE brackets. The DIA-NN
-        // paren->bracket conversion must not touch these (no `(unimod:` opener).
-        assert_eq!(
-            normalize_to_proforma("_C[Carbamidomethyl (C)]PEPK_"),
-            "C[Carbamidomethyl (C)]PEPK"
-        );
-    }
-
-    #[test]
-    fn normalize_skyline_nterm_mass_gets_dash() {
-        // Skyline N-terminal mass mod -> ProForma `[+42]-SEQ`.
-        assert_eq!(normalize_to_proforma("[+42]AACDEK"), "[+42]-AACDEK");
-    }
-
-    #[test]
-    fn normalize_mass_shift_unchanged() {
-        assert_eq!(
-            normalize_to_proforma("PEPTM[+15.995]IDEK"),
-            "PEPTM[+15.995]IDEK"
-        );
-    }
-
-    #[test]
-    fn normalize_plain_unchanged() {
-        assert_eq!(normalize_to_proforma("PEPTIDEK"), "PEPTIDEK");
-    }
-
-    /// A UNIMOD accession is expanded, because that is the spelling the byte-walk
-    /// parser reads; a UNIMOD *name* is not, because mzcore resolves `U:<name>`
-    /// and rejects `UNIMOD:<name>`.
-    #[test]
-    fn normalize_expands_a_unimod_accession_and_leaves_a_name_alone() {
-        assert_eq!(
-            normalize_to_proforma("PEPTC[U:4]IDEK"),
-            "PEPTC[UNIMOD:4]IDEK"
-        );
-        assert_eq!(
-            normalize_to_proforma("PEPTC[u:4]IDEK"),
-            "PEPTC[UNIMOD:4]IDEK"
-        );
-        assert_eq!(
-            normalize_to_proforma("PEPTC[U:Carbamidomethyl]IDEK"),
-            "PEPTC[U:Carbamidomethyl]IDEK"
-        );
     }
 
     /// The regression. mzSpecLib names its modifications, so this is the spelling
