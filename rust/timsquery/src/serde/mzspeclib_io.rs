@@ -1017,6 +1017,7 @@ fn isotope_of(annotation: &Annotation) -> Option<i8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chemistry::analyte;
     use crate::models::TargetColumns;
     use crate::models::capabilities::DecoyPolicy;
     use std::path::PathBuf;
@@ -1070,17 +1071,13 @@ mod tests {
         assert_eq!(geom.output_id(row).to_string(), "JWH-250-5OH");
         assert!(matches!(
             geom.analyte(row).peptide,
-            crate::chemistry::analyte::PropertyRef::Missing
+            analyte::PropertyRef::Missing
         ));
         assert_eq!(geom.entry_name(row), Some("JWH-250-5OH"));
         let formula = geom.analyte(row).formula.known().expect("formula retained");
-        assert_eq!(
-            formula.basis,
-            crate::chemistry::analyte::FormulaBasis::Unspecified
-        );
+        assert_eq!(formula.basis, analyte::FormulaBasis::Unspecified);
         let serialized = serde_json::to_string(&geom.analyte(row)).unwrap();
-        let restored: crate::chemistry::analyte::Analyte =
-            serde_json::from_str(&serialized).unwrap();
+        let restored: analyte::Analyte = serde_json::from_str(&serialized).unwrap();
         assert_eq!(restored, geom.analyte(row).to_owned());
         assert!(!geom.is_decoy(row), "no origin type is not a decoy claim");
 

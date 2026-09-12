@@ -15,10 +15,7 @@ use crate::models::sequence::{
 use crate::scoring::blocks::NameSink;
 
 /// `peptide_length`, one count per canonical amino acid, `peptide_n_mods`.
-/// Sized off [`CANONICAL_AA_LETTERS`] rather than `AA_COUNT_NAMES` because the
-/// latter is a `LazyLock` (its `len()` is not const), and the two are the same
-/// 20 residues by construction.
-pub const LEN: usize = CANONICAL_AA_LETTERS.len() + 2;
+pub const LEN: usize = AA_COUNT_NAMES.len() + 2;
 
 /// The [`LEN`] nonlinear-lane (tree-only) sequence feature *values*, or all
 /// `f64::NAN` when the peptide has no parsed sequence. `counts` and
@@ -65,16 +62,15 @@ mod tests {
     };
 
     #[test]
-    fn stored_counts_match_previous_parser_for_supported_sequences() {
-        for sequence in [
-            "PEPTIDEK",
-            "_AC(UniMod:4)M(UniMod:35)K_",
-            "[UNIMOD:1]-PEP[+15.99]TIDE-[UNIMOD:2]",
-            "M[Oxidation]PEPTIDE",
-            "PEPTIDE/2",
+    fn stored_counts_match_expected_residues_and_modifications() {
+        for (sequence, residues, n_mods) in [
+            ("PEPTIDEK", "PEPTIDEK", 0),
+            ("_AC(UniMod:4)M(UniMod:35)K_", "ACMK", 2),
+            ("[UNIMOD:1]-PEP[+15.99]TIDE-[UNIMOD:2]", "PEPTIDE", 3),
+            ("M[Oxidation]PEPTIDE", "MPEPTIDE", 1),
+            ("PEPTIDE/2", "PEPTIDE", 0),
+            ("AXA", "AXA", 0),
         ] {
-            let normalized = crate::models::sequence::normalize_to_proforma(sequence);
-            let previous = crate::models::sequence::parse_sequence(&normalized).unwrap();
             let analyte = Analyte::from_sequence(sequence);
             let mut builder = TargetColumnsBuilder::<timsquery::ion::IonAnnot>::with_capabilities(
                 TargetCapabilities::default_diann(),
@@ -86,9 +82,15 @@ mod tests {
             let geom = builder.seal(DecoyPolicy::Never).unwrap();
             let values =
                 nonlinear_feature_array(geom.analyte(geom.rows().next().unwrap()).peptide.known());
-            assert_eq!(values[0], previous.residues.len() as f64, "{sequence}");
-            assert_eq!(&values[1..21], &previous.aa_counts(), "{sequence}");
-            assert_eq!(values[21], previous.mods.len() as f64, "{sequence}");
+            assert_eq!(values[0], residues.len() as f64, "{sequence}");
+            for (i, &aa) in CANONICAL_AA_LETTERS.iter().enumerate() {
+                assert_eq!(
+                    values[i + 1],
+                    residues.bytes().filter(|&r| r == aa).count() as f64
+                );
+                assert_eq!(AA_COUNT_NAMES[i], format!("aa_count_{}", aa as char));
+            }
+            assert_eq!(values[LEN - 1], n_mods as f64, "{sequence}");
         }
     }
 }

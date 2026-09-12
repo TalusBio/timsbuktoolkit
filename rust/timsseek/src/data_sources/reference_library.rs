@@ -1519,16 +1519,25 @@ mod load_tests {
     /// way an out-of-crate caller reaches it.
     #[test]
     fn one_unparsable_sequence_disables_sequence_features_library_wide() {
-        let library = ReferenceLibrary::from_sealed_arena(hand_assembled_arena(
-            crate::models::DecoyPolicy::default(),
-            &[RowSpec::target("PEPTIDEK"), RowSpec::target("GARBAGE!!!")],
-        ))
-        .expect("an mzpaf arena carrying intensities narrows");
+        for sequence in [
+            "GARBAGE!!!",
+            "PEPTK[MOD:00046]IDEK",
+            "PEPTK[XLMOD:02001]IDEK",
+            "PEPTK[RESID:AA0038]IDEK",
+            "PEPTN[Glycan:HexNAc]IDEK",
+            "PEPTN[GNO:G59626AS]IDEK",
+        ] {
+            let library = ReferenceLibrary::from_sealed_arena(hand_assembled_arena(
+                crate::models::DecoyPolicy::default(),
+                &[RowSpec::target("PEPTIDEK"), RowSpec::target(sequence)],
+            ))
+            .expect("an mzpaf arena carrying intensities narrows");
 
-        assert!(
-            !library.parsable_sequences(),
-            "one unparsable row turns the gate off for the whole library"
-        );
+            assert!(
+                !library.parsable_sequences(),
+                "one unparsable row turns the gate off for the whole library"
+            );
+        }
     }
 
     /// The ON branch, so the assertion above pins the gate's reading of the rows

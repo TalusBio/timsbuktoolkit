@@ -30,7 +30,7 @@ those reader paths, not a restriction of JSON as an encoding.
 
 Standalone `calib_dash` reads saved `calibration.json`, not a spectral library.
 
-[Analyte metadata](analyte.md) documents chemistry storage, reader mappings,
+[Analyte module documentation](../rust/timsquery/src/chemistry/analyte.rs) documents chemistry storage, reader mappings,
 library-wide sequence eligibility, and results format version 4.
 
 ## Cargo features

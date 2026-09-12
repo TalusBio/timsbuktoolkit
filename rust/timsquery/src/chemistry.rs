@@ -45,3 +45,6 @@ pub fn ontologies() -> &'static mzcore::ontology::Ontologies {
 pub mod analyte;
 mod notation;
 pub use notation::normalize_to_proforma;
+
+/// Canonical residue order shared by composition checks and sequence features.
+pub const CANONICAL_AA_LETTERS: [u8; 20] = *b"ACDEFGHIKLMNPQRSTVWY";

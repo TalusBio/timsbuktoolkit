@@ -164,6 +164,7 @@ impl<Lib: Deref<Target = TargetColumns<L>>, L: KeyLike + DecoyShift> QueryGeom f
 mod tests {
     use super::*;
     use crate::IonAnnot;
+    use crate::chemistry::analyte;
     use crate::models::capabilities::*;
     use crate::models::source_id::SourceId;
     use crate::models::target_columns::Row;
@@ -206,7 +207,7 @@ mod tests {
                 (IonAnnot::try_from("y8").unwrap(), 896.5), // ordinal 8 -> shifted
             ],
 
-            analyte: crate::chemistry::analyte::Analyte::from_sequence("PEPTIDEK").as_input(),
+            analyte: analyte::Analyte::from_sequence("PEPTIDEK").as_input(),
             ..Default::default()
         });
         c.seal(DecoyPolicy::IfMissing)
@@ -296,7 +297,7 @@ mod tests {
             mobility: 1.0,
             frags: &[(Arc::<str>::from("f"), 300.0)],
 
-            analyte: crate::chemistry::analyte::Analyte::from_sequence("PEP").as_input(),
+            analyte: analyte::Analyte::from_sequence("PEP").as_input(),
             ..Default::default()
         });
         // Sealed `IfMissing` with no shipped decoy, so the arena derives ±

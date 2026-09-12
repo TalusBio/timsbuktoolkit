@@ -18,26 +18,76 @@ pub fn parse_proforma(
         })
 }
 
-pub const CANONICAL_AA_LETTERS: [u8; 20] = *b"ACDEFGHIKLMNPQRSTVWY";
+pub use timsquery::chemistry::CANONICAL_AA_LETTERS;
 
-/// Feature-vector names for the 20-dim AA-count block, derived from
-/// [`CANONICAL_AA_LETTERS`] so the order can never drift out of sync.
-/// `AA_COUNT_NAMES[i]` is `format!("aa_count_{}", CANONICAL_AA_LETTERS[i] as char)`
-/// with a single one-time allocation leaked to `&'static str`.
-pub static AA_COUNT_NAMES: std::sync::LazyLock<[&'static str; 20]> =
-    std::sync::LazyLock::new(|| {
-        let mut out: [&'static str; 20] = [""; 20];
-        for (i, &c) in CANONICAL_AA_LETTERS.iter().enumerate() {
-            let s = format!("aa_count_{}", c as char);
-            out[i] = Box::leak(s.into_boxed_str());
+const AA_COUNT_NAME_BYTES: [[u8; 10]; 20] = {
+    let mut names = [*b"aa_count_A"; 20];
+    let mut i = 0;
+    while i < names.len() {
+        names[i][9] = CANONICAL_AA_LETTERS[i];
+        i += 1;
+    }
+    names
+};
+
+/// Compile-time feature names in canonical residue order; no allocations.
+pub const AA_COUNT_NAMES: [&str; 20] = {
+    let mut names = [""; 20];
+    let mut i = 0;
+    while i < names.len() {
+        names[i] = match std::str::from_utf8(&AA_COUNT_NAME_BYTES[i]) {
+            Ok(name) => name,
+            Err(_) => panic!("canonical residues must be ASCII"),
+        };
+        i += 1;
+    }
+    names
+};
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Monoisotopic mass of a peptide with exactly one formula.
+    fn neutral_mass(seq: &str) -> f64 {
+        use mzcore::prelude::*;
+        let pf = parse_proforma(seq).unwrap_or_else(|e| panic!("{seq:?}: {e}"));
+        let linear = pf.as_linear().expect("linear").clone();
+        let formulas = linear.formulas();
+        assert_eq!(formulas.len(), 1, "{seq:?} is not a single formula");
+        formulas[0].monoisotopic_mass().value
+    }
+
+    /// Compare against atomic masses, not mzcore output. This catches an
+    /// accession mapped to the wrong chemistry.
+    ///
+    /// These four modifications cover the library inputs used here.
+    #[test]
+    fn unimod_deltas_match_their_compositions() {
+        // (bare, modified, delta, composition)
+        let cases = [
+            ("PEPTCIDEK", "PEPTC[UNIMOD:4]IDEK", 57.021_46, "C2H3NO"),
+            ("PEPTMIDEK", "PEPTM[UNIMOD:35]IDEK", 15.994_91, "O"),
+            ("PEPTSIDEK", "PEPTS[UNIMOD:21]IDEK", 79.966_33, "HPO3"),
+            ("PEPTNIDEK", "PEPTN[UNIMOD:7]IDEK", 0.984_02, "O minus NH"),
+        ];
+        for (bare, modified, delta, composition) in cases {
+            let got = neutral_mass(modified) - neutral_mass(bare);
+            assert!(
+                (got - delta).abs() < 1e-4,
+                "{modified} minus {bare} must be {delta} ({composition}), got {got}"
+            );
         }
-        out
-    });
+    }
 
-#[cfg(test)]
-#[path = "sequence_legacy_tests.rs"]
-mod legacy;
-#[cfg(test)]
-pub(crate) use legacy::parse_sequence;
-#[cfg(test)]
-pub(crate) use timsquery::chemistry::normalize_to_proforma;
+    /// PEPTIDEK's residue sum is 909.44434 Da. Add H2O to get 927.45491 Da.
+    /// The tolerance covers the five-decimal residue masses.
+    #[test]
+    fn unmodified_peptide_mass_is_the_hand_sum() {
+        let got = neutral_mass("PEPTIDEK");
+        assert!(
+            (got - 927.454_91).abs() < 1e-4,
+            "PEPTIDEK must be 927.45491, got {got}"
+        );
+    }
+}

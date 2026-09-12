@@ -1,6 +1,62 @@
-//! Analyte information is independent of source identity and query geometry.
-//! Readers own transient input; the arena packs it and returns borrowed views.
+//! # Library analyte metadata
+//!
+//! `Row.analyte` supplies independent optional peptide and molecular-formula facts.
+//! `Row.entry_name` is a display label; `Row.id` is the external source key. Neither
+//! is interpreted as chemistry. `RowIdx` addresses storage in one owning library;
+//! it is not an external ID or a target/decoy relationship.
+//!
+//! `TargetColumns::analyte(row)` returns borrowed `AnalyteRef` properties:
+//!
+//! - `Missing`: no fact supplied.
+//! - `NotApplicable`: explicitly inapplicable; absence alone does not establish this.
+//! - `Known`: complete at that level. Known residues can have unresolved modifications.
+//! - `Unresolved`: preserved chemical annotation, optionally with partial recovery.
+//!
+//! Readers convert explicit sequence fields once. The arena packs residues and
+//! located modifications, interns definitions, and remaps them when reader shards
+//! merge. Original sequence spelling is discarded where structure is represented;
+//! unresolved chemical content remains available through the property. Names and
+//! source IDs retain their original text.
+//!
+//! | Reader | Chemistry source | Name |
+//! |---|---|---|
+//! | DIA-NN TSV/Parquet | Modified and stripped sequence fields, checked for disagreement | `transition_group_id` / `Precursor.Id`, when supplied |
+//! | DIA-NN binary | Format-defined modified-peptide-plus-charge field | Original field, unchanged |
+//! | Spectronaut / Skyline | Explicit peptide fields | No separate entry-name field mapped |
+//! | mzSpecLib | Already-parsed analyte; peptide or formula | Library spectrum name, when supplied |
+//! | Prediction sink | Explicit ProForma, independently of generated label | Same label as prediction-file output |
+//! | Target / ElutionGroupInput JSON arrays | Current schemas supply no analyte facts | Source ID remains available; no name inferred |
+//!
+//! An mzSpecLib spectrum declaring multiple analytes is rejected rather than
+//! silently selecting one. Unsupported peptide structures preserve their annotation.
+//! Molecular formulas retain their declared basis (or `Unspecified`) and signed
+//! electron counts. Peptide and formula facts can coexist: sealing rejects conflicting
+//! neutral formulas for unmodified canonical peptides. Comparison of modified or
+//! ambiguous structures and ion-basis formulas is deferred to composition support;
+//! coexistence alone does not certify chemical consistency.
+//!
+//! Search candidates carry a row and competition metadata, not copied sequences.
+//! Rescorers and the dashboard receive the owning `ReferenceLibrary`. The existing
+//! library-wide sequence gate reads stored structure: supported Unimod/mass
+//! modifications and at most 254 residues. Missing, partial or unsupported structure
+//! disables sequence features for the entire library. Global/labile/ambiguous
+//! modifications are preserved as unresolved instead of silently omitted. The isotope
+//! model still uses residues and its existing averagine fallback, not modification
+//! or declared-formula composition.
+//!
+//! Peptide deduplication compares complete structural keys plus charge and m/z,
+//! then chooses the highest score, preferring a target on a tie. Equivalent
+//! modification spellings therefore collapse. Incomparable entries remain separate;
+//! formula equality and labels do not establish chemical identity or competition.
+//!
+//! Results format version 4 resolves metadata from the library. `sequence` is nullable
+//! and canonically formatted; `entry_name`, `molecular_formula`, and `formula_basis`
+//! are nullable columns. Unformattable properties produce null. The viewer's Analyte
+//! column displays sequence or formula. `Analyte` serialization preserves property
+//! states and supports programmatic metadata round-trips; it does not change the
+//! existing geometry-only target-list JSON schemas.
 use super::{
+    CANONICAL_AA_LETTERS,
     normalize_to_proforma,
     ontologies,
 };
@@ -583,6 +639,26 @@ impl AnalyteColumns {
         self.registry.shrink_to_fit();
     }
 
+    /// Check stored sites, formulas, and comparable peptide/formula declarations.
+    /// Public builders run this when sealing:
+    ///
+    /// ```
+    /// use timsquery::chemistry::analyte::{Analyte, FormulaBasis};
+    /// use timsquery::models::{Row, TargetColumnsBuilder};
+    /// use timsquery::models::capabilities::DecoyPolicy;
+    ///
+    /// let mut analyte = Analyte::from_sequence("A");
+    /// for (formula, valid) in [
+    ///     (mzcore::molecular_formula!(C 3 H 7 N 1 O 2), true),
+    ///     (mzcore::molecular_formula!(C 2 H 6 O 1), false),
+    /// ] {
+    ///     analyte.formula = Analyte::from_formula(&formula, FormulaBasis::NeutralMolecule).formula;
+    ///     let mut builder = TargetColumnsBuilder::<timsquery::ion::IonAnnot>::with_capabilities(
+    ///         timsquery::models::TargetCapabilities::default_diann());
+    ///     builder.push_row(Row { analyte: analyte.as_input(), ..Default::default() });
+    ///     assert_eq!(builder.seal(DecoyPolicy::Never).is_ok(), valid);
+    /// }
+    /// ```
     pub fn validate(&self) -> Result<(), String> {
         for i in 0..self.rows.len() {
             let analyte = self.get(i);
@@ -670,6 +746,17 @@ impl AnalyteRef<'_> {
 
 /// Common explicit sequence grammar. Avoid ontology lookup for already numeric
 /// accessions/mass deltas; unfamiliar syntax goes through mzcore intact.
+///
+/// ```
+/// use timsquery::chemistry::analyte::Analyte;
+///
+/// let numeric = Analyte::from_sequence("PEPM[UNIMOD:35]AS[MOD:00046]");
+/// let named = Analyte::from_sequence("PEPM[U:Oxidation]AS[M:O-phospho-L-serine]");
+/// assert_eq!(numeric, named);
+/// let peptide = named.peptide.known().unwrap();
+/// assert_eq!(peptide.residues, "PEPMAS");
+/// assert_eq!(peptide.modifications.known().unwrap().len(), 2);
+/// ```
 fn parse_simple(s: &str) -> Option<Peptide> {
     fn definition(s: &str) -> Option<ModificationDefinition> {
         if let Some(id) = s.strip_prefix("UNIMOD:") {
@@ -745,7 +832,7 @@ fn unmodified_formula(peptide: PeptideRef<'_>) -> Option<mzcore::chemistry::Mole
     }
     let mut formula = mzcore::molecular_formula!(H 2 O 1);
     for residue in peptide.residues.bytes() {
-        if !b"ACDEFGHIKLMNPQRSTVWY".contains(&residue) {
+        if !CANONICAL_AA_LETTERS.contains(&residue) {
             return None;
         }
         let aa = mzcore::sequence::AminoAcid::try_from(residue).ok()?;
@@ -954,25 +1041,8 @@ mod tests {
         columns.push(analyte.as_input());
         assert!(columns.validate().unwrap_err().contains("site 3"));
     }
-
-    #[test]
-    fn comparable_neutral_formula_conflicts_are_rejected() {
-        let mut analyte = Analyte::from_sequence("A");
-        analyte.formula = Analyte::from_formula(
-            &mzcore::molecular_formula!(C 3 H 7 N 1 O 2),
-            FormulaBasis::NeutralMolecule,
-        )
-        .formula;
-        let mut columns = AnalyteColumns::default();
-        columns.push(analyte.as_input());
-        columns.validate().unwrap();
-        analyte.formula = Analyte::from_formula(
-            &mzcore::molecular_formula!(C 2 H 6 O 1),
-            FormulaBasis::NeutralMolecule,
-        )
-        .formula;
-        let mut columns = AnalyteColumns::default();
-        columns.push(analyte.as_input());
-        assert!(columns.validate().unwrap_err().contains("disagrees"));
-    }
 }
+
+#[cfg(test)]
+#[path = "analyte_parser_tests.rs"]
+mod parser_tests;
