@@ -167,7 +167,7 @@ impl FileLoader {
 /// `RefQuery` flyweights: the geometry feeds `build_extraction` + `TraceScorer`
 /// and the reference intensities + isotope envelope come from the flyweight's
 /// `ExpectedIntensity` impl, which routes the envelope through
-/// `isotope_dist_or_averagine` (averagine fallback). There is no private
+/// library-wide C/S plan (composition or mass-estimated counts). There is no private
 /// isotope model here -- the viewer shows exactly what the CLI scores.
 #[derive(Debug)]
 pub struct ElutionGroupData {
@@ -445,10 +445,10 @@ mod tests {
         TargetColumnsBuilder,
     };
     use timsquery::utils::constants::PROTON_MASS;
-    use timsseek::fragment_mass::isotope_dist_or_averagine;
+    use timsseek::fragment_mass::isotope_dist_from_mass;
 
     /// Build a one-entry `ReferenceLibrary` whose STRIPPED sequence has an
-    /// uncountable composition (`B` is not a real residue), forcing the
+    /// uncountable composition (`X` has unknown composition), forcing the
     /// averagine isotope path.
     fn uncountable_lib() -> ReferenceLibrary {
         let mut geom = TargetColumnsBuilder::with_capabilities(TargetCapabilities::default_diann());
@@ -461,7 +461,7 @@ mod tests {
                 (IonAnnot::try_from("y3").unwrap(), 300.0),
                 (IonAnnot::try_from("y5").unwrap(), 500.0),
             ],
-            analyte: timsquery::chemistry::analyte::Analyte::from_sequence("PEPBK").as_input(),
+            analyte: timsquery::chemistry::analyte::Analyte::from_sequence("PEPXK").as_input(),
             ..Default::default()
         });
         let geom = geom
@@ -476,16 +476,16 @@ mod tests {
 
     /// The envelope the viewer DISPLAYS (obtained via `get_elem`, i.e. the
     /// flyweight's `expected_precursor_envelope`) must equal what the scoring
-    /// path computes via `isotope_dist_or_averagine` -- NOT the deleted
+    /// path computes via `isotope_dist_from_mass` -- NOT the deleted
     /// `[1.0, 0.0, 0.0]` fallback.
     #[test]
-    fn displayed_envelope_matches_isotope_dist_or_averagine() {
+    fn displayed_envelope_matches_isotope_dist_from_mass() {
         let data = ElutionGroupData::new(uncountable_lib());
         let (_eg, expected) = data.get_elem(0).unwrap();
 
         let charge = 1.0_f64;
         let neutral = 600.0 * charge - charge * PROTON_MASS;
-        let (_src, env) = isotope_dist_or_averagine("PEPBK", neutral);
+        let env = isotope_dist_from_mass(neutral);
 
         // Every displayed precursor isotope equals the shared model output.
         for (iso_idx, ref_intensity) in env.iter().enumerate() {

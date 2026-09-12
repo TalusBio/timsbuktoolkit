@@ -22,7 +22,8 @@ pub enum FragmentFeatureState {
 
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub enum IsotopeStrategy {
-    /// Per-peptide: C/S countable -> composition envelope; else -> averagine.
+    /// Requested isotope bins. The scoring library resolves one C/S method
+    /// from whole-library coverage; this legacy name does not select a method.
     FromComposition { n_isotopes: u8 },
 }
 

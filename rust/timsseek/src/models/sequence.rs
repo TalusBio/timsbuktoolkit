@@ -1,9 +1,10 @@
-//! Sequence-feature column names and the isotope helper's parsing fallback.
+//! Sequence-feature column names.
 
+#[cfg(test)]
 use timsquery::chemistry::ontologies;
 
-/// Ontology-backed fallback for the existing isotope composition helper.
-/// Search sequence features read stored analyte structure instead.
+/// Test oracle for composition and modification masses.
+#[cfg(test)]
 pub fn parse_proforma(
     sequence: &str,
 ) -> Result<mzcore::sequence::Peptidoform<mzcore::sequence::Linked>, String> {

@@ -19,12 +19,11 @@ use timsquery::models::{
     TargetColumns,
 };
 use timsquery::traits::QueryGeom;
+#[cfg(test)]
 use timsquery::utils::constants::PROTON_MASS;
 
-use crate::fragment_mass::{
-    IsotopeSource,
-    isotope_dist_or_averagine,
-};
+#[cfg(test)]
+use crate::fragment_mass::isotope_dist_from_mass;
 use crate::models::DecoyMarking;
 use crate::scoring::plan;
 
@@ -177,7 +176,8 @@ impl ReferenceLibrary {
                         ),
                     });
                 }
-                let plan = plan::ScoringPlan::resolve(&geom);
+                let plan = plan::ScoringPlan::resolve(&geom)
+                    .map_err(|message| TargetReadingError::InvalidLibrary { message })?;
                 Ok(ReferenceLibrary {
                     geom,
                     frag_intens,
@@ -251,16 +251,7 @@ impl<'a> ExpectedIntensity for RefQuery<'a> {
     fn expected_precursor_envelope(&self) -> SmallVec<[(i8, f32); 3]> {
         let tgt = self.geom.row();
         let IsotopeStrategy::FromComposition { n_isotopes } = self.lib.geom.capabilities().isotopes;
-        let seq = self
-            .lib
-            .geom
-            .analyte(tgt)
-            .peptide
-            .known()
-            .map_or("", |p| p.residues);
-        let charge = self.lib.geom.charge(tgt) as f64;
-        let neutral = self.lib.geom.precursor_mz(tgt) * charge - charge * PROTON_MASS;
-        let (_src, env) = isotope_dist_or_averagine(seq, neutral);
+        let env = self.lib.plan.isotopes().envelope(tgt);
         (0..n_isotopes as usize)
             .map(|i| (i as i8, env[i]))
             .collect()
@@ -379,7 +370,7 @@ fn retired_format(path: &Path) -> Option<&'static str> {
 /// Loading: the one path from a path on disk to a scored-against arena.
 impl ReferenceLibrary {
     /// Narrow a sealed [`TargetTable`] and finish it: decoy reporting, the
-    /// operation report, and the averagine tally.
+    /// operation and isotope-method report.
     ///
     /// The one definition of a finished library. `TargetTable`'s variants and
     /// fields are public, so a caller outside timsseek can assemble an arena
@@ -481,35 +472,11 @@ impl ReferenceLibrary {
         }
     }
 
-    /// Report independently resolved operations and the existing isotope fallback tally.
+    /// Report the same library-wide decisions serialized with result metadata.
     fn report_scoring_plan(&self) {
-        let n_rows = self.geom.n_rows();
-        let mut n_averagine_fallback = 0usize;
-        for tgt in self.geom.rows() {
-            let stripped = self
-                .geom
-                .analyte(tgt)
-                .peptide
-                .known()
-                .map_or("", |p| p.residues);
-            let charge = self.geom.charge(tgt) as f64;
-            let neutral_mass = self.geom.precursor_mz(tgt) * charge - charge * PROTON_MASS;
-            let (isotope_src, _envelope) = isotope_dist_or_averagine(stripped, neutral_mass);
-            if isotope_src == IsotopeSource::Averagine {
-                n_averagine_fallback += 1;
-            }
-        }
-
         tracing::info!("{}", self.plan.summary());
         for operation in self.plan.operations() {
             tracing::info!("{operation}");
-        }
-        if n_averagine_fallback > 0 {
-            tracing::warn!(
-                "{}/{} library entries used averagine isotope fallback",
-                n_averagine_fallback,
-                n_rows
-            );
         }
     }
 
@@ -723,7 +690,7 @@ mod tests {
         assert!(matches!(peptide.modifications, PropertyRef::Missing));
         assert!(peptide.sequence().is_none());
         assert!(!lib.all_sequence_counts_enabled());
-        let expected = isotope_dist_or_averagine("PEPTIDE", 0.0).1;
+        let expected = isotope_dist_from_mass(500.0 * 2.0 - 2.0 * PROTON_MASS);
         for query in lib.iter() {
             for (i, intensity) in query.expected_precursor_envelope() {
                 assert_eq!(intensity, expected[i as usize]);

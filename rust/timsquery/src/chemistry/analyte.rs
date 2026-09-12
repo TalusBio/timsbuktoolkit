@@ -31,9 +31,10 @@
 //! silently selecting one. Unsupported peptide structures preserve their annotation.
 //! Molecular formulas retain their declared basis (or `Unspecified`) and signed
 //! electron counts. Peptide and formula facts can coexist: sealing rejects conflicting
-//! neutral formulas for unmodified canonical peptides. Comparison of modified or
-//! ambiguous structures and ion-basis formulas is deferred to composition support;
-//! coexistence alone does not certify chemical consistency.
+//! neutral formulas for unmodified canonical peptides. Scoring finalization also
+//! checks comparable neutral-formula C/S counts against modified peptides. Full
+//! formula comparison for modified/ambiguous structures and ion-basis formulas
+//! remains unsupported; coexistence alone does not certify chemical consistency.
 //!
 //! Search candidates carry a row and competition metadata, not copied sequences.
 //! Rescorers and the dashboard receive the owning `ReferenceLibrary`. Its library-wide
@@ -42,8 +43,12 @@
 //! one row lacking residues disables residue features for all targets and decoys.
 //! Disabled operations have no ML projections. Global/labile/ambiguous modifications
 //! remain unresolved where their complete set cannot be represented. The isotope
-//! model still uses residues and its existing averagine fallback, not modification
-//! or declared-formula composition.
+//! model in timsseek includes modification C/S deltas or explicitly based formulas.
+//! It selects composition-derived counts only when every stored target and decoy
+//! supports them; otherwise all entries use mass-estimated C/S. Both paths retain
+//! the same approximate C/S calculator. Synthetic variants reuse parent envelopes.
+//! Labelled C/S isotopes and unspecified formula bases are unresolved for this model;
+//! other elements do not contribute. This is not a full elemental isotope model.
 //!
 //! Peptide deduplication compares complete structural keys plus charge and m/z,
 //! then chooses the highest score, preferring a target on a tie. Equivalent

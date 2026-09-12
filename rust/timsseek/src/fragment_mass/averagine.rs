@@ -1,12 +1,4 @@
-use super::elution_group_converter::count_carbon_sulphur_in_sequence;
 use crate::isotopes::peptide_isotopes;
-
-/// Which model produced an isotope envelope, for load-time reporting.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum IsotopeSource {
-    Composition,
-    Averagine,
-}
 
 // Senko averagine residue (avg amino acid): C4.9384 H7.7583 N1.3577 O1.4773 S0.0417,
 // average residue mass ~111.1054 Da. Per-Dalton element counts:
@@ -22,24 +14,10 @@ pub fn averagine_cs_from_mass(neutral_mass: f64) -> (u16, u16) {
 
 /// Averagine isotope envelope: relative intensity, tallest peak == 1.0.
 ///
-/// Matches `peptide_isotopes`'s own normalization (max peak, not sum), which
-/// is what the `Composition` branch of `isotope_dist_or_averagine` returns
-/// verbatim. Both isotope sources must share this scale so they're
-/// interchangeable at scoring time.
+/// Uses the same C/S calculator and normalization as composition-derived counts.
 pub fn isotope_dist_from_mass(neutral_mass: f64) -> [f32; 3] {
     let (c, s) = averagine_cs_from_mass(neutral_mass);
     peptide_isotopes(c, s)
-}
-
-/// Composition envelope when the sequence is countable, else averagine from mass.
-pub fn isotope_dist_or_averagine(seq: &str, neutral_mass: f64) -> (IsotopeSource, [f32; 3]) {
-    match count_carbon_sulphur_in_sequence(seq) {
-        Ok((c, s)) => (IsotopeSource::Composition, peptide_isotopes(c, s)),
-        Err(_) => (
-            IsotopeSource::Averagine,
-            isotope_dist_from_mass(neutral_mass),
-        ),
-    }
 }
 
 #[cfg(test)]
@@ -64,23 +42,5 @@ mod tests {
             env.iter().all(|&v| (0.0..=1.0).contains(&v)),
             "env {env:?} has a value outside [0, 1]"
         );
-    }
-
-    #[test]
-    fn or_averagine_uses_composition_for_standard_peptide() {
-        let (src, _env) = isotope_dist_or_averagine("PEPTIDEK", 900.4);
-        assert_eq!(src, IsotopeSource::Composition);
-    }
-
-    #[test]
-    fn or_averagine_falls_back_on_nonstandard() {
-        // mzcore treats `B`, also called Asx, as ambiguous between Asp and Asn.
-        // That gives the formula path multiple results and makes it return an
-        // error. `X` does not exercise this path because mzcore assigns it a
-        // zero-C/S formula.
-        let (src, env) = isotope_dist_or_averagine("PEPBK", 600.0);
-        assert_eq!(src, IsotopeSource::Averagine);
-        let max = env.iter().copied().fold(f32::MIN, f32::max);
-        assert!((max - 1.0).abs() < 1e-4, "env {env:?} max is {max}");
     }
 }
