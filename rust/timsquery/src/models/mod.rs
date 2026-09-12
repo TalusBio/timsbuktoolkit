@@ -37,9 +37,9 @@ pub use target_columns::test_handles;
 pub use target_columns::{
     FlatIdx,
     GroupCode,
-    ModDefinition,
     Row,
     RowIdx,
+    TargetBuildError,
     TargetColumns,
     TargetColumnsBuilder,
 };

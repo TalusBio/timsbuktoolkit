@@ -34,6 +34,7 @@ use crate::models::capabilities::{
 use crate::models::{
     Row,
     SourceIdError,
+    TargetBuildError,
     TargetCapabilities,
     TargetColumns,
     TargetColumnsBuilder,
@@ -54,6 +55,7 @@ pub enum TargetReadingError {
     UnableToParseElutionGroups,
     /// Caller-supplied ids that cannot serve as a result key.
     SourceId(SourceIdError),
+    Build(TargetBuildError),
     /// A `.speclib` whose version is newer (more negative) than this reader
     /// supports.
     UnsupportedSpeclibVersion(i32),
@@ -65,6 +67,11 @@ pub enum TargetReadingError {
 impl From<serde_json::Error> for TargetReadingError {
     fn from(err: serde_json::Error) -> Self {
         TargetReadingError::SerdeJsonError(err)
+    }
+}
+impl From<TargetBuildError> for TargetReadingError {
+    fn from(err: TargetBuildError) -> Self {
+        Self::Build(err)
     }
 }
 impl From<SourceIdError> for TargetReadingError {
@@ -227,7 +234,7 @@ impl TargetTable {
                 let intensity = lookup.get(label).ok_or_else(|| {
                     TargetReadingError::SpeclibParse(format!(
                         "fragment {label:?} of precursor {:?} has no reference intensity",
-                        row.modified_peptide
+                        eg.id()
                     ))
                 })?;
                 frag_intens.push(*intensity);
@@ -238,8 +245,8 @@ impl TargetTable {
                 rt_seconds: eg.rt_seconds(),
                 mobility: eg.mobility_ook0(),
                 frags: &frags,
-                seq_strip: &row.stripped_peptide,
-                seq_mod: &row.modified_peptide,
+                analyte: row.analyte.as_input(),
+                entry_name: row.entry_name.as_deref(),
                 is_decoy: row.is_decoy,
                 id: Some(eg.id().to_owned_id()),
                 ..Default::default()

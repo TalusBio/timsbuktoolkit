@@ -4,7 +4,7 @@
 
 use timsseek_macros::ScoreBlock;
 
-use crate::scoring::apex_finding::PeptideMetadata;
+use crate::scoring::apex_finding::CandidateMetadata;
 
 /// Stage: finalize (reads apex retention time).
 #[derive(Debug, Clone, Copy, ::serde::Serialize, ScoreBlock)]
@@ -18,7 +18,7 @@ pub struct Rt {
 }
 
 impl Rt {
-    pub fn compute(metadata: &PeptideMetadata, obs_rt_seconds: f32) -> Self {
+    pub fn compute(metadata: &CandidateMetadata, obs_rt_seconds: f32) -> Self {
         Self {
             library_rt: metadata.library_rt,
             calibrated_rt_seconds: metadata.calibrated_rt_seconds,

@@ -45,12 +45,16 @@ pub enum RescoreModel {
 }
 
 /// Dispatch to the rescorer named by `model`.
-pub fn rescore_with(model: RescoreModel, data: Vec<CompetedCandidate>) -> RescoreResult {
+pub fn rescore_with(
+    model: RescoreModel,
+    data: Vec<CompetedCandidate>,
+    library: &crate::data_sources::reference_library::ReferenceLibrary,
+) -> RescoreResult {
     match model {
-        RescoreModel::Gbm => rescore(data),
-        RescoreModel::Lda => rescore_lda(data),
-        RescoreModel::Hybrid => rescore_hybrid(data),
-        RescoreModel::Mlp => rescore_mlp(data),
+        RescoreModel::Gbm => rescore(data, library),
+        RescoreModel::Lda => rescore_lda(data, library),
+        RescoreModel::Hybrid => rescore_hybrid(data, library),
+        RescoreModel::Mlp => rescore_mlp(data, library),
     }
 }
 

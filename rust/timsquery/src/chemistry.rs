@@ -27,7 +27,7 @@ use std::sync::OnceLock;
 /// mislead.
 ///
 /// Lazily built, and which libraries pay for it differs by format. A DIA-NN
-/// library whose sequences all match timsseek's fast byte-walk parser never
+/// library whose sequences all match the shared explicit-sequence parser never
 /// reaches here. An mzSpecLib library always does: mzannotate takes
 /// `&Ontologies` to parse an analyte at all.
 pub fn ontologies() -> &'static mzcore::ontology::Ontologies {
@@ -41,3 +41,10 @@ pub fn ontologies() -> &'static mzcore::ontology::Ontologies {
         ontologies
     })
 }
+
+pub mod analyte;
+mod notation;
+pub use notation::normalize_to_proforma;
+
+/// Canonical residue order shared by composition checks and sequence features.
+pub const CANONICAL_AA_LETTERS: [u8; 20] = *b"ACDEFGHIKLMNPQRSTVWY";

@@ -48,6 +48,7 @@ impl std::error::Error for SpectronautReadingError {}
 
 #[derive(Debug)]
 pub enum SpectronautPrecursorParsingError {
+    Chemistry(String),
     /// Ion parsing failed at this fragment row.
     IonParsing {
         row: usize,
@@ -65,6 +66,7 @@ impl std::fmt::Display for SpectronautPrecursorParsingError {
             Self::IonOverCapacity => write!(f, "fragment ordinal or charge out of range"),
             Self::EmptyIonString => write!(f, "empty FragmentType"),
             Self::Other => write!(f, "malformed precursor group"),
+            Self::Chemistry(e) => e.fmt(f),
         }
     }
 }
@@ -346,8 +348,12 @@ fn parse_precursor_group(
     let is_decoy = false;
 
     let precursor_extras = PrecursorExtras {
-        modified_peptide: first_row.modified_peptide.clone(),
-        stripped_peptide: first_row.stripped_peptide.clone(),
+        analyte: crate::chemistry::analyte::Analyte::from_sequence_fields(
+            &first_row.modified_peptide,
+            &first_row.stripped_peptide,
+        )
+        .map_err(SpectronautPrecursorParsingError::Chemistry)?,
+        entry_name: None,
         protein_id: first_row.protein_groups.clone(),
         is_decoy,
         relative_intensities,
@@ -493,7 +499,10 @@ mod tests {
         let (eg, extras) = &elution_groups[0];
 
         // Verify that the extras are populated correctly
-        assert_eq!(extras.stripped_peptide, "KTVTAMDVVYALKR");
+        assert_eq!(
+            extras.analyte.peptide.known().unwrap().residues,
+            "KTVTAMDVVYALKR"
+        );
         assert!(
             !extras.is_decoy,
             "Spectronaut libraries should be target-only"
@@ -531,8 +540,11 @@ mod tests {
             assert!(!extras.is_decoy);
 
             // Should have non-empty peptide sequences
-            assert!(!extras.modified_peptide.is_empty());
-            assert!(!extras.stripped_peptide.is_empty());
+            assert!(!extras.analyte.peptide.known().unwrap().residues.is_empty());
+            assert!(!matches!(
+                extras.analyte.peptide.known().unwrap().modifications,
+                crate::chemistry::analyte::Property::Missing
+            ));
 
             // Should have protein ID
             assert!(!extras.protein_id.is_empty());

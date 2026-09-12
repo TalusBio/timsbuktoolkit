@@ -49,6 +49,7 @@ impl std::error::Error for SkylineReadingError {}
 
 #[derive(Debug)]
 pub enum SkylinePrecursorParsingError {
+    Chemistry(String),
     /// Ion parsing failed at this fragment row.
     IonParsing {
         row: usize,
@@ -64,6 +65,7 @@ impl std::fmt::Display for SkylinePrecursorParsingError {
             Self::IonParsing { row, source } => write!(f, "fragment row {}: {}", row, source),
             Self::IonOverCapacity => write!(f, "fragment ordinal or charge out of range"),
             Self::Other => write!(f, "malformed precursor group"),
+            Self::Chemistry(e) => e.fmt(f),
         }
     }
 }
@@ -370,8 +372,12 @@ fn parse_precursor_group(
     let stripped_peptide = strip_modifications(&modified_peptide);
 
     let precursor_extras = PrecursorExtras {
-        modified_peptide,
-        stripped_peptide,
+        analyte: crate::chemistry::analyte::Analyte::from_sequence_fields(
+            &modified_peptide,
+            &stripped_peptide,
+        )
+        .map_err(SkylinePrecursorParsingError::Chemistry)?,
+        entry_name: None,
         protein_id: first_row.protein_name.clone(),
         is_decoy,
         relative_intensities,
@@ -459,7 +465,17 @@ mod tests {
         for (eg, extras) in &elution_groups {
             assert_eq!(extras.protein_id, "PRTC");
             assert!(!extras.is_decoy);
-            assert_eq!(extras.modified_peptide, extras.stripped_peptide);
+            assert!(
+                extras
+                    .analyte
+                    .peptide
+                    .known()
+                    .unwrap()
+                    .modifications
+                    .known()
+                    .unwrap()
+                    .is_empty()
+            );
             assert!(
                 eg.fragment_count() > 0,
                 "Each precursor should have fragments"
@@ -479,7 +495,7 @@ mod tests {
         // SSAAPPPPPR has 3 precursor rows + 4 y fragments in the fixture
         let ssaa = elution_groups
             .iter()
-            .find(|(_, extras)| extras.stripped_peptide == "SSAAPPPPPR")
+            .find(|(_, extras)| extras.analyte.peptide.known().unwrap().residues == "SSAAPPPPPR")
             .expect("SSAAPPPPPR should be present");
         assert_eq!(
             ssaa.0.fragment_count(),

@@ -21,6 +21,7 @@ use super::{
     N_RESCORE_FOLDS,
     TargetDecoy,
 };
+use crate::data_sources::reference_library::ReferenceLibrary;
 use crate::scoring::blocks::derived::Derived;
 use crate::scoring::blocks::result_meta::ResultMeta;
 use crate::scoring::blocks::{
@@ -371,7 +372,7 @@ fn ensure_tree_splits(
     feature = "instrumentation",
     tracing::instrument(skip_all, level = "trace")
 )]
-pub fn rescore(mut data: Vec<CompetedCandidate>) -> RescoreResult {
+pub fn rescore(mut data: Vec<CompetedCandidate>, library: &ReferenceLibrary) -> RescoreResult {
     let config = GBMConfig::default();
 
     canonicalize_and_shuffle(&mut data);
@@ -381,7 +382,7 @@ pub fn rescore(mut data: Vec<CompetedCandidate>) -> RescoreResult {
     // load-bearing.
     let names = all_feature_name_set();
     debug_assert_eq!(names.len(), ALL_NCOLS);
-    let feat = build_all_matrix(competed_rows(&data));
+    let feat = build_all_matrix(library, competed_rows(&data));
     let responses: Vec<f64> = data.iter().map(|c| c.get_y()).collect();
     let precomputed = PrecomputedFeatures::from_row_major(feat, ALL_NCOLS, responses);
 
@@ -417,7 +418,7 @@ pub fn rescore(mut data: Vec<CompetedCandidate>) -> RescoreResult {
 /// Selected via the `rescore_model` config field / `--rescore-model` CLI flag
 /// ([`crate::ml::RescoreModel::Lda`]).
 /// See `ml::lda` for the fit details.
-pub fn rescore_lda(mut data: Vec<CompetedCandidate>) -> RescoreResult {
+pub fn rescore_lda(mut data: Vec<CompetedCandidate>, _library: &ReferenceLibrary) -> RescoreResult {
     // Canonical sort + seeded shuffle -- the same helper, key and seed as every
     // other rescorer.
     canonicalize_and_shuffle(&mut data);
@@ -436,7 +437,7 @@ pub fn rescore_lda(mut data: Vec<CompetedCandidate>) -> RescoreResult {
         &data,
         names.clone(),
         N_RESCORE_FOLDS as usize,
-        write_competed_linear_row,
+        &write_competed_linear_row,
     );
 
     let cf = crossfit_lda(&dataset)?;
@@ -462,7 +463,7 @@ fn hybrid_linear_dataset(data: &[CompetedCandidate]) -> StreamingDataset<'_, Com
         data,
         linear_feature_name_set(),
         N_RESCORE_FOLDS as usize,
-        write_competed_linear_row,
+        &write_competed_linear_row,
     )
 }
 
@@ -475,6 +476,7 @@ fn hybrid_linear_dataset(data: &[CompetedCandidate]) -> StreamingDataset<'_, Com
 /// `data` must be post-[`canonicalize_and_shuffle`], and `score` / `responses`
 /// must be in that same row order.
 fn hybrid_frame(
+    library: &ReferenceLibrary,
     data: &[CompetedCandidate],
     responses: Vec<f64>,
     score_name: &str,
@@ -492,7 +494,7 @@ fn hybrid_frame(
     assert_eq!(responses.len(), nrows, "responses must be one per row");
 
     let ncols = NONLINEAR_NCOLS + 1;
-    let nl = build_nonlinear_matrix(data);
+    let nl = build_nonlinear_matrix(library, data);
     let mut feat = Vec::with_capacity(nrows * ncols);
     for (row, s) in nl.chunks_exact(NONLINEAR_NCOLS).zip(score) {
         feat.extend_from_slice(row);
@@ -518,7 +520,10 @@ fn hybrid_frame(
     feature = "instrumentation",
     tracing::instrument(skip_all, level = "trace")
 )]
-pub fn rescore_hybrid(mut data: Vec<CompetedCandidate>) -> RescoreResult {
+pub fn rescore_hybrid(
+    mut data: Vec<CompetedCandidate>,
+    library: &ReferenceLibrary,
+) -> RescoreResult {
     let config = GBMConfig::default();
 
     // Canonical sort + seeded shuffle -- IDENTICAL to `rescore` (same helper,
@@ -534,7 +539,7 @@ pub fn rescore_hybrid(mut data: Vec<CompetedCandidate>) -> RescoreResult {
 
     let lda_score = crossfit::<_, LdaModel>(&lin_dataset, &LdaConfig::default(), "LDA")?.scores;
 
-    let (precomputed, names) = hybrid_frame(&data, responses, "lda_score", lda_score);
+    let (precomputed, names) = hybrid_frame(library, &data, responses, "lda_score", lda_score);
 
     let mut scorer =
         CrossValidatedScorer::<CompetedCandidate, GbmFoldModel>::new_from_shuffled_with_precomputed(
@@ -559,7 +564,11 @@ pub fn rescore_hybrid(mut data: Vec<CompetedCandidate>) -> RescoreResult {
 /// [`MlpConfig::default`] without tuning the production default for test runtime.
 /// Fold assignment and per-fold RNGs are deterministic after
 /// [`canonicalize_and_shuffle`]. A failed fold returns [`RescoreError`].
-fn rescore_mlp_with(mut data: Vec<CompetedCandidate>, config: MlpConfig) -> RescoreResult {
+fn rescore_mlp_with(
+    mut data: Vec<CompetedCandidate>,
+    config: MlpConfig,
+    library: &ReferenceLibrary,
+) -> RescoreResult {
     canonicalize_and_shuffle(&mut data);
 
     // Fold assignment remains positional after this shuffle. Feature values are
@@ -569,13 +578,16 @@ fn rescore_mlp_with(mut data: Vec<CompetedCandidate>, config: MlpConfig) -> Resc
     let ncols = ALL_NCOLS;
     debug_assert_eq!(names.len(), ncols);
 
+    let write_row = |candidate: &CompetedCandidate, out: &mut [f64]| {
+        write_competed_all_row(library, candidate, out)
+    };
     let mut scorer =
         CrossValidatedScorer::<CompetedCandidate, MlpFoldModel>::new_from_shuffled_streaming(
             N_RESCORE_FOLDS,
             data,
             config,
             names,
-            write_competed_all_row,
+            &write_row,
         );
     scorer.fit_parallel().map_err(|e| RescoreError::Model {
         model: "MLP",
@@ -594,8 +606,8 @@ fn rescore_mlp_with(mut data: Vec<CompetedCandidate>, config: MlpConfig) -> Resc
 /// See `rescore_mlp_with` for the cross-fit and determinism contracts.
 ///
 /// Runtime and sensitivity comparisons are not constant across candidate counts.
-pub fn rescore_mlp(data: Vec<CompetedCandidate>) -> RescoreResult {
-    rescore_mlp_with(data, MlpConfig::default())
+pub fn rescore_mlp(data: Vec<CompetedCandidate>, library: &ReferenceLibrary) -> RescoreResult {
+    rescore_mlp_with(data, MlpConfig::default(), library)
 }
 
 // ---------------------------------------------------------------------------
@@ -682,6 +694,7 @@ fn project_linear_row(
 
 /// Project one row's nonlinear values into a streaming or retained sink.
 fn project_nonlinear_row(
+    library: &ReferenceLibrary,
     scoring: &ScoringFields,
     meta: &ResultMeta,
     derived: &Derived,
@@ -691,21 +704,34 @@ fn project_nonlinear_row(
     out.push(&meta.nonlinear_feature_array());
     out.push(&derived.nonlinear_feature_array());
     out.push(&sequence_counts::nonlinear_feature_array(
-        &scoring.identity.peptide,
+        library
+            .parsable_sequences()
+            .then(|| {
+                library
+                    .geometry()
+                    .analyte(scoring.identity.row)
+                    .peptide
+                    .known()
+            })
+            .flatten(),
     ));
 }
 
 /// Write one competed candidate's all-lane row into caller-owned scratch.
 /// This is the MLP boundary: raw `f64` values live for one row only and are
 /// transformed into a reusable `f32` batch buffer by the consumer.
-fn write_competed_all_row(candidate: &CompetedCandidate, out: &mut [f64]) {
+fn write_competed_all_row(
+    library: &ReferenceLibrary,
+    candidate: &CompetedCandidate,
+    out: &mut [f64],
+) {
     assert_eq!(out.len(), ALL_NCOLS);
     let scoring = &candidate.scoring;
     let meta = candidate.result_meta();
     let derived = Derived::compute(scoring);
     let mut sink = SliceSink::new(out);
     project_linear_row(scoring, &meta, &derived, &mut sink);
-    project_nonlinear_row(scoring, &meta, &derived, &mut sink);
+    project_nonlinear_row(library, scoring, &meta, &derived, &mut sink);
     sink.finish();
 }
 
@@ -732,11 +758,17 @@ fn build_linear_matrix(data: &[CompetedCandidate]) -> Vec<f64> {
 }
 
 /// The NONLINEAR-lane matrix for `data`, `NONLINEAR_NCOLS` wide.
-fn build_nonlinear_matrix(data: &[CompetedCandidate]) -> Vec<f64> {
+fn build_nonlinear_matrix(library: &ReferenceLibrary, data: &[CompetedCandidate]) -> Vec<f64> {
     let mut out = Vec::with_capacity(data.len() * NONLINEAR_NCOLS);
     for c in data {
         let meta = c.result_meta();
-        project_nonlinear_row(&c.scoring, &meta, &Derived::compute(&c.scoring), &mut out);
+        project_nonlinear_row(
+            library,
+            &c.scoring,
+            &meta,
+            &Derived::compute(&c.scoring),
+            &mut out,
+        );
     }
     out
 }
@@ -747,13 +779,14 @@ fn build_nonlinear_matrix(data: &[CompetedCandidate]) -> Vec<f64> {
 /// Each row is projected once, with its linear features followed by its
 /// nonlinear features.
 fn build_all_matrix<'a>(
+    library: &ReferenceLibrary,
     rows: impl ExactSizeIterator<Item = (&'a ScoringFields, ResultMeta)>,
 ) -> Vec<f64> {
     let mut out = Vec::with_capacity(rows.len() * ALL_NCOLS);
     for (s, meta) in rows {
         let derived = Derived::compute(s);
         project_linear_row(s, &meta, &derived, &mut out);
-        project_nonlinear_row(s, &meta, &derived, &mut out);
+        project_nonlinear_row(library, s, &meta, &derived, &mut out);
     }
     out
 }
@@ -769,9 +802,12 @@ fn competed_rows(
 /// entry point.
 ///
 /// Row-major: value `j` of row `i` is at `matrix[i * names.len() + j]`.
-pub fn feature_frame(data: &[FinalResult]) -> (Vec<Arc<str>>, Vec<f64>) {
+pub fn feature_frame(
+    library: &ReferenceLibrary,
+    data: &[FinalResult],
+) -> (Vec<Arc<str>>, Vec<f64>) {
     let rows = data.iter().map(|r| (&r.scoring, r.result_meta()));
-    (all_feature_name_set(), build_all_matrix(rows))
+    (all_feature_name_set(), build_all_matrix(library, rows))
 }
 
 /// LINEAR-lane feature names (LDA), in `project_linear_row`'s order.
@@ -947,20 +983,46 @@ mod tests {
 
 #[cfg(test)]
 mod feature_tests {
+    fn library_with_sequence(sequence: &str) -> ReferenceLibrary {
+        use timsquery::models::{
+            Row,
+            TargetColumnsBuilder,
+        };
+        use timsquery::serde::TargetTable;
+        let mut builder = TargetColumnsBuilder::with_capabilities(
+            timsquery::models::TargetCapabilities::default_diann(),
+        );
+        let analyte = timsquery::chemistry::analyte::Analyte::from_sequence(sequence);
+        let frags = [(timsquery::ion::IonAnnot::try_from("y1").unwrap(), 300.0)];
+        for _ in 0..1024 {
+            builder.push_row(Row {
+                analyte: analyte.as_input(),
+                charge: 2,
+                precursor_mz: 500.0,
+                frags: &frags,
+                ..Default::default()
+            });
+        }
+        ReferenceLibrary::from_sealed_arena(TargetTable::Mzpaf {
+            geom: builder.seal(Default::default()).unwrap(),
+            frag_intens: Some(vec![1.0; 1024]),
+        })
+        .unwrap()
+    }
+    fn library() -> &'static ReferenceLibrary {
+        static LIBRARY: std::sync::LazyLock<ReferenceLibrary> =
+            std::sync::LazyLock::new(|| library_with_sequence("PEPTIDEK"));
+        &LIBRARY
+    }
+
     use super::*;
     use crate::ml::lda::DEFAULT_SHRINKAGE;
-    use crate::models::DecoyMarking;
-    use crate::models::sequence::Peptide;
     use crate::scoring::results::{
         CompetedCandidate,
         ScoringFields,
     };
     use std::sync::Arc;
     use timsquery::models::test_handles;
-
-    fn base_scoring_fields(peptide: Peptide) -> ScoringFields {
-        ScoringFields::sample(peptide)
-    }
 
     /// Pairs each candidate with the score it got, sorted, so two runs are
     /// comparable regardless of output order. Keyed on stable source id because
@@ -981,16 +1043,14 @@ mod feature_tests {
     }
 
     /// A target candidate over `PEPTIDEK` -- 8 residues, no mods. With
-    /// `sequence_features` set the sequence lanes carry those counts; without it
-    /// they stay NaN, which is the only difference between the two cases.
-    fn sample_competed_candidate(sequence_features: bool) -> CompetedCandidate {
-        let peptide = Peptide {
-            raw: Arc::from("PEPTIDEK"),
-            decoy: DecoyMarking::Target,
-            sequence_features,
-        };
+    /// library context supplying supported structure, the sequence lane reads its counts.
+    fn sample_competed_candidate() -> CompetedCandidate {
         CompetedCandidate {
-            scoring: base_scoring_fields(peptide),
+            scoring: {
+                let mut s = ScoringFields::sample_default();
+                s.identity.row = test_handles::row(0);
+                s
+            },
             delta_group_ln1p_diff: 1.0,
             delta_group_ln1p_ratio: 0.5,
             discriminant_score: 0.0,
@@ -1011,17 +1071,21 @@ mod feature_tests {
     /// -- the width being a compile-time const is what makes that structural.
     #[test]
     fn lane_matrix_widths_match_name_sets() {
-        for data in [
-            vec![sample_competed_candidate(true)],
-            vec![sample_competed_candidate(false)],
-        ] {
+        for context in [library_with_sequence("PEPTIDEK"), library_with_sequence("")] {
+            let data = vec![sample_competed_candidate()];
             assert_eq!(linear_feature_name_set().len(), LINEAR_NCOLS);
             assert_eq!(nonlinear_feature_name_set().len(), NONLINEAR_NCOLS);
             assert_eq!(all_feature_name_set().len(), ALL_NCOLS);
 
             assert_eq!(build_linear_matrix(&data).len(), LINEAR_NCOLS);
-            assert_eq!(build_nonlinear_matrix(&data).len(), NONLINEAR_NCOLS);
-            assert_eq!(build_all_matrix(competed_rows(&data)).len(), ALL_NCOLS);
+            assert_eq!(
+                build_nonlinear_matrix(&context, &data).len(),
+                NONLINEAR_NCOLS
+            );
+            assert_eq!(
+                build_all_matrix(&context, competed_rows(&data)).len(),
+                ALL_NCOLS
+            );
         }
     }
 
@@ -1030,13 +1094,10 @@ mod feature_tests {
     /// relative to the two single-lane builds.
     #[test]
     fn all_matrix_is_linear_then_nonlinear_per_row() {
-        let data = vec![
-            sample_competed_candidate(true),
-            sample_competed_candidate(false),
-        ];
+        let data = vec![sample_competed_candidate(), sample_competed_candidate()];
         let lin = build_linear_matrix(&data);
-        let nl = build_nonlinear_matrix(&data);
-        let all = build_all_matrix(competed_rows(&data));
+        let nl = build_nonlinear_matrix(library(), &data);
+        let all = build_all_matrix(library(), competed_rows(&data));
 
         let bits = |v: &[f64]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
         for i in 0..data.len() {
@@ -1049,7 +1110,7 @@ mod feature_tests {
                 "the matrix-free LDA row writer must preserve the canonical linear projection"
             );
             let mut streamed = vec![0.0; ALL_NCOLS];
-            write_competed_all_row(&data[i], &mut streamed);
+            write_competed_all_row(library(), &data[i], &mut streamed);
             assert_eq!(
                 bits(row),
                 bits(&streamed),
@@ -1074,14 +1135,15 @@ mod feature_tests {
         assert_eq!(&*names[seq_start], "peptide_length");
         assert_eq!(&*names[NONLINEAR_NCOLS - 1], "peptide_n_mods");
 
-        let unparsed = build_nonlinear_matrix(&[sample_competed_candidate(false)]);
+        let unparsed =
+            build_nonlinear_matrix(&library_with_sequence(""), &[sample_competed_candidate()]);
         assert!(
             unparsed[seq_start..].iter().all(|v| v.is_nan()),
             "unparsed sequence features must all be NaN: {:?}",
             &unparsed[seq_start..]
         );
 
-        let parsed = build_nonlinear_matrix(&[sample_competed_candidate(true)]);
+        let parsed = build_nonlinear_matrix(library(), &[sample_competed_candidate()]);
         // PEPTIDEK: 8 residues, no mods.
         assert_eq!(parsed[seq_start], 8.0);
         assert_eq!(parsed[NONLINEAR_NCOLS - 1], 0.0);
@@ -1109,7 +1171,7 @@ mod feature_tests {
     fn synthetic_competed(n: u32) -> Vec<CompetedCandidate> {
         (0..n)
             .map(|i| {
-                let mut c = sample_competed_candidate(true);
+                let mut c = sample_competed_candidate();
                 c.scoring.identity.row = test_handles::row(i);
                 c.scoring.identity.source_id = timsquery::models::OwnedSourceId::Numeric(i as u64);
                 let is_target = i % 2 == 0;
@@ -1131,7 +1193,7 @@ mod feature_tests {
         synthetic_competed(n)
             .into_iter()
             .map(|mut c| {
-                let sample = sample_competed_candidate(true);
+                let sample = sample_competed_candidate();
                 c.delta_group_ln1p_diff = sample.delta_group_ln1p_diff;
                 c.delta_group_ln1p_ratio = sample.delta_group_ln1p_ratio;
                 c
@@ -1209,8 +1271,8 @@ mod feature_tests {
     #[test]
     fn rescore_lda_is_cross_fit_and_deterministic() {
         let n = 90;
-        let (out_a, stats_a) = rescore_lda(synthetic_competed(n)).unwrap();
-        let (out_b, _stats_b) = rescore_lda(synthetic_competed(n)).unwrap();
+        let (out_a, stats_a) = rescore_lda(synthetic_competed(n), library()).unwrap();
+        let (out_b, _stats_b) = rescore_lda(synthetic_competed(n), library()).unwrap();
 
         assert_eq!(out_a.len(), n as usize);
 
@@ -1241,7 +1303,7 @@ mod feature_tests {
 
     #[test]
     fn lda_sidecar_reports_every_linear_feature_including_zero_weights() {
-        let (_out, stats) = rescore_lda(synthetic_competed(90)).unwrap();
+        let (_out, stats) = rescore_lda(synthetic_competed(90), library()).unwrap();
         assert_eq!(stats.len(), N_RESCORE_FOLDS as usize);
 
         for fs in &stats {
@@ -1412,7 +1474,7 @@ mod feature_tests {
         let n = 90;
 
         for seed in [7u64, 13, 42, 1234] {
-            let run = || rescore_mlp_with(synthetic_competed(n), mlp_test_cfg(seed));
+            let run = || rescore_mlp_with(synthetic_competed(n), mlp_test_cfg(seed), library());
             let (out_a, stats_a) = run().unwrap();
             let (out_b, _) = run().unwrap();
 
@@ -1460,7 +1522,8 @@ mod feature_tests {
     #[test]
     fn mlp_streamed_rows_are_aligned_with_the_shuffled_data() {
         for seed in [7u64, 13, 42, 1234] {
-            let (out, _) = rescore_mlp_with(synthetic_competed(120), mlp_test_cfg(seed)).unwrap();
+            let (out, _) =
+                rescore_mlp_with(synthetic_competed(120), mlp_test_cfg(seed), library()).unwrap();
             let scores: Vec<f64> = out.iter().map(|r| r.discriminant_score as f64).collect();
             let is_target: Vec<bool> = out.iter().map(|r| r.scoring.identity.is_target).collect();
             let auc = pair_auc(&scores, &is_target);
@@ -1475,8 +1538,8 @@ mod feature_tests {
     #[test]
     fn rescore_hybrid_smoke_and_determinism() {
         let n = 360;
-        let (out_a, stats_a) = rescore_hybrid(synthetic_competed(n)).unwrap();
-        let (out_b, _stats_b) = rescore_hybrid(synthetic_competed(n)).unwrap();
+        let (out_a, stats_a) = rescore_hybrid(synthetic_competed(n), library()).unwrap();
+        let (out_b, _stats_b) = rescore_hybrid(synthetic_competed(n), library()).unwrap();
 
         assert_eq!(stats_a.len(), N_RESCORE_FOLDS as usize);
         for fs in &stats_a {
@@ -1607,7 +1670,8 @@ mod feature_tests {
         let lin_dataset = hybrid_linear_dataset(&data);
         let cf = crossfit::<_, FoldSpy>(&lin_dataset, &(), "spy").expect("the spy cannot fail");
 
-        let (precomputed, names) = hybrid_frame(&data, responses, "spy_score", cf.scores.clone());
+        let (precomputed, names) =
+            hybrid_frame(library(), &data, responses, "spy_score", cf.scores.clone());
         let scorer =
             CrossValidatedScorer::<CompetedCandidate, GbmFoldModel>::new_from_shuffled_with_precomputed(
                 N_RESCORE_FOLDS,
@@ -1643,7 +1707,7 @@ mod feature_tests {
     fn indistinguishable_competed(n: u32) -> Vec<CompetedCandidate> {
         (0..n)
             .map(|i| {
-                let mut c = sample_competed_candidate(true);
+                let mut c = sample_competed_candidate();
                 c.scoring.identity.row = test_handles::row(i);
                 c.scoring.identity.source_id = timsquery::models::OwnedSourceId::Numeric(i as u64);
                 c.scoring.identity.is_target = i % 2 == 0;
@@ -1654,15 +1718,16 @@ mod feature_tests {
 
     #[test]
     fn standalone_mlp_rejects_an_untrainable_frame() {
-        let error = rescore_mlp_with(indistinguishable_competed(24), mlp_test_cfg(7)).unwrap_err();
+        let error = rescore_mlp_with(indistinguishable_competed(24), mlp_test_cfg(7), library())
+            .unwrap_err();
         assert!(matches!(error, RescoreError::Model { model: "MLP", .. }));
     }
 
     #[test]
     fn lda_and_hybrid_reject_an_untrainable_linear_frame() {
         for error in [
-            rescore_lda(indistinguishable_competed(24)).unwrap_err(),
-            rescore_hybrid(indistinguishable_competed(24)).unwrap_err(),
+            rescore_lda(indistinguishable_competed(24), library()).unwrap_err(),
+            rescore_hybrid(indistinguishable_competed(24), library()).unwrap_err(),
         ] {
             assert!(matches!(
                 error,
@@ -1693,7 +1758,7 @@ mod feature_tests {
     }
 
     fn assert_nonlinear_lane_is_flat(fixture: &[CompetedCandidate], column: &str) {
-        let nl = build_nonlinear_matrix(fixture);
+        let nl = build_nonlinear_matrix(library(), fixture);
         for (j, name) in nonlinear_feature_name_set().iter().enumerate() {
             let first = nl[j].to_bits();
             assert!(
@@ -1709,7 +1774,7 @@ mod feature_tests {
     fn hybrid_lda_score_carries_the_linear_lane_into_the_gbm() {
         assert_nonlinear_lane_is_flat(&synthetic_competed_linear_only(360), "lda_score");
 
-        let (out, stats) = rescore_hybrid(synthetic_competed_linear_only(360)).unwrap();
+        let (out, stats) = rescore_hybrid(synthetic_competed_linear_only(360), library()).unwrap();
 
         let split_on_it = stats
             .iter()
@@ -1751,11 +1816,11 @@ mod feature_tests {
         //       never NaN, so demanding NaN there would be wrong);
         //   (b) every non-mobility feature is bit-for-bit unchanged. Without (b)
         //       an impl that NaN'd the whole record would pass (a).
-        let before = build_all_matrix(competed_rows(&[sample_competed_candidate(true)]));
+        let before = build_all_matrix(library(), competed_rows(&[sample_competed_candidate()]));
 
-        let mut cand = sample_competed_candidate(true);
+        let mut cand = sample_competed_candidate();
         cand.scoring.neutralize_mobility();
-        let after = build_all_matrix(competed_rows(&[cand]));
+        let after = build_all_matrix(library(), competed_rows(&[cand]));
 
         let names = all_feature_name_set();
         assert_eq!(names.len(), ALL_NCOLS);
@@ -1817,13 +1882,13 @@ mod feature_tests {
         let rows: Vec<_> = [1.0f32, 2.0, 3.0]
             .into_iter()
             .map(|delta_group_ln1p_diff| {
-                let mut c = sample_competed_candidate(true);
+                let mut c = sample_competed_candidate();
                 c.delta_group_ln1p_diff = delta_group_ln1p_diff;
                 c.into_final()
             })
             .collect();
 
-        let (names, got) = feature_frame(&rows);
+        let (names, got) = feature_frame(library(), &rows);
         let nf = names.len();
         assert_eq!(got.len(), rows.len() * nf, "one value per name per row");
 

@@ -13,7 +13,7 @@
 //!
 //! // 2. Create the context for a specific query
 //! let context = CandidateContext {
-//!     digest: digest_slice,
+//!     is_target: true,
 //!     charge: 2,
 //!     expected_intensities: expected,
 //!     chromatograms: chromatogram_collector,
@@ -37,7 +37,6 @@ use super::{
 use crate::IonAnnot;
 use crate::errors::DataProcessingError;
 use crate::models::ExpectedIntensities;
-use crate::models::sequence::Peptide;
 use crate::scoring::apex_dsp::SCRIBE_FLOOR;
 use crate::scoring::blocks::apex_evidence::{
     ApexEvidence,
@@ -62,16 +61,11 @@ use timsquery::{
     SpectralCollector,
 };
 
-/// Represents a peptide candidate context required for scoring.
-///
-/// This bundles the theoretical peptide info (digest, expected intensities)
-/// with the raw extracted data (`ChromatogramCollector`).
-///
-/// The label is in essence anything that identifies the peptide sequence and modifications,
-/// so it can be a string, or a more complex struct. (or a simpler one like a smart pointer)
+/// Expected intensities and extracted traces with a caller-defined label.
+/// The label is opaque to apex finding and independent of analyte chemistry.
 #[derive(Debug)]
 pub struct CandidateContext<T: KeyLike, L: Display> {
-    /// The peptide sequence and modification information.
+    /// Caller-defined label, not a chemical representation.
     pub label: L,
     pub charge: u8,
     /// The expected theoretical intensities of precursor and fragment ions.
@@ -80,21 +74,17 @@ pub struct CandidateContext<T: KeyLike, L: Display> {
     pub query_values: ChromatogramCollector<T, f32>,
 }
 
-/// Immutable peptide metadata that never changes during scoring.
-///
-/// This separates identity/reference information from the scoring data,
-/// making the scoring pipeline cleaner and more efficient.
-/// TODO: make generic digest info
+/// Reference values and library handles carried through candidate scoring.
+/// Chemistry stays in the owning library, resolved through `handles.row`.
 #[derive(Debug, Clone)]
-pub struct PeptideMetadata {
-    /// The peptide sequence and modification information.
-    pub digest: Peptide,
+pub struct CandidateMetadata {
+    /// Whether this scored variant is a target rather than a decoy.
+    pub is_target: bool,
 
     pub charge: u8,
 
     /// The arena row scored and the group it competes in. The ids a reader
-    /// wants are resolved from these at the writer, so a scored candidate never
-    /// carries a copy.
+    /// wants are resolved from these at the writer.
     pub handles: RowHandles,
 
     /// Stable library identity, independent of arena storage order.

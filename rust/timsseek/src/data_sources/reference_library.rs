@@ -29,11 +29,6 @@ use crate::fragment_mass::{
     isotope_dist_or_averagine,
 };
 use crate::models::DecoyMarking;
-use crate::models::sequence::{
-    Peptide,
-    normalize_to_proforma,
-    parse_sequence,
-};
 
 #[derive(Debug, Clone)]
 pub struct ReferenceLibrary {
@@ -261,7 +256,13 @@ impl<'a> ExpectedIntensity for RefQuery<'a> {
     fn expected_precursor_envelope(&self) -> SmallVec<[(i8, f32); 3]> {
         let tgt = self.geom.row();
         let IsotopeStrategy::FromComposition { n_isotopes } = self.lib.geom.capabilities().isotopes;
-        let seq = self.lib.geom.seq_strip(tgt);
+        let seq = self
+            .lib
+            .geom
+            .analyte(tgt)
+            .peptide
+            .known()
+            .map_or("", |p| p.residues);
         let charge = self.lib.geom.charge(tgt) as f64;
         let neutral = self.lib.geom.precursor_mz(tgt) * charge - charge * PROTON_MASS;
         let (_src, env) = isotope_dist_or_averagine(seq, neutral);
@@ -333,14 +334,12 @@ pub struct RowHandles {
 
 /// Identity accessors used by generic scoring loops alongside `QueryGeom`
 /// and `ExpectedIntensity`. `RefQuery` resolves handles without copying row
-/// data; `materialize_peptide` creates owned peptide metadata.
+/// data. Candidates retain handles; chemistry consumers borrow the owning library.
 pub trait ScoredIdentity {
     /// Whether this item is a target (vs a decoy variant).
     fn is_target(&self) -> bool;
     /// The arena handles this result carries onward. See [`RowHandles`].
     fn handles(&self) -> RowHandles;
-    /// Materialize the output identity `Peptide`.
-    fn materialize_peptide(&self) -> Peptide;
 }
 
 impl<'a> ScoredIdentity for RefQuery<'a> {
@@ -354,18 +353,6 @@ impl<'a> ScoredIdentity for RefQuery<'a> {
 
     fn is_target(&self) -> bool {
         self.decoy_marking().is_target()
-    }
-
-    /// `raw` is the modified-sequence blob slice; parsing is deferred to
-    /// `Peptide::parse` and gated on the whole-library parse check. The modified
-    /// (not stripped) form is what the `n_mods` feature reads.
-    fn materialize_peptide(&self) -> Peptide {
-        let coll = &self.lib.geom;
-        Peptide {
-            raw: coll.seq_mod(self.geom.row()).into(),
-            decoy: self.decoy_marking(),
-            sequence_features: self.lib.sequence_features == SeqFeatureState::Available,
-        }
     }
 }
 
@@ -445,7 +432,7 @@ impl ReferenceLibrary {
         Self::from_sealed_arena(arena)
     }
 
-    /// Whether every sequence in the library parsed (gates sequence-derived
+    /// Whether every row supplies supported sequence structure (gates sequence-derived
     /// scoring features). Reads the sealed arena's `sequence_features` state.
     pub fn parsable_sequences(&self) -> bool {
         self.sequence_features == SeqFeatureState::Available
@@ -494,26 +481,42 @@ impl ReferenceLibrary {
         }
     }
 
-    /// Walk every row's modified sequence and set `caps.sequence_features`,
-    /// counting averagine isotope fallbacks on the same pass.
+    /// Decide sequence-feature eligibility once for the whole library, using
+    /// stored residues and modification definitions. Also tally the existing
+    /// residue-only isotope model's averagine fallbacks.
     ///
-    /// Library-scale and not per-row on purpose: per-row would mean targets and
-    /// decoys scored with different features, and then FDR means nothing. The
-    /// blob walked here is the one `RefQuery::materialize_peptide_in_group`
-    /// parses, so a row that fails here is a row that would fail there.
+    /// Keep the historical Unimod/mass and length limits in this migration.
+    /// Partial or unsupported structure disables the sequence lane globally.
     fn gate_sequence_features(&mut self) {
         let n_rows = self.geom.n_rows();
         let mut n_unparsable = 0usize;
         let mut first_unparsable: Option<String> = None;
         let mut n_averagine_fallback = 0usize;
         for tgt in self.geom.rows() {
-            let modified = self.geom.seq_mod(tgt);
-            let normalized = normalize_to_proforma(modified);
-            if parse_sequence(&normalized).is_none() {
+            let peptide = self.geom.analyte(tgt).peptide.known();
+            if !peptide.is_some_and(|p| {
+                p.residues.len() <= 254
+                    && p.modifications.known().is_some_and(|mods| {
+                        mods.iter().all(|(_, m)| match m.kind() {
+                            timsquery::chemistry::analyte::ModificationKind::Unimod(id) => {
+                                u16::try_from(*id).is_ok()
+                            }
+                            timsquery::chemistry::analyte::ModificationKind::Mass(m) => {
+                                m.is_finite()
+                            }
+                            timsquery::chemistry::analyte::ModificationKind::Other => false,
+                        })
+                    })
+            }) {
                 n_unparsable += 1;
-                first_unparsable.get_or_insert_with(|| modified.to_string());
+                first_unparsable.get_or_insert_with(|| self.geom.output_id(tgt).to_string());
             }
-            let stripped = self.geom.seq_strip(tgt);
+            let stripped = self
+                .geom
+                .analyte(tgt)
+                .peptide
+                .known()
+                .map_or("", |p| p.residues);
             let charge = self.geom.charge(tgt) as f64;
             let neutral_mass = self.geom.precursor_mz(tgt) * charge - charge * PROTON_MASS;
             let (isotope_src, _envelope) = isotope_dist_or_averagine(stripped, neutral_mass);
@@ -530,11 +533,8 @@ impl ReferenceLibrary {
 
         if let Some(example) = &first_unparsable {
             tracing::warn!(
-                "{}/{} library entries have an unparsable modified sequence, so \
-                 sequence features are off for the whole library (first: {:?}). \
-                 Use ProForma, for example `PEPTC[UNIMOD:4]IDEK`. DIA-NN's \
-                 `(UniMod:n)` form is converted; other modification spellings may \
-                 fail.",
+                "{}/{} library entries lack sequence structure supported by the scoring lane; \
+                 sequence features are off for the whole library (first source ID: {:?})",
                 n_unparsable,
                 n_rows,
                 example
@@ -593,8 +593,7 @@ mod tests {
                 (IonAnnot::try_from("y3").unwrap(), 300.0),
                 (IonAnnot::try_from("y8").unwrap(), 800.0),
             ],
-            seq_strip: "PEPTIDEK",
-            seq_mod: "PEPTIDEK",
+            analyte: timsquery::chemistry::analyte::Analyte::from_sequence("PEPTIDEK").as_input(),
             ..Default::default()
         });
         // `Force` because these tests exercise the decoy variants; timsquery's
@@ -623,8 +622,8 @@ mod tests {
                 precursor_mz: 500.0,
                 charge: 2,
                 frags: &frags,
-                seq_strip: "PEPTIDEK",
-                seq_mod: "PEPTIDEK",
+                analyte: timsquery::chemistry::analyte::Analyte::from_sequence("PEPTIDEK")
+                    .as_input(),
                 id: Some(timsquery::models::OwnedSourceId::Text(id.into())),
                 ..Default::default()
             });
@@ -704,8 +703,7 @@ mod tests {
             rt_seconds: 1.0,
             mobility: 1.0,
             frags: &[(timsquery::IonAnnot::try_from("y3").unwrap(), 300.0)],
-            seq_strip: "PEP",
-            seq_mod: "PEP",
+            analyte: timsquery::chemistry::analyte::Analyte::from_sequence("PEP").as_input(),
             ..Default::default()
         });
         let geom = geom
@@ -736,6 +734,37 @@ mod tests {
         assert_eq!(pairs[0].0, IonAnnot::try_from("y3").unwrap());
         assert!((pairs[0].1 - 1.0).abs() < 1e-6);
         assert!((pairs[1].1 - 0.5).abs() < 1e-6);
+    }
+
+    #[test]
+    fn blank_modified_sequence_preserves_stripped_residues_without_enabling_sequence_features() {
+        use timsquery::chemistry::analyte::PropertyRef;
+
+        let file = tempfile::Builder::new().suffix(".tsv").tempfile().unwrap();
+        std::fs::write(
+            file.path(),
+            concat!(
+                "ModifiedPeptide\tStrippedPeptide\tPrecursorMz\tPrecursorCharge\tTr_recalibrated\tIonMobility\t",
+                "ProteinID\tDecoy\tFragmentMz\tFragmentType\tFragmentNumber\tFragmentCharge\tFragmentLossType\tRelativeIntensity\n",
+                "\tPEPTIDE\t500\t2\t1\t1\tP1\t0\t300\ty\t3\t1\tnoloss\t1\n",
+            ),
+        )
+        .unwrap();
+        let lib = ReferenceLibrary::try_from(timsquery::serde::read_targets(file.path()).unwrap())
+            .unwrap();
+        let geom = &lib.geom;
+        let row = geom.rows().next().unwrap();
+        let peptide = geom.analyte(row).peptide.known().unwrap();
+        assert_eq!(peptide.residues, "PEPTIDE");
+        assert!(matches!(peptide.modifications, PropertyRef::Missing));
+        assert!(peptide.sequence().is_none());
+        assert!(!lib.parsable_sequences());
+        let expected = isotope_dist_or_averagine("PEPTIDE", 0.0).1;
+        for query in lib.iter() {
+            for (i, intensity) in query.expected_precursor_envelope() {
+                assert_eq!(intensity, expected[i as usize]);
+            }
+        }
     }
 
     #[test]
@@ -1179,8 +1208,8 @@ mod load_tests {
                 rt_seconds: 120.0,
                 mobility: 0.75,
                 frags: &frags,
-                seq_strip: spec.sequence,
-                seq_mod: spec.sequence,
+                analyte: timsquery::chemistry::analyte::Analyte::from_sequence(spec.sequence)
+                    .as_input(),
                 is_decoy: spec.is_decoy,
                 decoy_group: spec.group.map(Into::into),
                 ..Default::default()
@@ -1213,7 +1242,7 @@ mod load_tests {
     fn marks_of(lib: &ReferenceLibrary) -> Vec<DecoyMarking> {
         lib.iter()
             .map(|query| {
-                let mark = query.materialize_peptide().decoy;
+                let mark = query.decoy_marking();
                 assert_eq!(
                     ScoredIdentity::is_target(&query),
                     mark.is_target(),
@@ -1459,8 +1488,8 @@ mod load_tests {
                 precursor_mz: 500.0,
                 charge: 2,
                 frags: &[(IonAnnot::try_from("y2").unwrap(), 200.0)],
-                seq_strip: spec.sequence,
-                seq_mod: spec.sequence,
+                analyte: timsquery::chemistry::analyte::Analyte::from_sequence(spec.sequence)
+                    .as_input(),
                 is_decoy: spec.is_decoy,
                 decoy_group: spec.group.map(Into::into),
                 ..Default::default()
@@ -1471,7 +1500,9 @@ mod load_tests {
             .expect_err("derived decoys over stored decoys are invalid");
         assert!(matches!(
             err,
-            timsquery::models::SourceIdError::ForceWithStoredDecoys { count: 1 }
+            timsquery::models::TargetBuildError::Identity(
+                timsquery::models::SourceIdError::ForceWithStoredDecoys { count: 1 }
+            )
         ));
     }
 
@@ -1488,16 +1519,25 @@ mod load_tests {
     /// way an out-of-crate caller reaches it.
     #[test]
     fn one_unparsable_sequence_disables_sequence_features_library_wide() {
-        let library = ReferenceLibrary::from_sealed_arena(hand_assembled_arena(
-            crate::models::DecoyPolicy::default(),
-            &[RowSpec::target("PEPTIDEK"), RowSpec::target("GARBAGE!!!")],
-        ))
-        .expect("an mzpaf arena carrying intensities narrows");
+        for sequence in [
+            "GARBAGE!!!",
+            "PEPTK[MOD:00046]IDEK",
+            "PEPTK[XLMOD:02001]IDEK",
+            "PEPTK[RESID:AA0038]IDEK",
+            "PEPTN[Glycan:HexNAc]IDEK",
+            "PEPTN[GNO:G59626AS]IDEK",
+        ] {
+            let library = ReferenceLibrary::from_sealed_arena(hand_assembled_arena(
+                crate::models::DecoyPolicy::default(),
+                &[RowSpec::target("PEPTIDEK"), RowSpec::target(sequence)],
+            ))
+            .expect("an mzpaf arena carrying intensities narrows");
 
-        assert!(
-            !library.parsable_sequences(),
-            "one unparsable row turns the gate off for the whole library"
-        );
+            assert!(
+                !library.parsable_sequences(),
+                "one unparsable row turns the gate off for the whole library"
+            );
+        }
     }
 
     /// The ON branch, so the assertion above pins the gate's reading of the rows
@@ -1603,8 +1643,7 @@ mod load_tests {
             rt_seconds: 1.0,
             mobility: 1.0,
             frags: &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
-            seq_strip: "PEP",
-            seq_mod: "PEP",
+            analyte: timsquery::chemistry::analyte::Analyte::from_sequence("PEP").as_input(),
             ..Default::default()
         });
         let geom = geom

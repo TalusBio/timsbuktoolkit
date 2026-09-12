@@ -51,6 +51,7 @@ impl std::error::Error for DiannReadingError {}
 
 #[derive(Debug)]
 pub enum DiannPrecursorParsingError {
+    Chemistry(String),
     /// Ion parsing failed at this fragment row.
     IonParsing {
         row: usize,
@@ -77,6 +78,7 @@ impl std::fmt::Display for DiannPrecursorParsingError {
             Self::IonOverCapacity => write!(f, "fragment ordinal or charge out of range"),
             Self::EmptyIonString => write!(f, "empty FragmentType"),
             Self::Other => write!(f, "malformed precursor group"),
+            Self::Chemistry(e) => e.fmt(f),
         }
     }
 }
@@ -489,8 +491,12 @@ fn parse_precursor_group(
     };
 
     let precursor_extras = PrecursorExtras {
-        modified_peptide: first_row.modified_peptide.clone(),
-        stripped_peptide: first_row.stripped_peptide.clone(),
+        analyte: crate::chemistry::analyte::Analyte::from_sequence_fields(
+            &first_row.modified_peptide,
+            &first_row.stripped_peptide,
+        )
+        .map_err(DiannPrecursorParsingError::Chemistry)?,
+        entry_name: first_row.transition_group_id.clone(),
         protein_id: first_row.protein_id.clone(),
         is_decoy,
         relative_intensities,
@@ -823,8 +829,12 @@ fn parse_precursor_group_from_parquet(
     };
 
     let precursor_extras = PrecursorExtras {
-        modified_peptide: columns.modified_sequences[first_idx].clone(),
-        stripped_peptide: columns.stripped_sequences[first_idx].clone(),
+        analyte: crate::chemistry::analyte::Analyte::from_sequence_fields(
+            &columns.modified_sequences[first_idx],
+            &columns.stripped_sequences[first_idx],
+        )
+        .map_err(DiannPrecursorParsingError::Chemistry)?,
+        entry_name: columns.precursor_ids.map(|ids| ids[first_idx].clone()),
         protein_id: columns.protein_groups[first_idx].clone(),
         is_decoy,
         relative_intensities: rel_intensities,
@@ -1074,8 +1084,21 @@ AAAAAAALQAK\tAAAAAAALQAK\t478.7\t2\t11.0\t0.9\tP2\t0\t300.0\ty\t3\t1\tnoloss\t1.
 
         // Verify basic properties of first precursor
         let (first_eg, first_extras) = &elution_groups[0];
-        assert_eq!(first_extras.modified_peptide, "GREEWESAALQNANTK");
-        assert_eq!(first_extras.stripped_peptide, "GREEWESAALQNANTK");
+        assert_eq!(
+            first_extras.analyte.peptide.known().unwrap().residues,
+            "GREEWESAALQNANTK"
+        );
+        assert!(
+            first_extras
+                .analyte
+                .peptide
+                .known()
+                .unwrap()
+                .modifications
+                .known()
+                .unwrap()
+                .is_empty()
+        );
         assert!(!first_extras.is_decoy);
         assert_eq!(first_eg.fragment_count(), 4);
     }
@@ -1102,9 +1125,21 @@ AAAAAAALQAK\tAAAAAAALQAK\t478.7\t2\t11.0\t0.9\tP2\t0\t300.0\ty\t3\t1\tnoloss\t1.
 
         let (eg, extras) = &elution_groups[0];
         assert_eq!(
-            extras.modified_peptide,
-            "_AAAGLYENC[UniMod:4]FC[UniMod:4]NALLAK_"
+            extras.analyte.peptide.known().unwrap().residues,
+            "AAAGLYENCFCNALLAK"
         );
+        let modifications = extras
+            .analyte
+            .peptide
+            .known()
+            .unwrap()
+            .modifications
+            .known()
+            .unwrap();
+        assert_eq!(modifications.len(), 2);
+        assert!(modifications.iter().all(
+            |m| m.definition.kind() == &crate::chemistry::analyte::ModificationKind::Unimod(4)
+        ));
         assert!(!extras.is_decoy);
         assert_eq!(eg.fragment_count(), 20);
     }

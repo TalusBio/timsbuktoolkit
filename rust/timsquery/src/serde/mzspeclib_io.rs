@@ -58,13 +58,14 @@ use mzannotate::mzspeclib::{
     MzSpecLibTextParser,
 };
 use mzannotate::spectrum::AnnotatedSpectrum;
+use mzcore::prelude::IsAminoAcid;
+
 use mzcore::chemistry::{
     AmbiguousMolecule,
     MassMode,
     MolecularCharge,
     Molecule,
 };
-use mzcore::prelude::IsAminoAcid;
 use tracing::warn;
 
 use super::library_file::{
@@ -282,12 +283,11 @@ fn read_counting_degradation(
             rt_seconds: row.rt_seconds,
             mobility: row.mobility,
             frags: &row.frags,
-            seq_strip: &row.seq_strip,
-            seq_mod: &row.seq_mod,
+            analyte: row.analyte.as_input(),
+            entry_name: row.entry_name.as_deref(),
             is_decoy: row.is_decoy,
-            id: Some(row.id.into()),
+            id: Some(row.id.as_str().into()),
             decoy_group: Some(group),
-            ..Default::default()
         });
     }
 
@@ -419,14 +419,14 @@ struct SpectrumRow {
     /// The `<Spectrum=N>` key, which is what a declared pair refers to.
     key: u32,
     id: String,
+    entry_name: Option<String>,
     precursor_mz: f64,
     charge: u8,
     rt_seconds: f32,
     mobility: f32,
     is_decoy: bool,
     declared_group: Option<String>,
-    seq_strip: String,
-    seq_mod: String,
+    analyte: crate::chemistry::analyte::Analyte,
     /// Parallel to `intensities`, and pushed straight into the arena.
     frags: Vec<(IonAnnot, f64)>,
     /// The reference-intensity sidecar for `frags`, kept separate because the
@@ -444,19 +444,42 @@ impl SpectrumRow {
     ) -> Result<Self, TargetReadingError> {
         reject_unresolved_attribute_sets(spectrum, spectrum_attribute_sets)?;
 
+        if spectrum.analytes.len() > 1 {
+            return Err(TargetReadingError::SpeclibParse(format!(
+                "spectrum {} declares multiple analytes; the row model supports one analyte",
+                spectrum.key
+            )));
+        }
         let analyte = spectrum.analytes.first();
         let peptidoform = analyte.and_then(|a| match &a.target {
             AnalyteTarget::PeptidoformIon(ion) => Some(ion),
             _ => None,
         });
 
-        let (seq_strip, seq_mod) = match peptidoform {
-            Some(ion) => (stripped_sequence(ion), ion.to_string()),
-            None => {
-                degradation.rows_without_sequence += 1;
-                (String::new(), String::new())
-            }
+        use crate::chemistry::analyte::{
+            Analyte,
+            FormulaBasis,
         };
+        let analyte = match analyte.map(|a| &a.target) {
+            Some(AnalyteTarget::PeptidoformIon(ion)) if ion.peptidoforms().len() == 1 => {
+                Analyte::from_peptidoform(&ion.peptidoforms()[0])
+            }
+            Some(AnalyteTarget::PeptidoformIon(ion)) => Analyte {
+                peptide: crate::chemistry::analyte::Property::Unresolved {
+                    recovered: None,
+                    annotation: ion.to_string(),
+                },
+                ..Default::default()
+            },
+            Some(AnalyteTarget::MolecularFormula(formula)) => {
+                Analyte::from_formula(formula, FormulaBasis::Unspecified)
+            }
+            _ => Analyte::default(),
+        };
+
+        if analyte.peptide.known().is_none() {
+            degradation.rows_without_sequence += 1;
+        }
 
         let peak_mz_is_theoretical =
             peak_mz_is_theoretical(spectrum, library_declares_theoretical_mz);
@@ -524,14 +547,15 @@ impl SpectrumRow {
         Ok(Self {
             key: spectrum.key,
             id: source_id(spectrum),
+            entry_name: (!spectrum.description.id.is_empty())
+                .then(|| spectrum.description.id.clone()),
             precursor_mz: precursor_mz(spectrum, peptidoform),
             charge: charge(spectrum, peptidoform),
             rt_seconds: rt_seconds(spectrum),
             mobility: mobility(spectrum),
             is_decoy: is_decoy(spectrum)?,
             declared_group: declared_group(spectrum),
-            seq_strip,
-            seq_mod,
+            analyte,
             frags,
             intensities,
         })
@@ -562,21 +586,6 @@ fn reject_unresolved_attribute_sets(
         }
     }
     Ok(())
-}
-
-/// The unmodified residues, one letter each. `X` for a residue with no
-/// one-letter code, matching what mzannotate's own writer emits.
-fn stripped_sequence(ion: &mzcore::sequence::PeptidoformIon) -> String {
-    ion.peptidoforms()
-        .first()
-        .map(|peptide| {
-            peptide
-                .sequence()
-                .iter()
-                .map(|s| s.aminoacid.aminoacid().one_letter_code().unwrap_or('X'))
-                .collect()
-        })
-        .unwrap_or_default()
 }
 
 /// What the file called this precursor. `MS:1003061|library spectrum name` when
@@ -1008,6 +1017,7 @@ fn isotope_of(annotation: &Annotation) -> Option<i8> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::chemistry::analyte;
     use crate::models::TargetColumns;
     use crate::models::capabilities::DecoyPolicy;
     use std::path::PathBuf;
@@ -1059,8 +1069,16 @@ mod tests {
 
         let row = geom.rows().next().expect("one row");
         assert_eq!(geom.output_id(row).to_string(), "JWH-250-5OH");
-        assert_eq!(geom.seq_strip(row), "");
-        assert_eq!(geom.seq_mod(row), "");
+        assert!(matches!(
+            geom.analyte(row).peptide,
+            analyte::PropertyRef::Missing
+        ));
+        assert_eq!(geom.entry_name(row), Some("JWH-250-5OH"));
+        let formula = geom.analyte(row).formula.known().expect("formula retained");
+        assert_eq!(formula.basis, analyte::FormulaBasis::Unspecified);
+        let serialized = serde_json::to_string(&geom.analyte(row)).unwrap();
+        let restored: analyte::Analyte = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(restored, geom.analyte(row).to_owned());
         assert!(!geom.is_decoy(row), "no origin type is not a decoy claim");
 
         let labels: Vec<String> = geom
@@ -1643,7 +1661,13 @@ mod tests {
             (geom.mobility(first) - 1.182_379_6).abs() < 1e-6,
             "the timsTOF mobility axis, which neither vendor export uses"
         );
-        assert_eq!(geom.seq_strip(first), "VLSAAKPEDR");
+        assert_eq!(
+            geom.analyte(first)
+                .peptide
+                .known()
+                .map_or("", |p| p.residues),
+            "VLSAAKPEDR"
+        );
         assert_eq!(geom.frag_labels(first).len(), 4);
         // The only fixture declaring `MS:1000896` in `minute`, and so the only
         // one that pins the minute path: the entry says 1.559414, and 60x that

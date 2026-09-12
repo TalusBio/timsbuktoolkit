@@ -134,7 +134,7 @@ pub enum SourceIds {
     #[default]
     Absent,
     Numeric(Vec<u64>),
-    /// CSR over one blob, like `seq_strip_blob`: `offsets` has `n_rows + 1`
+    /// CSR over one blob: `offsets` has `n_rows + 1`
     /// entries.
     Text {
         blob: String,

@@ -30,7 +30,6 @@ use crate::data_sources::reference_library::{
     ScoredIdentity,
 };
 use crate::errors::DataProcessingError;
-use crate::models::sequence::Peptide;
 use crate::{
     IonAnnot,
     ScorerQueriable,
@@ -85,7 +84,7 @@ use super::timings::{
 struct CandidateIdentity {
     handles: RowHandles,
     source_id: timsquery::models::OwnedSourceId,
-    digest: Peptide,
+    is_target: bool,
 }
 use crate::rt_calibration::{
     CalibrationResult,
@@ -618,7 +617,7 @@ impl<I: ScorerQueriable> Scorer<I> {
     )]
     fn finalize_results(
         &self,
-        metadata: &super::apex_finding::PeptideMetadata,
+        metadata: &super::apex_finding::CandidateMetadata,
         nqueries: u8,
         apex: ApexBlocks,
         inner_collector: &SpectralCollector<IonAnnot, MzMobilityStatsCollector>,
@@ -661,7 +660,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         identity: CandidateIdentity,
         calibration: &CalibrationResult,
         worker: &mut ScoringWorker,
-    ) -> Result<super::apex_finding::PeptideMetadata, SkipReason> {
+    ) -> Result<super::apex_finding::CandidateMetadata, SkipReason> {
         let original_irt = LibraryRT(query.rt_seconds());
         let calibrated_rt = calibration.convert_irt(original_irt);
         let tolerance = calibration.get_tolerance(
@@ -679,8 +678,8 @@ impl<I: ScorerQueriable> Scorer<I> {
             Some(TOP_N_FRAGMENTS),
         )?;
 
-        Ok(super::apex_finding::PeptideMetadata {
-            digest: identity.digest,
+        Ok(super::apex_finding::CandidateMetadata {
+            is_target: identity.is_target,
             charge: query.precursor_charge(),
             handles: identity.handles,
             source_id: identity.source_id,
@@ -832,7 +831,7 @@ impl<I: ScorerQueriable> Scorer<I> {
                     let identity = CandidateIdentity {
                         handles: q.handles(),
                         source_id: q.output_id().to_owned_id(),
-                        digest: q.materialize_peptide(),
+                        is_target: q.is_target(),
                     };
                     let result = self.score_calibrated_extraction(
                         &q,
@@ -1016,8 +1015,7 @@ mod tests {
                 (IonAnnot::try_from("y3").unwrap(), 300.0),
                 (IonAnnot::try_from("y8").unwrap(), 800.0),
             ],
-            seq_strip: "PEPTIDEK",
-            seq_mod: "PEPTIDEK",
+            analyte: timsquery::chemistry::analyte::Analyte::from_sequence("PEPTIDEK").as_input(),
             ..Default::default()
         });
         // `Force` so the arena derives the decoy variants these tests score.

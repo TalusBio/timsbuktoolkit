@@ -245,8 +245,8 @@ mod tests {
                 precursor_mz: 500.0,
                 charge: 2,
                 frags: &fragments[..count],
-                seq_strip: "PEPTIDEK",
-                seq_mod: "PEPTIDEK",
+                analyte: timsquery::chemistry::analyte::Analyte::from_sequence("PEPTIDEK")
+                    .as_input(),
                 ..Default::default()
             });
             intensities.extend((0..count).map(|i| (i + 1) as f32));

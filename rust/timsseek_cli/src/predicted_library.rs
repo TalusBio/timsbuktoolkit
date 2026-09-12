@@ -218,14 +218,13 @@ impl LibrarySink for PredictedLibrarySink {
 struct PredictedRow {
     /// `{proforma}/{charge}`, which is the name the mzSpecLib writer gives the
     /// same precursor under `MS:1003061|library spectrum name`, so a row keeps
-    /// one name across both routes. Pushed as the arena's `seq_mod` too, which
-    /// wants the same string: a proforma peptidoform ion with its charge.
+    /// one name across both routes. Stored independently of chemistry.
     id: String,
     /// The source peptide's pair id, `None` when decoys are off. All modified
     /// forms and all charges of one peptide share it, so a group is a peptide
     /// rather than a target/decoy couple.
     group: Option<String>,
-    seq_strip: String,
+    analyte: timsquery::chemistry::analyte::Analyte,
     precursor_mz: f64,
     charge: u8,
     rt_seconds: f32,
@@ -239,11 +238,7 @@ struct PredictedRow {
 
 impl PredictedRow {
     fn from_spectrum(row: &SpectrumRow<'_>) -> Result<Self> {
-        // The charge suffix is part of the stored sequence, because the file
-        // route stores mzcore's `PeptidoformIon` spelling and that renders its
-        // charge carriers. The modification spelling still differs -- ours is
-        // `C[UNIMOD:4]`, mzcore's is `C[U:Carbamidomethyl]` -- and both parse,
-        // so the parse gate reaches the same verdict from either.
+        // Preserve the writer's label; chemistry comes from the explicit proforma.
         let id = format!("{}/{}", row.proforma, row.charge);
         let charge = u8::try_from(row.charge)
             .with_context(|| format!("precursor charge {} of {id}", row.charge))?;
@@ -261,7 +256,7 @@ impl PredictedRow {
         Ok(Self {
             // `Display` reads a decoy's residues with its interior reversed, so
             // this is the decoy's own sequence rather than its target's.
-            seq_strip: row.stripped.to_string(),
+            analyte: timsquery::chemistry::analyte::Analyte::from_sequence(row.proforma),
             id,
             group: row.decoy_pair_id.map(|pair| pair.to_string()),
             precursor_mz: row.precursor_mz,
@@ -344,15 +339,12 @@ fn build_arena(
             rt_seconds: row.rt_seconds,
             mobility: row.mobility,
             frags: &row.frags,
-            seq_strip: &row.seq_strip,
-            seq_mod: &row.id,
+
+            analyte: row.analyte.as_input(),
+            entry_name: Some(&row.id),
             is_decoy: row.is_decoy,
             id: Some(row.id.clone().into()),
             decoy_group: Some(group.into()),
-            // No structured mods: the token registry is timsquery-internal, so
-            // no reader outside it can name a modification, and the modified
-            // sequence carries the same information.
-            ..Default::default()
         });
     }
 
@@ -517,7 +509,11 @@ mod tests {
                     geom.charge(tgt),
                     geom.precursor_mz(tgt),
                     geom.rt_seconds(tgt),
-                    geom.seq_mod(tgt),
+                    geom.analyte(tgt)
+                        .peptide
+                        .known()
+                        .and_then(|p| p.sequence())
+                        .unwrap_or_default(),
                     geom.frag_labels(tgt),
                     geom.frag_mzs(tgt),
                     &lib.library.fragment_intensities()[geom.frag_range(tgt)],
@@ -647,8 +643,25 @@ mod tests {
         let lib = build(&[fixture.row(2, false, None, peaks(3))], DecoyPolicy::Never);
 
         let tgt = lib.library.geometry().rows().next().unwrap();
-        assert_eq!(lib.library.geometry().seq_mod(tgt), "PEPC[UNIMOD:4]IDEK/2");
-        assert_eq!(lib.library.geometry().seq_strip(tgt), "PEPCIDEK");
+        assert_eq!(
+            lib.library
+                .geometry()
+                .analyte(tgt)
+                .peptide
+                .known()
+                .and_then(|p| p.sequence())
+                .unwrap_or_default(),
+            "PEPC[UNIMOD:4]IDEK"
+        );
+        assert_eq!(
+            lib.library
+                .geometry()
+                .analyte(tgt)
+                .peptide
+                .known()
+                .map_or("", |p| p.residues),
+            "PEPCIDEK"
+        );
         assert_eq!(
             lib.library.geometry().capabilities().sequence_features,
             SeqFeatureState::Available,
@@ -840,6 +853,16 @@ mod tests {
         for row in sunk.rows() {
             let id = sunk.output_id(row).to_string();
             let mirror = row_named(&from_file, &id);
+            assert_eq!(
+                sunk.analyte(row).to_owned(),
+                from_file.analyte(mirror).to_owned(),
+                "chemistry of {id}"
+            );
+            assert_eq!(
+                sunk.entry_name(row),
+                from_file.entry_name(mirror),
+                "label of {id}"
+            );
 
             assert_eq!(sunk.charge(row), from_file.charge(mirror), "charge of {id}");
             assert_eq!(

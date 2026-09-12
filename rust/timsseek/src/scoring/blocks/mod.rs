@@ -102,7 +102,7 @@ enum ColData {
     U32(Vec<u32>),
     U64(Vec<u64>),
     Bool(Vec<bool>),
-    Str(Vec<String>),
+    Str(Vec<Option<String>>),
 }
 
 struct Column {
@@ -197,7 +197,14 @@ impl ColSink {
 
     pub fn str(&mut self, name: &str, v: &str) {
         match self.slot(name, false, || ColData::Str(Vec::new())) {
-            ColData::Str(vals) => vals.push(v.to_string()),
+            ColData::Str(vals) => vals.push(Some(v.to_string())),
+            _ => panic!("column `{name}` dtype mismatch"),
+        }
+    }
+
+    pub fn optional_str(&mut self, name: &str, v: Option<&str>) {
+        match self.slot(name, true, || ColData::Str(Vec::new())) {
+            ColData::Str(vals) => vals.push(v.map(str::to_owned)),
             _ => panic!("column `{name}` dtype mismatch"),
         }
     }
@@ -226,10 +233,7 @@ impl ColSink {
                 ColData::U32(v) => (DataType::UInt32, Arc::new(UInt32Array::from(v))),
                 ColData::U64(v) => (DataType::UInt64, Arc::new(UInt64Array::from(v))),
                 ColData::Bool(v) => (DataType::Boolean, Arc::new(BooleanArray::from(v))),
-                ColData::Str(v) => (
-                    DataType::Utf8,
-                    Arc::new(StringArray::from_iter(v.into_iter().map(Some))),
-                ),
+                ColData::Str(v) => (DataType::Utf8, Arc::new(StringArray::from_iter(v))),
             };
             fields.push(Field::new(c.name, dtype, c.nullable));
             arrays.push(arr);
@@ -282,6 +286,10 @@ impl SchemaSink {
 
     pub fn bool(&mut self, n: &str) {
         self.scalar(n, DataType::Boolean);
+    }
+
+    pub fn optional_str(&mut self, name: &str) {
+        self.fields.push(Field::new(name, DataType::Utf8, true));
     }
 
     pub fn str(&mut self, n: &str) {
