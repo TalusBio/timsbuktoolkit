@@ -129,12 +129,12 @@ impl ScoreBlock for AnalyteColumns<'_> {
     fn nonlinear_feature_names(_: &mut super::blocks::NameSink) {}
 }
 
-/// Emit one result's columns into the sink (all scoring blocks, then the
-/// post-model meta block, then the ids resolved from the arena).
+/// Emit identifiers and analyte metadata first, then scoring and result metadata.
 ///
 /// Resolve `library_id` and `decoy_group_id` through the result's arena row.
 /// The owned source ID retained for rescoring order does not supply these columns.
 fn emit_row(r: &FinalResult, geom: &TargetColumns<IonAnnot>, sink: &mut ColSink) {
+    Ids::for_row(geom, r.scoring.identity.row).columns(sink);
     AnalyteColumns {
         analyte: geom.analyte(r.scoring.identity.row),
         entry_name: geom.entry_name(r.scoring.identity.row),
@@ -142,7 +142,6 @@ fn emit_row(r: &FinalResult, geom: &TargetColumns<IonAnnot>, sink: &mut ColSink)
     .columns(sink);
     r.scoring.columns(sink);
     r.result_meta().columns(sink);
-    Ids::for_row(geom, r.scoring.identity.row).columns(sink);
     sink.end_row();
 }
 

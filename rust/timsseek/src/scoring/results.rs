@@ -197,17 +197,16 @@ impl FinalResult {
         }
     }
 
-    /// Value-free Parquet schema: scoring blocks (composition order), the
-    /// post-model meta block, then the ids -- the same three blocks `emit_row`
-    /// writes, in the same order.
+    /// Value-free Parquet schema: identifiers, analyte metadata, scoring blocks,
+    /// then result metadata, matching `emit_row` order.
     ///
     /// The ID columns have their own block because the writer resolves them
     /// from the arena, independently of scoring metadata. See `parquet_writer::Ids`.
     pub fn column_schema(o: &mut SchemaSink) {
+        <crate::scoring::parquet_writer::Ids<'_> as ScoreBlock>::column_schema(o);
         <crate::scoring::parquet_writer::AnalyteColumns<'_> as ScoreBlock>::column_schema(o);
         <ScoringFields as ScoreBlock>::column_schema(o);
         <ResultMeta as ScoreBlock>::column_schema(o);
-        <crate::scoring::parquet_writer::Ids<'_> as ScoreBlock>::column_schema(o);
     }
 }
 
