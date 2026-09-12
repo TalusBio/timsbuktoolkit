@@ -3,7 +3,7 @@
 /// ProForma 2.1 pairs a name with the one-letter prefix (§6.2.1) and an
 /// accession with the long one (§6.2.2), and calls the short-prefix accession
 /// `[U:35]` incorrect outright. So this canonicalizes a spelling the spec
-/// rejects into the one it wants, which is also the one `classify_mod` reads --
+/// rejects into the one it wants, which is also the one the fast parser reads --
 /// and leaves a name alone, since moving it to the long prefix would produce a
 /// form the spec does not define.
 fn expand_unimod_accessions(s: &str) -> String {
@@ -94,7 +94,9 @@ fn convert_paren_unimod(s: &str) -> String {
 /// Coerce DIA-NN / short-form modified-sequence strings into mzcore-parseable
 /// ProForma. Strips `_..._` wrapping used by DIA-NN, converts DIA-NN's
 /// parenthesised mods (`C(UniMod:4)`) to ProForma brackets (`C[UNIMOD:4]`), and
-/// normalizes UNIMOD tag casing (`[UniMod:`, `[Unimod:`, `[U:` → `[UNIMOD:`).
+/// normalizes UNIMOD accession casing (`[UniMod:4]` → `[UNIMOD:4]`) and
+/// expands numeric shorthand (`[U:35]` → `[UNIMOD:35]`). Valid named prefixes
+/// such as `[U:Oxidation]` and `[M:O-phospho-L-serine]` are preserved.
 /// A leading (N-terminal) mod is rewritten to `[UNIMOD:n]-SEQ` as ProForma
 /// requires. Pass-through for plain sequences.
 ///
@@ -114,7 +116,7 @@ pub fn normalize_to_proforma(raw: &str) -> String {
 
     // Normalize any pre-existing bracket casing likewise.
     let mut s = replace_ascii_ci(&s, "[unimod:", "[UNIMOD:");
-    // Expanded only for an accession, which is the form `classify_mod`'s fast
+    // Expanded only for an accession, which is the form the fast parser
     // path reads. A NAME is left alone, because ProForma 2.1 keeps the two in
     // separate namespaces: §6.2.1 gives names a ONE-LETTER prefix, and §6.2.2
     // requires accessions to use the long one ("full accession numbers MUST be

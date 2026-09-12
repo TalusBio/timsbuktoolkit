@@ -855,6 +855,21 @@ mod tests {
     }
 
     #[test]
+    fn proforma_named_ontology_prefixes_are_preserved_and_resolved() {
+        // ProForma 2.1 §7.8: one-letter prefixes qualify modification names.
+        let sequence = "PEPM[U:Oxidation]AS[M:O-phospho-L-serine]";
+        assert_eq!(normalize_to_proforma(sequence), sequence);
+        let analyte = Analyte::from_sequence(sequence);
+        let peptide = analyte.peptide.known().expect("valid named modifications");
+        assert_eq!(peptide.residues, "PEPMAS");
+        assert_eq!(peptide.modifications.known().unwrap().len(), 2);
+        assert_eq!(
+            analyte,
+            Analyte::from_sequence("PEPM[UNIMOD:35]AS[MOD:00046]")
+        );
+    }
+
+    #[test]
     fn stripped_residues_survive_missing_modified_sequence() {
         let analyte = Analyte::from_sequence_fields("", "PEPTIDE").unwrap();
         let peptide = analyte.peptide.known().unwrap();
