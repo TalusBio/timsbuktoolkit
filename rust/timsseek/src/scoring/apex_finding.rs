@@ -61,16 +61,11 @@ use timsquery::{
     SpectralCollector,
 };
 
-/// Represents a peptide candidate context required for scoring.
-///
-/// This bundles the theoretical peptide info (digest, expected intensities)
-/// with the raw extracted data (`ChromatogramCollector`).
-///
-/// The label is in essence anything that identifies the peptide sequence and modifications,
-/// so it can be a string, or a more complex struct. (or a simpler one like a smart pointer)
+/// Expected intensities and extracted traces with a caller-defined label.
+/// The label is opaque to apex finding and independent of analyte chemistry.
 #[derive(Debug)]
 pub struct CandidateContext<T: KeyLike, L: Display> {
-    /// The peptide sequence and modification information.
+    /// Caller-defined label, not a chemical representation.
     pub label: L,
     pub charge: u8,
     /// The expected theoretical intensities of precursor and fragment ions.
