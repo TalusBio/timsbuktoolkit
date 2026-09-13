@@ -358,6 +358,11 @@ impl<L: KeyLike> TargetColumns<L> {
         self.charge.len()
     }
 
+    /// Build a sidecar addressed by this arena's stored-row handles.
+    pub fn map_rows<T>(&self, f: impl FnMut(RowIdx) -> T) -> RowValues<T> {
+        RowValues(self.rows().map(f).collect())
+    }
+
     /// The rows of this arena, in storage order.
     pub fn rows(&self) -> impl Iterator<Item = RowIdx> + use<L> {
         (0..self.n_rows() as u32).map(RowIdx::new)
@@ -724,6 +729,26 @@ impl<L: KeyLike + DecoyShift> TargetColumns<L> {
     /// a target.
     pub fn is_target_slot(&self, row: RowIdx, variant: u8) -> bool {
         !self.is_decoy[row.get()] && variant == 0
+    }
+}
+
+/// Dense sidecar for stored rows. Use only with handles from its owning arena.
+#[derive(Clone)]
+pub struct RowValues<T>(Vec<T>);
+
+impl<T> std::ops::Index<RowIdx> for RowValues<T> {
+    type Output = T;
+
+    fn index(&self, row: RowIdx) -> &T {
+        &self.0[row.get()]
+    }
+}
+
+impl<T> std::fmt::Debug for RowValues<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("RowValues")
+            .field("len", &self.0.len())
+            .finish_non_exhaustive()
     }
 }
 

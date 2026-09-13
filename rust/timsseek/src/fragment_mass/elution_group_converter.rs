@@ -1,4 +1,4 @@
-use crate::isotopes::peptide_isotopes;
+#[cfg(test)]
 use mzcore::prelude::{
     AmbiguousMolecule,
     Element,
@@ -33,6 +33,7 @@ pub fn supersimpleprediction(mz: f64, charge: i32) -> f64 {
         + (1.176651e-01 * charge as f64)
 }
 
+#[cfg(test)]
 fn count_carbon_sulphur(form: &MolecularFormula) -> (u16, u16) {
     let mut ncarbon = 0;
     let mut nsulphur = 0;
@@ -91,7 +92,7 @@ const RESIDUE_CS: [Option<(u16, u16)>; 26] = {
 
 /// Fast (C, S) tally over a bare amino-acid sequence via [`RESIDUE_CS`].
 /// Empty input and non-standard residues return `None`, so mzcore handles them.
-fn count_cs_fast(sequence: &str) -> Option<(u16, u16)> {
+pub(crate) fn count_cs_fast(sequence: &str) -> Option<(u16, u16)> {
     if sequence.is_empty() {
         return None;
     }
@@ -100,22 +101,13 @@ fn count_cs_fast(sequence: &str) -> Option<(u16, u16)> {
     for &b in sequence.as_bytes() {
         let idx = b.wrapping_sub(b'A') as usize;
         let (c, s) = RESIDUE_CS.get(idx).copied().flatten()?;
-        ncarbon += c;
-        nsulphur += s;
+        ncarbon = ncarbon.checked_add(c)?;
+        nsulphur = nsulphur.checked_add(s)?;
     }
     Some((ncarbon, nsulphur))
 }
 
-/// (C, S) counts for `sequence` (a bare, mod-stripped peptide on the hot path).
-/// Try the allocation-free table first. Use mzcore for empty or non-standard
-/// input, where it remains the authority.
-pub fn count_carbon_sulphur_in_sequence(sequence: &str) -> Result<(u16, u16), String> {
-    if let Some(cs) = count_cs_fast(sequence) {
-        return Ok(cs);
-    }
-    count_carbon_sulphur_in_sequence_mzcore(sequence)
-}
-
+#[cfg(test)]
 fn count_carbon_sulphur_in_sequence_mzcore(sequence: &str) -> Result<(u16, u16), String> {
     let peptide = crate::models::sequence::parse_proforma(sequence)
         .map_err(|e| format!("Error parsing peptide sequence {sequence}: {e}"))?;
@@ -131,11 +123,6 @@ fn count_carbon_sulphur_in_sequence_mzcore(sequence: &str) -> Result<(u16, u16),
     }
     let form = pep_formulas[0].clone();
     Ok(count_carbon_sulphur(&form))
-}
-
-pub fn isotope_dist_from_seq(sequence: &str) -> Result<[f32; 3], String> {
-    let (ncarbon, nsulphur) = count_carbon_sulphur_in_sequence(sequence)?;
-    Ok(peptide_isotopes(ncarbon, nsulphur))
 }
 
 #[cfg(test)]

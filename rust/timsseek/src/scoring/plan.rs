@@ -19,6 +19,7 @@ use super::blocks::{
     NameSink,
     ScoreBlock,
 };
+use crate::fragment_mass::isotope_plan::IsotopePlan;
 use serde::Serialize;
 use std::sync::Arc;
 use timsquery::chemistry::analyte::{
@@ -123,12 +124,14 @@ impl std::fmt::Display for OperationDecision {
 /// Owned by its reference library; callers cannot install a plan from another library.
 #[derive(Debug, Clone, Serialize)]
 pub struct ScoringPlan {
+    isotopes: IsotopePlan,
     rows: usize,
     unmodified_rows: usize,
     operations: Vec<OperationDecision>,
 }
 impl ScoringPlan {
-    pub(crate) fn resolve(geom: &TargetColumns<IonAnnot>) -> Self {
+    pub(crate) fn resolve(geom: &TargetColumns<IonAnnot>) -> Result<Self, String> {
+        let isotopes = IsotopePlan::resolve(geom)?;
         let mut unmodified_rows = 0;
         let mut residues = Coverage::default();
         let mut modifications = Coverage::default();
@@ -172,19 +175,24 @@ impl ScoringPlan {
                 }
             })
             .collect();
-        Self {
+        Ok(Self {
+            isotopes,
             rows,
             unmodified_rows,
             operations,
-        }
+        })
     }
 
     /// Plan-level counts, shared by CLI and viewer reporting.
     pub fn summary(&self) -> String {
         format!(
-            "{} library entries; {} unmodified (known empty modification list)",
-            self.rows, self.unmodified_rows
+            "{} library entries; {} unmodified (known empty modification list); {}",
+            self.rows, self.unmodified_rows, self.isotopes
         )
+    }
+
+    pub fn isotopes(&self) -> &IsotopePlan {
+        &self.isotopes
     }
 
     pub fn unmodified_rows(&self) -> usize {
@@ -268,7 +276,7 @@ mod tests {
             &"A".repeat(300),
         ] {
             let geom = arena(&Analyte::from_sequence(sequence));
-            let plan = ScoringPlan::resolve(&geom);
+            let plan = ScoringPlan::resolve(&geom).unwrap();
             assert!(plan.enabled(Operation::ResidueCounts), "{sequence}");
             assert!(plan.enabled(Operation::ModificationCounts), "{sequence}");
             assert_eq!(plan.width(), 22);
@@ -284,7 +292,7 @@ mod tests {
             Analyte::from_sequence_fields("PEP[unresolved]TIDE", "PEPTIDE").unwrap(),
         ] {
             let geom = arena(&analyte);
-            let plan = ScoringPlan::resolve(&geom);
+            let plan = ScoringPlan::resolve(&geom).unwrap();
             assert!(plan.enabled(Operation::ResidueCounts));
             assert!(!plan.enabled(Operation::ModificationCounts));
             assert_eq!(plan.width(), 21);
@@ -314,7 +322,7 @@ mod tests {
                 peptide,
                 ..Default::default()
             });
-            let plan = ScoringPlan::resolve(&geom);
+            let plan = ScoringPlan::resolve(&geom).unwrap();
             assert_eq!(plan.width(), 0);
             assert_eq!(plan.unmodified_rows, 99);
             let coverage = &plan.operations()[0].coverage;
@@ -344,7 +352,7 @@ mod tests {
             ..Default::default()
         });
         let geom = builder.seal(DecoyPolicy::Never).unwrap();
-        let plan = ScoringPlan::resolve(&geom);
+        let plan = ScoringPlan::resolve(&geom).unwrap();
         assert_eq!(plan.width(), 0);
         assert_eq!(plan.operations()[0].coverage.missing, 1);
     }
@@ -367,7 +375,7 @@ mod tests {
             },
             ..Default::default()
         });
-        let plan = ScoringPlan::resolve(&geom);
+        let plan = ScoringPlan::resolve(&geom).unwrap();
         assert_eq!(plan.operations()[0].coverage.recovered, 1);
         assert!(
             plan.operations()[0]
@@ -388,7 +396,7 @@ mod tests {
     #[should_panic(expected = "plan promised residues")]
     fn broken_plan_promise_is_an_invariant_failure() {
         let geom = arena(&Analyte::from_sequence("PEPTIDE"));
-        ScoringPlan::resolve(&geom).project(
+        ScoringPlan::resolve(&geom).unwrap().project(
             || AnalyteRef {
                 peptide: PropertyRef::Missing,
                 formula: PropertyRef::Missing,

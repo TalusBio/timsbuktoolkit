@@ -33,6 +33,15 @@ Standalone `calib_dash` reads saved `calibration.json`, not a spectral library.
 [Analyte module documentation](../rust/timsquery/src/chemistry/analyte.rs) documents chemistry storage, reader mappings,
 library-wide sequence eligibility, and results format version 4.
 
+Precursor isotope envelopes retain the three-bin C/S approximation. Scoring
+finalization includes known modification C/S deltas or an explicitly based
+molecular formula. If any stored target or decoy lacks usable counts, every
+entry uses mass-estimated C/S. Generated mass-shift decoys reuse the parent's
+envelope. The selected method and unavailable-count reasons appear in the
+shared CLI/viewer plan report and Parquet scoring-plan metadata. Other elements
+are ignored by this approximation; isotope-labelled C/S and unspecified formula
+bases cannot supply its composition counts.
+
 ## Cargo features
 
 | Feature | Crate | Effect | Use case | Enable |

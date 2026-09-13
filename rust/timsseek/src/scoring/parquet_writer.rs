@@ -520,6 +520,9 @@ mod tests {
             .expect("plan metadata");
         let plan: serde_json::Value = serde_json::from_str(plan.value.as_deref().unwrap()).unwrap();
         assert_eq!(plan["rows"], 1);
+        assert_eq!(plan["isotopes"]["method"], "composition_cs");
+        assert_eq!(plan["isotopes"]["composition_rows"], 1);
+        assert!(plan["isotopes"].get("envelopes").is_none());
         assert_eq!(plan["unmodified_rows"], 1);
         assert_eq!(plan["operations"][0]["requirement"], "residue_sequence");
         assert_eq!(

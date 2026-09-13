@@ -765,7 +765,7 @@ mod tests {
     /// The other route: msspeculator's own mzSpecLib writer to a file, then this
     /// project's reader back off it, which is what a `build-library` followed by
     /// a `search` does.
-    fn via_file(rows: &[SpectrumRow<'_>]) -> TargetColumns<IonAnnot> {
+    fn via_file_table(rows: &[SpectrumRow<'_>]) -> TargetTable {
         let dir = tempfile::tempdir().expect("temp dir");
         // The name the sniffer dispatches on: it takes `.mzspeclib.` anywhere in
         // the file name, and reads plain text for anything not ending `.gz`.
@@ -781,17 +781,46 @@ mod tests {
             }
             writer.finish().expect("file finishes");
         }
-        let TargetTable::Mzpaf { geom, .. } = timsquery::serde::read_targets_with(
+        timsquery::serde::read_targets_with(
             &path,
             timsseek::LoadPolicy {
                 decoys: DecoyPolicy::Never,
                 ..Default::default()
             },
         )
-        .expect("the file this project writes reads back") else {
+        .expect("the file this project writes reads back")
+    }
+
+    fn via_file(rows: &[SpectrumRow<'_>]) -> TargetColumns<IonAnnot> {
+        let TargetTable::Mzpaf { geom, .. } = via_file_table(rows) else {
             panic!("an mzSpecLib library is mzpaf-labelled");
         };
         geom
+    }
+
+    #[test]
+    fn modified_prediction_and_reload_share_composition_envelopes() {
+        use timsseek::data_sources::reference_library::ExpectedIntensity;
+        use timsseek::fragment_mass::isotope_plan::IsotopeMethod;
+        let peptide = Fixture::new("PEPTC[UNIMOD:4]IDEK", "PEPTCIDEK");
+        let rows = [peptide.row(2, false, None, peaks(4))];
+        let predicted = build(&rows, DecoyPolicy::Never);
+        let reloaded = ReferenceLibrary::try_from(via_file_table(&rows)).unwrap();
+        for lib in [&predicted.library, &reloaded] {
+            assert_eq!(
+                lib.scoring_plan().isotopes().method,
+                IsotopeMethod::CompositionCs
+            );
+            let envelope: Vec<_> = lib
+                .iter()
+                .next()
+                .unwrap()
+                .expected_precursor_envelope()
+                .iter()
+                .map(|(_, value)| *value)
+                .collect();
+            assert_eq!(envelope, timsseek::isotopes::peptide_isotopes(45, 1));
+        }
     }
 
     /// This row's fragments as label to m/z, which is how the two routes can be
