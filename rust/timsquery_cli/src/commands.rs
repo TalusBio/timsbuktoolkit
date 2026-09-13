@@ -94,7 +94,7 @@ pub fn main_query_index(args: QueryIndexArgs) -> Result<(), CliError> {
             &put_path,
             batch_size,
         ),
-        TargetTable::Str { geom } => stream_process_batches(
+        TargetTable::Str { geom, .. } => stream_process_batches(
             &geom,
             aggregator_use,
             &index,
@@ -493,7 +493,7 @@ mod tests {
         let arena = read_query_elution_groups(tmp_file.path()).unwrap();
 
         let geom = match arena {
-            TargetTable::Str { geom } => geom,
+            TargetTable::Str { geom, .. } => geom,
             TargetTable::Mzpaf { .. } => {
                 panic!("string labels must land in the Str arena, not Mzpaf")
             }

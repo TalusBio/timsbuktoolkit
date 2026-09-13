@@ -33,6 +33,8 @@ pub struct ReferenceLibrary {
     /// Parallel to `geom.frag_labels` / `geom.frag_mzs`; same `frag_off` ranges.
     frag_intens: Vec<f32>,
     plan: plan::ScoringPlan,
+    /// Original opaque labels; aligned with packed extraction keys when present.
+    opaque_labels: Option<Vec<std::sync::Arc<str>>>,
 }
 
 pub trait ExpectedIntensity {
@@ -52,6 +54,12 @@ impl ReferenceLibrary {
     /// Immutable query geometry; replacing it would invalidate library validation.
     pub fn geometry(&self) -> &TargetColumns<IonAnnot> {
         &self.geom
+    }
+
+    /// Source opaque labels in fragment order, when this library used string keys.
+    /// Packed geometry keys are internal extraction handles, not chemical annotations.
+    pub fn opaque_fragment_labels(&self) -> Option<&[std::sync::Arc<str>]> {
+        self.opaque_labels.as_deref()
     }
 
     /// Reference intensities in the geometry's fragment order.
@@ -107,19 +115,11 @@ impl ReferenceLibrary {
             })
     }
 
-    /// Narrow a label-generic [`TargetTable`] (timsquery's one library funnel)
-    /// into the ion-annotated `ReferenceLibrary` timsseek scores against.
-    ///
-    /// Scoring requires an `Mzpaf` arena with reference fragment intensities.
-    /// Rejects string labels, missing/misaligned intensities, repeated fragment
-    /// keys within a row, unsupported isotope counts, and nonempty libraries
-    /// with no annotated fragments. These are scoring restrictions;
-    /// query extraction also accepts geometry with opaque fragment labels.
-    /// Readers that supply reference intensities preserve them in the sidecar;
-    /// this includes the DIA-NN TSV/Parquet adapters.
-    ///
-    /// Resolves the operation plan from the validated arena. The public load
-    /// boundary additionally reports decoys, operation coverage, and isotope fallbacks.
+    /// Validate retained fragments and their aligned reference intensities, then
+    /// resolve library-wide operations. String keys are opaque: preserve their
+    /// source labels while assigning packed unknown keys for extraction.
+    /// Missing/misaligned intensities, duplicate keys, unsupported isotope counts
+    /// and nonempty libraries without retained fragments are rejected.
     pub(crate) fn from_arena(arena: TargetTable) -> Result<Self, TargetReadingError> {
         match arena {
             TargetTable::Mzpaf { geom, frag_intens } => {
@@ -169,9 +169,7 @@ impl ReferenceLibrary {
                 if geom.n_rows() > 0 && geom.n_fragments() == 0 {
                     return Err(TargetReadingError::UnsupportedFormat {
                         message: format!(
-                            "library has {} entries and not one annotated fragment; timsseek \
-                             scores annotated peptide fragments, so there is nothing here to \
-                             score against",
+                            "library has {} entries and no retained fragments; there is nothing to score against",
                             geom.n_rows()
                         ),
                     });
@@ -182,12 +180,57 @@ impl ReferenceLibrary {
                     geom,
                     frag_intens,
                     plan,
+                    opaque_labels: None,
                 })
             }
-            TargetTable::Str { .. } => Err(TargetReadingError::UnsupportedFormat {
-                message: "timsseek requires ion-annotated fragments (mzpaf); got string labels"
-                    .to_string(),
-            }),
+            TargetTable::Str { geom, frag_intens } => {
+                use timsquery::models::{
+                    Row,
+                    TargetColumnsBuilder,
+                };
+                let mut builder =
+                    TargetColumnsBuilder::with_capabilities(geom.capabilities().clone());
+                let mut opaque_labels = Vec::with_capacity(geom.n_fragments());
+                for row in geom.rows() {
+                    let mut seen = HashSet::new();
+                    let mut counter = timsquery::ion::UnknownIonCounter::default();
+                    let mut fragments = Vec::with_capacity(geom.frag_labels(row).len());
+                    for (label, &mz) in geom.frag_labels(row).iter().zip(geom.frag_mzs(row)) {
+                        if !seen.insert(label) {
+                            return Err(TargetReadingError::InvalidLibrary {
+                                message: format!(
+                                    "source {:?}: duplicate fragment key {label:?}",
+                                    geom.output_id(row)
+                                ),
+                            });
+                        }
+                        // Packed unknown keys only identify peaks. Their placeholder
+                        // charge is never evidence for a chemistry-dependent operation.
+                        let key = counter.next_unknown(1).map_err(|e| TargetReadingError::UnsupportedFormat { message: format!("source {:?}: opaque scoring currently supports at most 255 peaks per entry: {e}", geom.output_id(row)) })?;
+                        fragments.push((key, mz));
+                        opaque_labels.push(label.clone());
+                    }
+                    let analyte = geom.analyte(row).to_owned();
+                    builder.push_row(Row {
+                        precursor_mz: geom.precursor_mz(row),
+                        charge: geom.charge(row),
+                        rt_seconds: geom.rt_seconds(row),
+                        mobility: geom.mobility(row),
+                        frags: &fragments,
+                        analyte: analyte.as_input(),
+                        entry_name: geom.entry_name(row),
+                        is_decoy: geom.is_decoy(row),
+                        id: Some(geom.output_id(row).to_owned_id()),
+                        decoy_group: Some(geom.decoy_group(row).to_owned_id()),
+                    });
+                }
+                let geom = builder
+                    .seal(crate::models::DecoyPolicy::Never)
+                    .map_err(timsquery::serde::TargetReadingError::from)?;
+                let mut library = Self::from_arena(TargetTable::Mzpaf { geom, frag_intens })?;
+                library.opaque_labels = Some(opaque_labels);
+                Ok(library)
+            }
         }
     }
 }
@@ -207,6 +250,10 @@ impl<'a> RefQuery<'a> {
             lib,
             geom: Query::new(&lib.geom, flat),
         }
+    }
+
+    pub fn scoring_plan(&self) -> &plan::ScoringPlan {
+        &self.lib.plan
     }
 
     pub fn geom(&self) -> &Query<&'a TargetColumns<IonAnnot>, IonAnnot> {
@@ -444,8 +491,7 @@ impl ReferenceLibrary {
     /// What will actually be scored on the decoy side of the FDR estimate.
     ///
     /// Read off the counts rather than off `caps.decoys`: what matters at load
-    /// time is whether anything is there, and the one case worth a warning --
-    /// nothing derived and nothing shipped -- is not a strategy.
+    /// time is whether any decoys will actually be scored.
     fn report_decoys(&self) {
         let n_rows = self.geom.n_rows();
         let n_stored_decoys = self.geom.n_stored_decoys();
@@ -459,10 +505,9 @@ impl ReferenceLibrary {
                  scored entries",
             );
         } else if n_stored_decoys == 0 {
-            tracing::warn!(
-                "Library ships no decoys and none will be derived; scoring {n_rows} stored \
-                 rows as-is. FDR would be estimated with nothing to estimate it from. Use \
-                 --decoy-strategy if-missing to derive mass-shift decoys.",
+            tracing::info!(
+                "Library ships no decoys and none will be derived; search will write raw \
+                 scores for {n_rows} stored rows without FDR estimates",
             );
         } else {
             tracing::info!(
@@ -652,8 +697,49 @@ mod tests {
         let sgeom = sgeom
             .seal(crate::models::DecoyPolicy::Never)
             .expect("an empty arena seals");
-        let s = TargetTable::Str { geom: sgeom };
+        let s = TargetTable::Str {
+            geom: sgeom,
+            frag_intens: None,
+        };
         assert!(ReferenceLibrary::try_from(s).is_err());
+    }
+
+    #[test]
+    fn opaque_labels_keep_identity_geometry_intensity_and_disable_generation() {
+        use std::sync::Arc;
+        use timsquery::models::OwnedSourceId;
+        let mut builder = TargetColumnsBuilder::<Arc<str>>::with_capabilities(
+            TargetCapabilities::default_unlabeled(),
+        );
+        let labels: [Arc<str>; 2] = [Arc::from("arbitrary product"), Arc::from("y3")];
+        builder.push_row(Row {
+            id: Some(OwnedSourceId::Text("original-id".into())),
+            entry_name: Some("independent name"),
+            precursor_mz: 500.0,
+            charge: 2,
+            frags: &[(labels[0].clone(), 200.0), (labels[1].clone(), 300.0)],
+            ..Default::default()
+        });
+        let geom = builder.seal(crate::models::DecoyPolicy::IfMissing).unwrap();
+        assert_eq!(geom.variants_per_row(), 1);
+        let lib = ReferenceLibrary::try_from(TargetTable::Str {
+            geom,
+            frag_intens: Some(vec![1.0, 0.5]),
+        })
+        .unwrap();
+        assert_eq!(lib.opaque_fragment_labels().unwrap(), &labels);
+        assert!(!lib.scoring_plan().fragment_isotopes().enabled);
+        assert_eq!(lib.scoring_plan().width(), 0);
+        let q = lib.iter().next().unwrap();
+        assert_eq!(q.output_id().to_string(), "original-id");
+        let row = q.geom().row();
+        assert_eq!(lib.geometry().entry_name(row), Some("independent name"));
+        assert_eq!(lib.geometry().frag_mzs(row), &[200.0, 300.0]);
+        assert_eq!(lib.fragment_intensities(), &[1.0, 0.5]);
+        assert!(lib.geometry().frag_labels(row).iter().all(|label| matches!(
+            label.series_ordinal(),
+            timsquery::ion::IonSeriesOrdinal::unknown { .. }
+        )));
     }
 
     #[test]
@@ -1334,41 +1420,14 @@ mod load_tests {
         assert_ne!(groups[0], groups[3], "separate rows do not");
     }
 
-    /// `Force` over a library that ships its own decoys, the one state a
-    /// hand-built arena cannot reach.
-    ///
-    /// The drop is `DecoyPolicy::accepts`, applied by the reader as it pushes
-    /// rows, so `seal` never sees the decoys at all; a fixture that dropped them
-    /// itself would be asserting on the test's own arithmetic. Read through
-    /// `from_file` for that reason. timsquery's
-    /// `skipping_shipped_decoys_leaves_only_targets` covers the arena side of
-    /// the same load; this is what scoring then reads off it.
     #[test]
-    fn forcing_mass_shift_decoys_replaces_the_ones_a_library_shipped() {
+    fn placeholder_fragment_charges_disable_mass_shift_decoys() {
         let path = timsquery_fixture("mzspeclib_files/target_decoy_attribute_set.mzspeclib.txt");
-        let lib =
+        let library =
             ReferenceLibrary::from_file(&path, deciding_decoys(crate::models::DecoyPolicy::Force))
-                .expect("the fixture loads");
-
-        assert_eq!(
-            lib.geom.n_rows(),
-            5,
-            "the five targets, without their decoys"
-        );
-        assert_eq!(lib.geom.n_stored_decoys(), 0, "the shipped decoys are gone");
-        assert_eq!(lib.geom.variants_per_row(), 3);
-
-        let marks = marks_of(&lib);
-        assert_eq!(marks.len(), 15, "five rows, three variants each");
-        assert!(
-            marks.chunks(3).all(|row| row
-                == [
-                    DecoyMarking::Target,
-                    DecoyMarking::MassShiftedDecoy,
-                    DecoyMarking::MassShiftedDecoy
-                ]),
-            "every row is a target with two derived decoys, got {marks:?}"
-        );
+                .unwrap();
+        assert_eq!(library.geom.variants_per_row(), 1);
+        assert_eq!(library.geom.n_stored_decoys(), 0);
     }
 
     /// The exclusion `decoy_marking` reads as "variant 0 and not a target means
@@ -1512,32 +1571,24 @@ mod load_tests {
             panic!("expected an unsupported-format refusal, got {err:?}");
         };
         assert!(
-            message.contains("not one annotated fragment"),
+            message.contains("no retained fragments"),
             "the refusal has to say what is missing: {message}"
         );
     }
 
-    /// The same library under the default policy, which keeps an unannotated
-    /// peak at the m/z the file measured: the arena has fragments, so the guard
-    /// above has nothing to refuse and the library is searchable.
-    ///
-    /// Five peaks, one row, and no sequence -- a small molecule has none, so the
-    /// plan disables sequence operations while preserving spectrum features.
+    /// Opaque peaks can serve common scoring/viewing without invented chemistry.
+    /// A library without suitable decoys cannot use the supervised CLI route.
     #[test]
-    fn the_default_policy_makes_that_same_library_searchable() {
-        let lib = ReferenceLibrary::from_file(
-            &timsquery_fixture("mzspeclib_files/small_molecule.mzspeclib.txt"),
-            crate::models::LoadPolicy::default(),
-        )
-        .expect("a library whose peaks were kept has something to score against");
-
+    fn sequence_free_library_preserves_peaks_and_disables_chemistry_operations() {
+        let path = timsquery_fixture("mzspeclib_files/small_molecule.mzspeclib.txt");
+        let lib = ReferenceLibrary::from_file(&path, Default::default()).unwrap();
+        assert_eq!(lib.geom.variants_per_row(), 1);
         assert_eq!(lib.geom.n_rows(), 1);
         assert_eq!(lib.geom.n_fragments(), 5);
-        assert_eq!(lib.frag_intens.len(), 5, "the sidecar stays parallel");
-        assert!(
-            !lib.all_sequence_counts_enabled(),
-            "a small molecule has no sequence"
-        );
+        assert_eq!(lib.frag_intens.len(), 5);
+        assert!(!lib.all_sequence_counts_enabled());
+        assert!(!lib.scoring_plan().fragment_isotopes().enabled);
+        assert_eq!(lib.scoring_plan().fragment_isotopes().usable_fragments, 0);
     }
 
     /// Geometry-only arenas can serve extraction, but scoring requires the

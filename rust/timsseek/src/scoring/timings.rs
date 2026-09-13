@@ -137,6 +137,8 @@ impl std::ops::AddAssign for PrescoreTimings {
 /// All timing fields are in milliseconds.
 #[derive(Debug, Default, Serialize)]
 pub struct PipelineReport {
+    /// No calibration, competition, rescoring or q-value filtering was applied.
+    pub raw_scores: bool,
     // Per-file: index loading (ms)
     pub load_index_ms: u64,
 

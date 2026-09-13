@@ -9,6 +9,12 @@ use std::sync::Arc;
 /// label-generic flyweight compiles. Labels without ion chemistry apply the
 /// identity shift.
 pub trait DecoyShift {
+    /// Whether this label supplies the facts required for a mass-shift decoy.
+    /// The arena requires this for every retained fragment before generating any.
+    fn supports_decoy_shift(&self) -> bool {
+        false
+    }
+
     /// Decoy m/z shift. Identity for labels without ion chemistry.
     fn decoy_shift_mz(&self, mz: f64, shift: f64) -> f64;
 }
@@ -31,6 +37,13 @@ pub trait FragmentLabel: KeyLike + DecoyShift {
 }
 
 impl DecoyShift for IonAnnot {
+    fn supports_decoy_shift(&self) -> bool {
+        !matches!(
+            self.series_ordinal(),
+            micromzpaf::IonSeriesOrdinal::unknown { .. }
+        ) && self.get_charge() > 0
+    }
+
     fn decoy_shift_mz(&self, mz: f64, shift: f64) -> f64 {
         // Verbatim `create_mass_shifted_decoy` rule: shift ordinal>2 (and
         // ordinal-less) fragments by `shift / charge`; leave ordinal<=2 alone.

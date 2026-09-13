@@ -35,7 +35,7 @@ fn build_library_writes_a_readable_library_and_sidecar() {
     .expect("generated library reads back");
     let rows = match table {
         timsquery::serde::TargetTable::Mzpaf { geom, .. } => geom.n_rows(),
-        timsquery::serde::TargetTable::Str { geom } => geom.n_rows(),
+        timsquery::serde::TargetTable::Str { geom, .. } => geom.n_rows(),
     };
     assert!(rows > 0);
 

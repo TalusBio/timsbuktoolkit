@@ -10,10 +10,10 @@ pub struct TargetCapabilities {
     pub decoys: DecoyStrategy,
 }
 
-/// Runtime reflection of whether this arena's label carries ion chemistry
-/// (`FragmentLabel`). `IonAnnot` arenas => `Available`; string-labelled
-/// arenas => `Unavailable`. Sequence-operation eligibility is resolved from
-/// stored analyte facts by the scoring library.
+/// Whether the label representation can carry ion chemistry. `IonAnnot` may
+/// still contain unknown placeholders; scoring inspects actual labels across
+/// the whole library before enabling operations. Sequence-operation eligibility
+/// is independently resolved from stored analyte facts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FragmentFeatureState {
     Available,
@@ -126,9 +126,9 @@ impl std::str::FromStr for DecoyPolicy {
 /// What to do with a peak this reader cannot annotate.
 ///
 /// A kept peak lands at the m/z the file measured, where an annotated one lands
-/// at the m/z its annotation implies. Nothing downstream can tell the two apart
-/// once they are in the arena, so which of them a library is made of is the
-/// caller's decision rather than a fallback the reader picks.
+/// at the m/z its annotation implies. Unknown keys remain recognizable downstream
+/// and cannot establish fragment chemistry. The policy chooses which peaks to
+/// retain; operation eligibility is resolved over all retained labels.
 ///
 /// Asked only of a library that annotates nothing at all, with
 /// [`KeepAll`](Self::KeepAll) the exception that asks nothing. mzPAF spells

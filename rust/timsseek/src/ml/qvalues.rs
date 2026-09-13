@@ -419,7 +419,7 @@ pub fn rescore(mut data: Vec<CompetedCandidate>, library: &ReferenceLibrary) -> 
 /// Selected via the `rescore_model` config field / `--rescore-model` CLI flag
 /// ([`crate::ml::RescoreModel::Lda`]).
 /// See `ml::lda` for the fit details.
-pub fn rescore_lda(mut data: Vec<CompetedCandidate>, _library: &ReferenceLibrary) -> RescoreResult {
+pub fn rescore_lda(mut data: Vec<CompetedCandidate>, library: &ReferenceLibrary) -> RescoreResult {
     // Canonical sort + seeded shuffle -- the same helper, key and seed as every
     // other rescorer.
     canonicalize_and_shuffle(&mut data);
@@ -429,17 +429,15 @@ pub fn rescore_lda(mut data: Vec<CompetedCandidate>, _library: &ReferenceLibrary
     // emit time by the grammar, so there is no data-dependent normalization step
     // here -- the only remaining data-dependent op is LDA's own standardization.
     // Built after the shuffle, per `canonicalize_and_shuffle`.
-    let names: Vec<Arc<str>> = linear_feature_name_set();
+    let names: Vec<Arc<str>> = linear_feature_name_set(library);
     let nrows = data.len();
-    let ncols = LINEAR_NCOLS;
+    let ncols = linear_ncols(library);
     debug_assert_eq!(names.len(), ncols);
 
-    let dataset = StreamingDataset::new(
-        &data,
-        names.clone(),
-        N_RESCORE_FOLDS as usize,
-        &write_competed_linear_row,
-    );
+    let write_row = |candidate: &CompetedCandidate, out: &mut [f64]| {
+        write_competed_linear_row(library, candidate, out)
+    };
+    let dataset = StreamingDataset::new(&data, names.clone(), N_RESCORE_FOLDS as usize, &write_row);
 
     let cf = crossfit_lda(&dataset)?;
     debug!("LDA cross-fit scored {nrows} candidates across {N_RESCORE_FOLDS} folds");
@@ -459,12 +457,16 @@ pub fn rescore_lda(mut data: Vec<CompetedCandidate>, _library: &ReferenceLibrary
 ///
 /// The fold count and assignment match the GBM's
 /// [`CrossValidatedScorer`] partition.
-fn hybrid_linear_dataset(data: &[CompetedCandidate]) -> StreamingDataset<'_, CompetedCandidate> {
+fn hybrid_linear_dataset<'a>(
+    library: &ReferenceLibrary,
+    data: &'a [CompetedCandidate],
+    write_row: &'a (dyn Fn(&CompetedCandidate, &mut [f64]) + Sync),
+) -> StreamingDataset<'a, CompetedCandidate> {
     StreamingDataset::new(
         data,
-        linear_feature_name_set(),
+        linear_feature_name_set(library),
         N_RESCORE_FOLDS as usize,
-        &write_competed_linear_row,
+        write_row,
     )
 }
 
@@ -536,7 +538,10 @@ pub fn rescore_hybrid(
     // `canonicalize_and_shuffle`), so row `i` is the same candidate in the
     // streamed linear source, nonlinear frame, lda_score, responses, and moved data.
     let responses: Vec<f64> = data.iter().map(|c| c.get_y()).collect();
-    let lin_dataset = hybrid_linear_dataset(&data);
+    let write_row = |candidate: &CompetedCandidate, out: &mut [f64]| {
+        write_competed_linear_row(library, candidate, out)
+    };
+    let lin_dataset = hybrid_linear_dataset(library, &data, &write_row);
 
     let lda_score = crossfit::<_, LdaModel>(&lin_dataset, &LdaConfig::default(), "LDA")?.scores;
 
@@ -635,8 +640,11 @@ const BASE_NONLINEAR_NCOLS: usize =
 fn nonlinear_ncols(library: &ReferenceLibrary) -> usize {
     BASE_NONLINEAR_NCOLS + library.scoring_plan().width()
 }
+fn linear_ncols(library: &ReferenceLibrary) -> usize {
+    library.scoring_plan().linear_indices().len() + ResultMeta::LINEAR_LEN + Derived::LINEAR_LEN
+}
 fn all_ncols(library: &ReferenceLibrary) -> usize {
-    LINEAR_NCOLS + nonlinear_ncols(library)
+    linear_ncols(library) + nonlinear_ncols(library)
 }
 const _: () = assert!(LINEAR_NCOLS > 0 && BASE_NONLINEAR_NCOLS > 0);
 
@@ -686,12 +694,21 @@ impl ValueSink for SliceSink<'_> {
 
 /// Project one row's linear values into a streaming or retained sink.
 fn project_linear_row(
+    library: &ReferenceLibrary,
     scoring: &ScoringFields,
     meta: &ResultMeta,
     derived: &Derived,
     out: &mut impl ValueSink,
 ) {
-    out.push(&scoring.linear_feature_array());
+    let values = scoring.linear_feature_array();
+    let indices = library.scoring_plan().linear_indices();
+    if indices.len() == values.len() {
+        out.push(&values);
+    } else {
+        for &i in indices {
+            out.push(&values[i..i + 1]);
+        }
+    }
     out.push(&meta.linear_feature_array());
     out.push(&derived.linear_feature_array());
 }
@@ -726,29 +743,39 @@ fn write_competed_all_row(
     let meta = candidate.result_meta();
     let derived = Derived::compute(scoring);
     let mut sink = SliceSink::new(out);
-    project_linear_row(scoring, &meta, &derived, &mut sink);
+    project_linear_row(library, scoring, &meta, &derived, &mut sink);
     project_nonlinear_row(library, scoring, &meta, &derived, &mut sink);
     sink.finish();
 }
 
 /// Matrix-free LINEAR-lane projection for the standalone and hybrid LDA paths.
-fn write_competed_linear_row(candidate: &CompetedCandidate, out: &mut [f64]) {
-    assert_eq!(out.len(), LINEAR_NCOLS);
+fn write_competed_linear_row(
+    library: &ReferenceLibrary,
+    candidate: &CompetedCandidate,
+    out: &mut [f64],
+) {
+    assert_eq!(out.len(), linear_ncols(library));
     let scoring = &candidate.scoring;
     let meta = candidate.result_meta();
     let derived = Derived::compute(scoring);
     let mut sink = SliceSink::new(out);
-    project_linear_row(scoring, &meta, &derived, &mut sink);
+    project_linear_row(library, scoring, &meta, &derived, &mut sink);
     sink.finish();
 }
 
 /// The LINEAR-lane matrix for `data` in its current order.
 #[cfg(test)]
-fn build_linear_matrix(data: &[CompetedCandidate]) -> Vec<f64> {
-    let mut out = Vec::with_capacity(data.len() * LINEAR_NCOLS);
+fn build_linear_matrix(library: &ReferenceLibrary, data: &[CompetedCandidate]) -> Vec<f64> {
+    let mut out = Vec::with_capacity(data.len() * linear_ncols(library));
     for c in data {
         let meta = c.result_meta();
-        project_linear_row(&c.scoring, &meta, &Derived::compute(&c.scoring), &mut out);
+        project_linear_row(
+            library,
+            &c.scoring,
+            &meta,
+            &Derived::compute(&c.scoring),
+            &mut out,
+        );
     }
     out
 }
@@ -781,7 +808,7 @@ fn build_all_matrix<'a>(
     let mut out = Vec::with_capacity(rows.len() * all_ncols(library));
     for (s, meta) in rows {
         let derived = Derived::compute(s);
-        project_linear_row(s, &meta, &derived, &mut out);
+        project_linear_row(library, s, &meta, &derived, &mut out);
         project_nonlinear_row(library, s, &meta, &derived, &mut out);
     }
     out
@@ -810,12 +837,20 @@ pub fn feature_frame(
 }
 
 /// LINEAR-lane feature names (LDA), in `project_linear_row`'s order.
-pub fn linear_feature_name_set() -> Vec<Arc<str>> {
+pub fn linear_feature_name_set(library: &ReferenceLibrary) -> Vec<Arc<str>> {
     let mut n = NameSink::new();
     <ScoringFields as ScoreBlock>::linear_feature_names(&mut n);
+    let all = n.into_names();
+    let mut n = NameSink::new();
     <ResultMeta as ScoreBlock>::linear_feature_names(&mut n);
     <Derived as ScoreBlock>::linear_feature_names(&mut n);
-    n.into_names()
+    library
+        .scoring_plan()
+        .linear_indices()
+        .iter()
+        .map(|&i| all[i].clone())
+        .chain(n.into_names())
+        .collect()
 }
 
 /// NONLINEAR-lane feature names, in `project_nonlinear_row`'s order. The
@@ -833,7 +868,7 @@ pub fn nonlinear_feature_name_set(library: &ReferenceLibrary) -> Vec<Arc<str>> {
 /// The ALL-lane feature names (GBM) = linear ++ nonlinear, matching
 /// `build_all_matrix`'s column order.
 pub fn all_feature_name_set(library: &ReferenceLibrary) -> Vec<Arc<str>> {
-    let mut v = linear_feature_name_set();
+    let mut v = linear_feature_name_set(library);
     v.extend(nonlinear_feature_name_set(library));
     v
 }
@@ -988,6 +1023,12 @@ mod feature_tests {
         ))
     }
     fn library_with_analyte(analyte: timsquery::chemistry::analyte::Analyte) -> ReferenceLibrary {
+        library_with_labels(analyte, &["y1"])
+    }
+    fn library_with_labels(
+        analyte: timsquery::chemistry::analyte::Analyte,
+        labels: &[&str],
+    ) -> ReferenceLibrary {
         use timsquery::models::{
             Row,
             TargetColumnsBuilder,
@@ -996,7 +1037,10 @@ mod feature_tests {
         let mut builder = TargetColumnsBuilder::with_capabilities(
             timsquery::models::TargetCapabilities::default_diann(),
         );
-        let frags = [(timsquery::ion::IonAnnot::try_from("y1").unwrap(), 300.0)];
+        let frags: Vec<_> = labels
+            .iter()
+            .map(|label| (timsquery::ion::IonAnnot::try_from(*label).unwrap(), 300.0))
+            .collect();
         for _ in 0..1024 {
             builder.push_row(Row {
                 analyte: analyte.as_input(),
@@ -1007,8 +1051,10 @@ mod feature_tests {
             });
         }
         ReferenceLibrary::from_sealed_arena(TargetTable::Mzpaf {
-            geom: builder.seal(Default::default()).unwrap(),
-            frag_intens: Some(vec![1.0; 1024]),
+            geom: builder
+                .seal(timsquery::models::capabilities::DecoyPolicy::Never)
+                .unwrap(),
+            frag_intens: Some(vec![1.0; 1024 * labels.len()]),
         })
         .unwrap()
     }
@@ -1061,6 +1107,40 @@ mod feature_tests {
         }
     }
 
+    #[test]
+    fn one_unknown_fragment_disables_isotope_features_in_every_projection() {
+        let full = library();
+        let mixed = library_with_labels(
+            timsquery::chemistry::analyte::Analyte::from_sequence("PEPTIDEK"),
+            &["y1", "?1"],
+        );
+        assert!(!mixed.scoring_plan().fragment_isotopes().enabled);
+        assert_eq!(
+            mixed.scoring_plan().fragment_isotopes().usable_fragments,
+            1024
+        );
+        let data = vec![sample_competed_candidate()];
+        let full_names = all_feature_name_set(full);
+        let full_values = build_all_matrix(full, competed_rows(&data));
+        let names = all_feature_name_set(&mixed);
+        let values = build_all_matrix(&mixed, competed_rows(&data));
+        assert_eq!(full_names.len() - names.len(), 2);
+        assert_eq!(values.len(), names.len());
+        for (name, value) in names.iter().zip(&values) {
+            assert!(!name.starts_with("ms2_isotope_lazyscore"));
+            let i = full_names.iter().position(|n| n == name).unwrap();
+            assert_eq!(value.to_bits(), full_values[i].to_bits());
+        }
+        let mut streamed = vec![0.0; values.len()];
+        write_competed_all_row(&mixed, &data[0], &mut streamed);
+        assert_eq!(streamed, values);
+        let linear = build_linear_matrix(&mixed, &data);
+        let mut streamed = vec![0.0; linear.len()];
+        write_competed_linear_row(&mixed, &data[0], &mut streamed);
+        assert_eq!(streamed, linear);
+        assert_eq!(linear.len(), linear_feature_name_set(&mixed).len());
+    }
+
     // --- Lane walks (the live ML path) ---
 
     /// LANE WIDTH PARITY: a lane matrix's row width MUST equal that lane's
@@ -1075,14 +1155,14 @@ mod feature_tests {
     fn lane_matrix_widths_match_name_sets() {
         for context in [library_with_sequence("PEPTIDEK"), library_with_sequence("")] {
             let data = vec![sample_competed_candidate()];
-            assert_eq!(linear_feature_name_set().len(), LINEAR_NCOLS);
+            assert_eq!(linear_feature_name_set(library()).len(), LINEAR_NCOLS);
             assert_eq!(
                 nonlinear_feature_name_set(&context).len(),
                 nonlinear_ncols(&context)
             );
             assert_eq!(all_feature_name_set(&context).len(), all_ncols(&context));
 
-            assert_eq!(build_linear_matrix(&data).len(), LINEAR_NCOLS);
+            assert_eq!(build_linear_matrix(library(), &data).len(), LINEAR_NCOLS);
             assert_eq!(
                 build_nonlinear_matrix(&context, &data).len(),
                 nonlinear_ncols(&context)
@@ -1100,7 +1180,7 @@ mod feature_tests {
     #[test]
     fn all_matrix_is_linear_then_nonlinear_per_row() {
         let data = vec![sample_competed_candidate(), sample_competed_candidate()];
-        let lin = build_linear_matrix(&data);
+        let lin = build_linear_matrix(library(), &data);
         let nl = build_nonlinear_matrix(library(), &data);
         let all = build_all_matrix(library(), competed_rows(&data));
 
@@ -1108,7 +1188,7 @@ mod feature_tests {
         for i in 0..data.len() {
             let row = &all[i * ALL_NCOLS..(i + 1) * ALL_NCOLS];
             let mut streamed_linear = vec![0.0; LINEAR_NCOLS];
-            write_competed_linear_row(&data[i], &mut streamed_linear);
+            write_competed_linear_row(library(), &data[i], &mut streamed_linear);
             assert_eq!(
                 bits(&lin[i * LINEAR_NCOLS..(i + 1) * LINEAR_NCOLS]),
                 bits(&streamed_linear),
@@ -1358,7 +1438,7 @@ mod feature_tests {
         }
 
         let lane: std::collections::HashSet<Arc<str>> =
-            linear_feature_name_set().into_iter().collect();
+            linear_feature_name_set(library()).into_iter().collect();
         let reported: std::collections::HashSet<Arc<str>> = stats[0]
             .feature_importance
             .iter()
@@ -1674,7 +1754,9 @@ mod feature_tests {
     fn crossfit_rejects_incomplete_prediction_vectors() {
         let mut data = synthetic_competed(12);
         canonicalize_and_shuffle(&mut data);
-        let dataset = hybrid_linear_dataset(&data);
+        let write_row =
+            |c: &CompetedCandidate, out: &mut [f64]| write_competed_linear_row(library(), c, out);
+        let dataset = hybrid_linear_dataset(library(), &data, &write_row);
 
         let error = match crossfit::<_, ShortPredict>(&dataset, &(), "short predictor") {
             Err(error) => error,
@@ -1698,7 +1780,9 @@ mod feature_tests {
         canonicalize_and_shuffle(&mut data);
         let responses: Vec<f64> = data.iter().map(|c| c.get_y()).collect();
 
-        let lin_dataset = hybrid_linear_dataset(&data);
+        let write_row =
+            |c: &CompetedCandidate, out: &mut [f64]| write_competed_linear_row(library(), c, out);
+        let lin_dataset = hybrid_linear_dataset(library(), &data, &write_row);
         let cf = crossfit::<_, FoldSpy>(&lin_dataset, &(), "spy").expect("the spy cannot fail");
 
         let (precomputed, names) =

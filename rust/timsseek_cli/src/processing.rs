@@ -105,6 +105,49 @@ fn write_feature_stats_sidecar(
     Ok(())
 }
 
+/// Decoy-free libraries use full-RT spectrum scoring and a schema without FDR fields.
+fn execute_raw_pipeline<I: ScorerQueriable>(
+    library: &ReferenceLibrary,
+    pipeline: &Scorer<I>,
+    options: &PipelineOptions<'_>,
+) -> Result<PipelineReport, TimsSeekError> {
+    info!(
+        "No decoys: raw spectrum scoring over full acquisition RT; calibration, competition, rescoring and q-value filtering disabled"
+    );
+    let path = std::path::Path::new(&options.output.uri).join(RESULTS_PARQUET);
+    let io_error = |source| TimsSeekError::Io {
+        source,
+        path: Some(path.clone()),
+    };
+    let mut writer =
+        timsseek::scoring::parquet_writer::ResultParquetWriter::raw(&path, 20_000, library)
+            .map_err(io_error)?;
+    let mut report = PipelineReport {
+        raw_scores: true,
+        ..Default::default()
+    };
+    let mut timings = ScoreTimings::default();
+    for batch in library.chunks(options.chunk_size) {
+        let (rows, timing, skips) = pipeline.score_raw_batch(library, &batch);
+        timings += timing;
+        report.phase3_skips += skips;
+        report.total_scored += rows.len();
+        for row in rows {
+            writer.add_raw(row).map_err(io_error)?;
+        }
+    }
+    writer.close().map_err(io_error)?;
+    report.phase3_extraction_thread_ms = timings.extraction.as_millis() as u64;
+    report.phase3_scoring_thread_ms = timings.scoring.as_millis() as u64;
+    report.phase3_spectral_query_thread_ms = timings.spectral_query.as_millis() as u64;
+    report.phase3_assembly_thread_ms = timings.assembly.as_millis() as u64;
+    println!(
+        "{} raw scored candidates; no FDR estimates",
+        report.total_scored
+    );
+    Ok(report)
+}
+
 #[cfg_attr(
     feature = "instrumentation",
     tracing::instrument(skip_all, level = "trace")
@@ -124,6 +167,13 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     pipeline: &Scorer<I>,
     options: &PipelineOptions<'_>,
 ) -> std::result::Result<PipelineReport, TimsSeekError> {
+    if !matches!(
+        speclib.geometry().capabilities().decoys,
+        timsquery::models::capabilities::DecoyStrategy::MassShift { .. }
+    ) && speclib.geometry().n_stored_decoys() == 0
+    {
+        return execute_raw_pipeline(speclib, pipeline, options);
+    }
     let PipelineOptions {
         chunk_size,
         output: out_path,
@@ -369,6 +419,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     println!("{} targets at 1% FDR", targets_at_1pct_qval);
 
     Ok(PipelineReport {
+        raw_scores: false,
         load_index_ms: 0, // set by caller after return
         phase1_prescore_ms: phase1_ms,
         phase1_detail: phase1_timings,

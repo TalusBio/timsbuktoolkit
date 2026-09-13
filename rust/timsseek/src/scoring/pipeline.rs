@@ -482,14 +482,16 @@ pub struct SecondaryLazyScoresRaw {
 /// Compute lazyscores from inner and isotope collectors.
 fn compute_secondary_lazyscores(
     inner: &SpectralCollector<IonAnnot, MzMobilityStatsCollector>,
-    isotope: &SpectralCollector<IonAnnot, f32>,
+    isotope: Option<&SpectralCollector<IonAnnot, f32>>,
 ) -> SecondaryLazyScoresRaw {
     let lazyscore = single_lazyscore(
         inner
             .iter_fragments()
             .map(|((_k, _mz), v)| v.weight() as f32),
     );
-    let iso_lazyscore = single_lazyscore(isotope.iter_fragments().map(|((_k, _mz), v)| *v));
+    let iso_lazyscore = isotope.map_or(f32::NAN, |isotope| {
+        single_lazyscore(isotope.iter_fragments().map(|((_k, _mz), v)| *v))
+    });
     let isotope_lazyscore_log_diff = lazyscore.ln_1p() - iso_lazyscore.ln_1p();
     SecondaryLazyScoresRaw {
         lazyscore,
@@ -590,6 +592,14 @@ impl<I: ScorerQueriable> Scorer<I> {
         let inner = worker.inner_collector.as_mut().expect("init above");
         inner.reset_with_overrides(query, Some(new_rt_seconds), Some(mobility as f32));
 
+        self.index.add_query(inner, isotope_tol);
+        if !query.scoring_plan().fragment_isotopes().enabled {
+            // Workers may be reused with another library. Never consume a stale
+            // isotope collector when this library disables the operation.
+            worker.isotope_collector = None;
+            return;
+        }
+
         // Isotope query holds `query` with +1 neutron offset applied
         // (buffer-override -- reuses Vec capacity after warm-up).
         let isotope_query = worker.isotope_query.get_or_insert_with(Target::empty_like);
@@ -605,8 +615,6 @@ impl<I: ScorerQueriable> Scorer<I> {
         isotope.reset_with_overrides(isotope_query, Some(new_rt_seconds), Some(mobility as f32));
 
         // Both queries share the same isotope_tol per existing logic.
-        let inner = worker.inner_collector.as_mut().expect("init above");
-        self.index.add_query(inner, isotope_tol);
         let isotope = worker.isotope_collector.as_mut().expect("init above");
         self.index.add_query(isotope, isotope_tol);
     }
@@ -621,7 +629,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         nqueries: u8,
         apex: ApexBlocks,
         inner_collector: &SpectralCollector<IonAnnot, MzMobilityStatsCollector>,
-        isotope_collector: &SpectralCollector<IonAnnot, f32>,
+        isotope_collector: Option<&SpectralCollector<IonAnnot, f32>>,
     ) -> Result<ScoredCandidate, DataProcessingError> {
         let offsets = MzMobilityOffsets::new(inner_collector, metadata.ref_mobility_ook0 as f64);
         let rel_inten = RelativeIntensityCollector::new(inner_collector);
@@ -690,17 +698,17 @@ impl<I: ScorerQueriable> Scorer<I> {
         })
     }
 
-    /// Phase 3: Score a peptide using calibrated extraction window.
-    /// Expects narrow calibrated extraction (from CalibrationResult).
+    /// Score with calibrated extraction, or full-RT extraction when calibration
+    /// is absent. Both modes share apex scoring and the enabled secondary queries.
     #[cfg_attr(
         feature = "instrumentation",
         tracing::instrument(skip_all, level = "trace")
     )]
-    fn score_calibrated_extraction(
+    fn score_extraction(
         &self,
         query: &RefQuery<'_>,
         identity: CandidateIdentity,
-        calibration: &CalibrationResult,
+        calibration: Option<&CalibrationResult>,
         worker: &mut ScoringWorker,
         timings: &mut ScoreTimings,
     ) -> Result<ScoredCandidate, SkipReason> {
@@ -708,9 +716,36 @@ impl<I: ScorerQueriable> Scorer<I> {
 
         let metadata = timed!(
             timings.extraction,
-            tracing::span!(tracing::Level::TRACE, "score_calibrated::extraction").in_scope(
-                || self.build_calibrated_extraction_into(query, identity, calibration, worker)
-            )
+            tracing::span!(tracing::Level::TRACE, "score_calibrated::extraction").in_scope(|| {
+                match calibration {
+                    Some(calibration) => {
+                        self.build_calibrated_extraction_into(query, identity, calibration, worker)
+                    }
+                    None => {
+                        let tolerance = self.broad_tolerance.clone().with_rt_tolerance(
+                            timsquery::models::tolerance::RtTolerance::Unrestricted,
+                        );
+                        super::extraction::build_extraction_into(
+                            &mut worker.extraction,
+                            query,
+                            None,
+                            &self.index,
+                            &tolerance,
+                            Some(TOP_N_FRAGMENTS),
+                        )?;
+                        Ok(super::apex_finding::CandidateMetadata {
+                            is_target: identity.is_target,
+                            charge: query.precursor_charge(),
+                            handles: identity.handles,
+                            source_id: identity.source_id,
+                            library_rt: query.rt_seconds(),
+                            calibrated_rt_seconds: f32::NAN,
+                            ref_mobility_ook0: query.mobility_ook0(),
+                            ref_precursor_mz: query.mono_precursor_mz(),
+                        })
+                    }
+                }
+            })
         )?;
 
         let scoring_ctx = worker
@@ -731,8 +766,21 @@ impl<I: ScorerQueriable> Scorer<I> {
         )?;
 
         timed!(timings.spectral_query, {
-            let spectral_tol = calibration.get_spectral_tolerance();
-            let isotope_tol = calibration.get_isotope_tolerance();
+            let spectral_tol = calibration.map_or_else(
+                || {
+                    self.broad_tolerance.clone().with_rt_tolerance(
+                        timsquery::models::tolerance::RtTolerance::Minutes((
+                            0.5 / 60.0,
+                            0.5 / 60.0,
+                        )),
+                    )
+                },
+                CalibrationResult::get_spectral_tolerance,
+            );
+            let isotope_tol = calibration.map_or_else(
+                || spectral_tol.clone(),
+                CalibrationResult::get_isotope_tolerance,
+            );
             tracing::span!(tracing::Level::TRACE, "score_calibrated::secondary_query").in_scope(
                 || {
                     self.execute_secondary_query(
@@ -746,7 +794,7 @@ impl<I: ScorerQueriable> Scorer<I> {
             )
         });
         let inner_collector = worker.inner_collector.as_ref().expect("set by secondary");
-        let isotope_collector = worker.isotope_collector.as_ref().expect("set by secondary");
+        let isotope_collector = worker.isotope_collector.as_ref();
 
         let scoring_ctx = worker
             .extraction
@@ -781,6 +829,25 @@ impl<I: ScorerQueriable> Scorer<I> {
         lib: &ReferenceLibrary,
         flats: &[FlatIdx],
         calibration: &CalibrationResult,
+    ) -> (Vec<ScoredCandidate>, ScoreTimings, SkipCounts) {
+        self.score_batch(lib, flats, Some(calibration))
+    }
+
+    /// Score spectra over the acquisition's full RT range, without calibration
+    /// or assumptions about the library's RT units. No FDR is assigned here.
+    pub fn score_raw_batch(
+        &self,
+        lib: &ReferenceLibrary,
+        flats: &[FlatIdx],
+    ) -> (Vec<ScoredCandidate>, ScoreTimings, SkipCounts) {
+        self.score_batch(lib, flats, None)
+    }
+
+    fn score_batch(
+        &self,
+        lib: &ReferenceLibrary,
+        flats: &[FlatIdx],
+        calibration: Option<&CalibrationResult>,
     ) -> (Vec<ScoredCandidate>, ScoreTimings, SkipCounts) {
         let get_item = |f| lib.item_at(f);
         let num_cycles = self.num_cycles();
@@ -833,13 +900,8 @@ impl<I: ScorerQueriable> Scorer<I> {
                         source_id: q.output_id().to_owned_id(),
                         is_target: q.is_target(),
                     };
-                    let result = self.score_calibrated_extraction(
-                        &q,
-                        identity,
-                        calibration,
-                        &mut worker,
-                        &mut t,
-                    );
+                    let result =
+                        self.score_extraction(&q, identity, calibration, &mut worker, &mut t);
                     (worker, acc.fold((result, t)))
                 },
                 |(wa, a), (_wb, b)| (wa, a.reduce(b)),

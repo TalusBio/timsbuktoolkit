@@ -184,6 +184,30 @@ pub fn build_record_batch(
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidData, e))
 }
 
+fn output_batch(
+    results: &[FinalResult],
+    geom: &TargetColumns<IonAnnot>,
+    raw: bool,
+) -> std::io::Result<RecordBatch> {
+    let batch = build_record_batch(results, geom)?;
+    if !raw {
+        return Ok(batch);
+    }
+    let mut schema = SchemaSink::new();
+    super::blocks::result_meta::ResultMeta::column_schema(&mut schema);
+    let omitted = schema.into_fields();
+    let keep: Vec<_> = batch
+        .schema()
+        .fields()
+        .iter()
+        .enumerate()
+        .filter_map(|(i, field)| {
+            (!omitted.iter().any(|omit| omit.name() == field.name())).then_some(i)
+        })
+        .collect();
+    batch.project(&keep).map_err(std::io::Error::other)
+}
+
 // ---------------------------------------------------------------------------
 // Buffered Parquet writer
 // ---------------------------------------------------------------------------
@@ -195,6 +219,7 @@ pub struct ResultParquetWriter<'a> {
     buffer: Vec<FinalResult>,
     row_group_size: usize,
     geom: &'a TargetColumns<IonAnnot>,
+    raw: bool,
 }
 
 impl<'a> ResultParquetWriter<'a> {
@@ -202,6 +227,24 @@ impl<'a> ResultParquetWriter<'a> {
         path: impl AsRef<Path>,
         row_group_size: usize,
         library: &'a crate::data_sources::reference_library::ReferenceLibrary,
+    ) -> std::io::Result<Self> {
+        Self::with_mode(path, row_group_size, library, false)
+    }
+
+    /// Common scores only: no competition, discriminant score or q-value columns.
+    pub fn raw(
+        path: impl AsRef<Path>,
+        row_group_size: usize,
+        library: &'a crate::ReferenceLibrary,
+    ) -> std::io::Result<Self> {
+        Self::with_mode(path, row_group_size, library, true)
+    }
+
+    fn with_mode(
+        path: impl AsRef<Path>,
+        row_group_size: usize,
+        library: &'a crate::ReferenceLibrary,
+        raw: bool,
     ) -> std::io::Result<Self> {
         let geom = library.geometry();
         let file = match File::create_new(path.as_ref()) {
@@ -213,10 +256,14 @@ impl<'a> ResultParquetWriter<'a> {
         };
 
         // Build schema from a zero-row batch
-        let empty_batch = build_record_batch(&[], geom)?;
+        let empty_batch = output_batch(&[], geom, raw)?;
         let schema = empty_batch.schema();
 
         let kv = vec![
+            KeyValue {
+                key: "result_mode".into(),
+                value: Some(if raw { "raw" } else { "rescored" }.into()),
+            },
             KeyValue {
                 key: "scoring_plan".into(),
                 value: Some(
@@ -245,6 +292,18 @@ impl<'a> ResultParquetWriter<'a> {
             buffer: Vec::with_capacity(row_group_size),
             row_group_size,
             geom,
+            raw,
+        })
+    }
+
+    pub fn add_raw(&mut self, result: super::results::ScoredCandidate) -> std::io::Result<()> {
+        assert!(self.raw, "raw scores require the raw output schema");
+        self.add(FinalResult {
+            scoring: result.scoring,
+            delta_group_ln1p_diff: f32::NAN,
+            delta_group_ln1p_ratio: f32::NAN,
+            discriminant_score: f32::NAN,
+            qvalue: f32::NAN,
         })
     }
 
@@ -261,7 +320,7 @@ impl<'a> ResultParquetWriter<'a> {
             return Ok(());
         }
         debug!("Flushing {} results to parquet", self.buffer.len());
-        let batch = build_record_batch(&self.buffer, self.geom)?;
+        let batch = output_batch(&self.buffer, self.geom, self.raw)?;
         self.writer.write(&batch).map_err(std::io::Error::other)?;
         self.buffer.clear();
         Ok(())
@@ -290,6 +349,26 @@ mod tests {
 
     /// A sealed arena with one row per `(sequence, id)`, for the writer to
     /// resolve ids against. `None` for an id leaves the row to be minted.
+    #[test]
+    fn raw_output_omits_fdr_and_competition_columns_including_empty_files() {
+        let geom = one_row_arena();
+        let row = sample_in(&geom);
+        for rows in [&[][..], std::slice::from_ref(&row)] {
+            let batch = output_batch(rows, &geom, true).unwrap();
+            assert_eq!(batch.num_rows(), rows.len());
+            for name in [
+                "qvalue",
+                "discriminant_score",
+                "delta_group_ln1p_diff",
+                "delta_group_ln1p_ratio",
+            ] {
+                assert!(batch.schema().field_with_name(name).is_err());
+            }
+            assert!(batch.schema().field_with_name("main_score").is_ok());
+            assert!(batch.schema().field_with_name("library_id").is_ok());
+        }
+    }
+
     fn arena_of(rows: &[(&str, Option<&str>)]) -> TargetColumns<IonAnnot> {
         let mut geom = TargetColumnsBuilder::with_capabilities(TargetCapabilities::default_diann());
         for (seq, id) in rows {

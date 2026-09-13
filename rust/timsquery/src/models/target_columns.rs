@@ -287,7 +287,10 @@ impl<L: KeyLike> TargetColumnsBuilder<L> {
         self.inner.n_fragments()
     }
 
-    pub fn seal(self, decoys: DecoyPolicy) -> Result<TargetColumns<L>, TargetBuildError> {
+    pub fn seal(self, decoys: DecoyPolicy) -> Result<TargetColumns<L>, TargetBuildError>
+    where
+        L: DecoyShift,
+    {
         self.inner.seal(decoys)
     }
 }
@@ -547,7 +550,10 @@ impl<L: KeyLike> TargetColumns<L> {
         self.frag_off[tgt] as usize..self.frag_off[tgt + 1] as usize
     }
 
-    fn seal(mut self, decoys: DecoyPolicy) -> Result<Self, TargetBuildError> {
+    fn seal(mut self, decoys: DecoyPolicy) -> Result<Self, TargetBuildError>
+    where
+        L: DecoyShift,
+    {
         assert_eq!(self.analytes.len(), self.n_rows());
         assert_eq!(self.entry_names.len(), self.n_rows());
         self.analytes
@@ -566,6 +572,17 @@ impl<L: KeyLike> TargetColumns<L> {
         self.build_source_ids()?;
         let ships_decoys = self.is_decoy.iter().any(|&d| d);
         self.caps.decoys = decoys.strategy(ships_decoys);
+        if matches!(self.caps.decoys, DecoyStrategy::MassShift { .. })
+            && self
+                .frag_labels
+                .iter()
+                .any(|label| !label.supports_decoy_shift())
+        {
+            tracing::info!(
+                "Mass-shift decoy generation disabled library-wide: missing fragment chemistry; using retained rows only"
+            );
+            self.caps.decoys = DecoyStrategy::Stored;
+        }
         // Nothing to build when no groups were declared: a row is then its own
         // group, which `decoy_group_code` derives. Only the case that actually
         // loses information is worth a word.

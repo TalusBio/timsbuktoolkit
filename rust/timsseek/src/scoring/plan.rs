@@ -11,6 +11,7 @@
 //! indicators. Existing observation-derived blocks retain their fixed widths;
 //! their all-NaN checks remain data-dependent guards. Sequence operations have
 //! no Parquet score columns; their decisions and coverage are file metadata.
+use super::blocks::lazy::FragmentIsotopeScores;
 use super::blocks::sequence_counts::{
     ModificationCounts,
     ResidueCounts,
@@ -19,6 +20,7 @@ use super::blocks::{
     NameSink,
     ScoreBlock,
 };
+use super::results::ScoringFields;
 use crate::fragment_mass::isotope_plan::IsotopePlan;
 use serde::Serialize;
 use std::sync::Arc;
@@ -27,7 +29,10 @@ use timsquery::chemistry::analyte::{
     PeptideRef,
     PropertyRef,
 };
-use timsquery::ion::IonAnnot;
+use timsquery::ion::{
+    IonAnnot,
+    IonSeriesOrdinal,
+};
 use timsquery::models::TargetColumns;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -121,10 +126,22 @@ impl std::fmt::Display for OperationDecision {
     }
 }
 
+/// Resolved over every retained fragment of every stored target and decoy.
+#[derive(Debug, Clone, Serialize)]
+pub struct FragmentIsotopeDecision {
+    pub enabled: bool,
+    pub usable_fragments: usize,
+    pub total_fragments: usize,
+    pub columns: Vec<Arc<str>>,
+}
+
 /// Owned by its reference library; callers cannot install a plan from another library.
 #[derive(Debug, Clone, Serialize)]
 pub struct ScoringPlan {
     isotopes: IsotopePlan,
+    fragment_isotopes: FragmentIsotopeDecision,
+    #[serde(skip)]
+    linear_indices: Vec<usize>,
     rows: usize,
     unmodified_rows: usize,
     operations: Vec<OperationDecision>,
@@ -132,6 +149,34 @@ pub struct ScoringPlan {
 impl ScoringPlan {
     pub(crate) fn resolve(geom: &TargetColumns<IonAnnot>) -> Result<Self, String> {
         let isotopes = IsotopePlan::resolve(geom)?;
+        let total_fragments = geom.n_fragments();
+        let usable_fragments = geom
+            .rows()
+            .flat_map(|row| geom.frag_labels(row))
+            .filter(|label| {
+                !matches!(label.series_ordinal(), IonSeriesOrdinal::unknown { .. })
+                    && label.get_charge() > 0
+                    && label.try_with_offset_neutrons(1).is_ok()
+            })
+            .count();
+        let enabled = total_fragments > 0 && usable_fragments == total_fragments;
+        let mut isotope_names = NameSink::new();
+        FragmentIsotopeScores::linear_feature_names(&mut isotope_names);
+        let isotope_names = isotope_names.into_names();
+        let mut linear_names = NameSink::new();
+        ScoringFields::linear_feature_names(&mut linear_names);
+        let linear_indices = linear_names
+            .into_names()
+            .iter()
+            .enumerate()
+            .filter_map(|(i, name)| (enabled || !isotope_names.contains(name)).then_some(i))
+            .collect();
+        let fragment_isotopes = FragmentIsotopeDecision {
+            enabled,
+            usable_fragments,
+            total_fragments,
+            columns: if enabled { isotope_names } else { Vec::new() },
+        };
         let mut unmodified_rows = 0;
         let mut residues = Coverage::default();
         let mut modifications = Coverage::default();
@@ -177,6 +222,8 @@ impl ScoringPlan {
             .collect();
         Ok(Self {
             isotopes,
+            fragment_isotopes,
+            linear_indices,
             rows,
             unmodified_rows,
             operations,
@@ -186,9 +233,28 @@ impl ScoringPlan {
     /// Plan-level counts, shared by CLI and viewer reporting.
     pub fn summary(&self) -> String {
         format!(
-            "{} library entries; {} unmodified (known empty modification list); {}",
-            self.rows, self.unmodified_rows, self.isotopes
+            "{} library entries; {} unmodified (known empty modification list); {}; fragment isotope scoring: {} ({}/{} usable fragments)",
+            self.rows,
+            self.unmodified_rows,
+            self.isotopes,
+            if self.fragment_isotopes.enabled {
+                "enabled"
+            } else {
+                "disabled"
+            },
+            self.fragment_isotopes.usable_fragments,
+            self.fragment_isotopes.total_fragments
         )
+    }
+
+    pub fn fragment_isotopes(&self) -> &FragmentIsotopeDecision {
+        &self.fragment_isotopes
+    }
+
+    /// Positions in the derive-generated ScoringFields linear lane. Names and
+    /// values use the same selection; disabled scores never enter a model.
+    pub(crate) fn linear_indices(&self) -> &[usize] {
+        &self.linear_indices
     }
 
     pub fn isotopes(&self) -> &IsotopePlan {
