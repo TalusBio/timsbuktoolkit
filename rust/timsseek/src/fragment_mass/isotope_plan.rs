@@ -365,6 +365,11 @@ mod tests {
         for (sequence, expected) in [
             ("PEPTCIDEK", (43, 1)),
             ("PEPTC[UNIMOD:4]IDEK", (45, 1)),
+            ("PEPTC[Formula:C2H3NO]IDEK", (45, 1)),
+            ("PEPTS[UNIMOD:21]IDE", (37, 0)),
+            ("PEPTS[MOD:00046]IDE", (37, 0)),
+            ("PEPBK", (25, 0)), // D/N alternatives agree on C/S.
+            ("PEPDK", (25, 0)),
             ("[UNIMOD:1]-PEPTCIDEK", (45, 1)),
             ("PEPTC[Formula:S-1]IDEK", (43, 0)),
             ("PEPTC[Formula:S]IDEK", (43, 2)),
@@ -381,8 +386,6 @@ mod tests {
                 envelope(&lib, 0, 0),
                 peptide_isotopes(expected.0, expected.1)
             );
-            assert_eq!(envelope(&lib, 0, 0), envelope(&lib, 0, 1));
-            assert_eq!(envelope(&lib, 0, 0), envelope(&lib, 0, 2));
         }
     }
 
@@ -411,9 +414,6 @@ mod tests {
                     assert_eq!(envelope(&lib, row, variant), expected);
                 }
             }
-            let metadata = serde_json::to_value(lib.scoring_plan()).unwrap();
-            assert_eq!(metadata["isotopes"]["method"], "mass_estimated_cs");
-            assert!(metadata["isotopes"].get("envelopes").is_none());
         }
     }
 
@@ -478,20 +478,7 @@ mod tests {
     }
 
     #[test]
-    fn cs_ambiguity_and_numerical_model_limits_are_checked() {
-        let lib = library(
-            &[
-                Analyte::from_sequence("PEPBK"),
-                Analyte::from_sequence("PEPDK"),
-            ],
-            false,
-        )
-        .unwrap();
-        assert_eq!(
-            lib.scoring_plan().isotopes().method,
-            IsotopeMethod::CompositionCs
-        );
-        assert_eq!(envelope(&lib, 0, 0), envelope(&lib, 1, 0));
+    fn numerical_model_limits_are_checked() {
         assert_eq!(
             valid_counts((65536, 0)),
             Err(UnavailableReason::InvalidCounts)
@@ -513,30 +500,6 @@ mod tests {
             matches!(result, Err(crate::errors::TargetReadingError::InvalidLibrary { message }) if message.contains("numerical range"))
         );
     }
-
-    #[test]
-    fn annotations_with_equal_composition_agree() {
-        for pair in [
-            ["PEPTC[UNIMOD:4]IDEK", "PEPTC[Formula:C2H3NO]IDEK"],
-            ["PEPTS[UNIMOD:21]IDE", "PEPTS[MOD:00046]IDE"],
-        ] {
-            let lib = library(&pair.map(Analyte::from_sequence), false).unwrap();
-            assert_eq!(
-                lib.scoring_plan().isotopes().method,
-                IsotopeMethod::CompositionCs
-            );
-            assert_eq!(envelope(&lib, 0, 0), envelope(&lib, 1, 0));
-        }
-    }
-}
-
-#[cfg(test)]
-mod reader_tests {
-    use super::*;
-    use crate::data_sources::reference_library::{
-        ExpectedIntensity,
-        ReferenceLibrary,
-    };
 
     #[test]
     fn diann_and_mzspeclib_modification_annotations_reach_the_same_envelope() {

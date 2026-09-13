@@ -19,6 +19,7 @@ use super::blocks::{
     NameSink,
     ScoreBlock,
 };
+use crate::fragment_mass::isotope_plan::IsotopePlan;
 use serde::Serialize;
 use std::sync::Arc;
 use timsquery::chemistry::analyte::{
@@ -123,14 +124,14 @@ impl std::fmt::Display for OperationDecision {
 /// Owned by its reference library; callers cannot install a plan from another library.
 #[derive(Debug, Clone, Serialize)]
 pub struct ScoringPlan {
-    isotopes: crate::fragment_mass::isotope_plan::IsotopePlan,
+    isotopes: IsotopePlan,
     rows: usize,
     unmodified_rows: usize,
     operations: Vec<OperationDecision>,
 }
 impl ScoringPlan {
     pub(crate) fn resolve(geom: &TargetColumns<IonAnnot>) -> Result<Self, String> {
-        let isotopes = crate::fragment_mass::isotope_plan::IsotopePlan::resolve(geom)?;
+        let isotopes = IsotopePlan::resolve(geom)?;
         let mut unmodified_rows = 0;
         let mut residues = Coverage::default();
         let mut modifications = Coverage::default();
@@ -190,7 +191,7 @@ impl ScoringPlan {
         )
     }
 
-    pub fn isotopes(&self) -> &crate::fragment_mass::isotope_plan::IsotopePlan {
+    pub fn isotopes(&self) -> &IsotopePlan {
         &self.isotopes
     }
 
