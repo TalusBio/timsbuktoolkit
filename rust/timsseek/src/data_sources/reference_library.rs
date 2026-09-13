@@ -225,7 +225,7 @@ impl ReferenceLibrary {
                     });
                 }
                 let geom = builder
-                    .seal(crate::models::DecoyPolicy::Never)
+                    .seal(geom.decoy_resolution().requested)
                     .map_err(timsquery::serde::TargetReadingError::from)?;
                 let mut library = Self::from_arena(TargetTable::Mzpaf { geom, frag_intens })?;
                 library.opaque_labels = Some(opaque_labels);
@@ -728,6 +728,32 @@ mod tests {
         })
         .unwrap();
         assert_eq!(lib.opaque_fragment_labels().unwrap(), &labels);
+        let calibration_library = tiny_ref_lib();
+        let report = crate::scoring::RunReport {
+            scoring_plan: Some(lib.scoring_plan()),
+            calibration_scoring_plan: Some(calibration_library.scoring_plan()),
+            ..Default::default()
+        };
+        let report = serde_json::to_value(report).unwrap();
+        assert_eq!(report["scoring_plan"]["decoys"]["requested"], "if_missing");
+        assert_eq!(
+            report["scoring_plan"]["decoys"]["strategy"]["method"],
+            "stored"
+        );
+        assert_eq!(
+            report["scoring_plan"]["decoys"]["reason"],
+            "missing_fragment_chemistry"
+        );
+        assert_eq!(
+            report["calibration_scoring_plan"]["decoys"]["strategy"]["method"],
+            "mass_shift"
+        );
+        assert!(
+            report["scoring_plan"]["isotopes"]
+                .get("envelopes")
+                .is_none()
+        );
+        assert!(report["scoring_plan"].get("linear_indices").is_none());
         assert!(!lib.scoring_plan().fragment_isotopes().enabled);
         assert_eq!(lib.scoring_plan().width(), 0);
         let q = lib.iter().next().unwrap();

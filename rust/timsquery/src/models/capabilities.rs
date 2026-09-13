@@ -34,7 +34,8 @@ pub enum IsotopeStrategy {
 /// and generates none is [`Stored`](Self::Stored) with
 /// `n_stored_decoys() == 0`; that is a property of the rows, not of the
 /// strategy, and reporting it belongs to whoever counts rows.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(tag = "method", rename_all = "snake_case")]
 pub enum DecoyStrategy {
     /// Score the stored rows as they are. Any decoys the file shipped are the
     /// decoys; nothing is derived.
@@ -43,6 +44,51 @@ pub enum DecoyStrategy {
     /// `QueryItem::variant_shift` derives from it are its decoys. Never
     /// materialized, so the arena holds targets only.
     MassShift { offset: f64 },
+}
+
+/// Why sealing selected its decoy strategy. Preserved for downstream reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecoyResolutionReason {
+    PolicyNever,
+    SuppliedDecoys,
+    MissingFragmentChemistry,
+    FragmentChemistryAvailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct DecoyResolution {
+    pub requested: DecoyPolicy,
+    pub strategy: DecoyStrategy,
+    pub reason: DecoyResolutionReason,
+    pub stored_decoys: usize,
+}
+
+impl DecoyResolution {
+    pub(crate) fn resolve(
+        requested: DecoyPolicy,
+        stored_decoys: usize,
+        generation_supported: bool,
+    ) -> Self {
+        let mut strategy = requested.strategy(stored_decoys > 0);
+        let reason = match (requested, strategy) {
+            (DecoyPolicy::Never, _) => DecoyResolutionReason::PolicyNever,
+            (_, DecoyStrategy::Stored) => DecoyResolutionReason::SuppliedDecoys,
+            (_, DecoyStrategy::MassShift { .. }) if generation_supported => {
+                DecoyResolutionReason::FragmentChemistryAvailable
+            }
+            _ => {
+                strategy = DecoyStrategy::Stored;
+                DecoyResolutionReason::MissingFragmentChemistry
+            }
+        };
+        Self {
+            requested,
+            strategy,
+            reason,
+            stored_decoys,
+        }
+    }
 }
 
 /// What the caller wants done about decoys: the whole decoy decision, stated

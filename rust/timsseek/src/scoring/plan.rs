@@ -138,6 +138,7 @@ pub struct FragmentIsotopeDecision {
 /// Owned by its reference library; callers cannot install a plan from another library.
 #[derive(Debug, Clone, Serialize)]
 pub struct ScoringPlan {
+    decoys: timsquery::models::capabilities::DecoyResolution,
     isotopes: IsotopePlan,
     fragment_isotopes: FragmentIsotopeDecision,
     #[serde(skip)]
@@ -221,6 +222,7 @@ impl ScoringPlan {
             })
             .collect();
         Ok(Self {
+            decoys: *geom.decoy_resolution(),
             isotopes,
             fragment_isotopes,
             linear_indices,

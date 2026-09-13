@@ -548,6 +548,8 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
         None => (None, None, 0),
     };
 
+    run_report.scoring_plan = Some(speclib.scoring_plan());
+    run_report.calibration_scoring_plan = calib_lib.as_ref().map(|library| library.scoring_plan());
     run_report.load_speclib_ms = load_speclib_ms;
     run_report.load_calib_lib_ms = load_calib_lib_ms;
     run_report.speclib_entries = speclib.len();

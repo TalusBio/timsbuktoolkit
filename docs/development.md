@@ -31,6 +31,14 @@ q-value columns (`result_mode=raw` Parquet metadata). It bypasses calibration,
 rescoring and q-value filtering. Supplied decoys do not by themselves validate a
 decoy strategy for a new analyte class.
 
+`run_report.json` records the resolved `scoring_plan` once for the search library,
+plus `calibration_scoring_plan` when a separate calibration library is supplied.
+These are the same plans serialized in Parquet metadata: sequence-operation
+coverage, precursor-isotope method/reasons, fragment-isotope availability, and
+`decoys` (requested policy, resolved strategy, reason, stored-decoy count).
+Per-file `pipeline.raw_scores` records whether raw scoring was used.
+
+
 Programmatic `TargetTable::Str` accepts an optional intensity sidecar. Scoring
 assigns unique packed unknown keys (currently at most 255 peaks per entry),
 preserving the original opaque labels separately; even a string such as `y3`
