@@ -30,6 +30,13 @@ pub struct ApexLazyScores {
 pub struct SecondaryLazyScores {
     #[feat(ln1p)]
     pub ms2_lazyscore: f32,
+    #[block]
+    pub isotopes: FragmentIsotopeScores,
+}
+
+/// Requires a usable fragment charge and representable +1 isotope for every peak.
+#[derive(Debug, Clone, Copy, Serialize, ScoreBlock)]
+pub struct FragmentIsotopeScores {
     #[feat(ln1p)]
     pub ms2_isotope_lazyscore: f32,
     #[feat(raw)]
@@ -40,8 +47,10 @@ impl From<SecondaryLazyScoresRaw> for SecondaryLazyScores {
     fn from(s: SecondaryLazyScoresRaw) -> Self {
         Self {
             ms2_lazyscore: s.lazyscore,
-            ms2_isotope_lazyscore: s.iso_lazyscore,
-            ms2_isotope_lazyscore_log_diff: s.isotope_lazyscore_log_diff,
+            isotopes: FragmentIsotopeScores {
+                ms2_isotope_lazyscore: s.iso_lazyscore,
+                ms2_isotope_lazyscore_log_diff: s.isotope_lazyscore_log_diff,
+            },
         }
     }
 }

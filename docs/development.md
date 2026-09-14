@@ -22,11 +22,29 @@ and target JSON. Format detection also inspects contents; the
 
 `timsseek` and `timsquery_viewer` use the same registry through `ReferenceLibrary`.
 Every loaded scoring library contains geometry usable for query extraction.
-The current scoring bridge requires ion-annotated fragments and reference
-fragment intensities; extraction also accepts opaque fragment labels. The
-query reader's target-list JSON schemas (`Target` and `ElutionGroupInput` arrays)
-currently load geometry without a reference-intensity sidecar. This describes
-those reader paths, not a restriction of JSON as an encoding.
+Scoring requires retained fragments and aligned reference intensities. mzSpecLib
+can supply these without sequence or fragment annotations. Opaque peaks disable
+fragment-isotope scores and automatic mass-shift decoy generation library-wide;
+supplied decoys remain usable. Without decoys, search scores the full acquisition
+RT range and writes raw scores, omitting competition, discriminant-score and
+q-value columns (`result_mode=raw` Parquet metadata). It bypasses calibration,
+rescoring and q-value filtering. Supplied decoys do not by themselves validate a
+decoy strategy for a new analyte class.
+
+`run_report.json` records the resolved `scoring_plan` once for the search library,
+plus `calibration_scoring_plan` when a separate calibration library is supplied.
+These are the same plans serialized in Parquet metadata: sequence-operation
+coverage, precursor-isotope method/reasons, fragment-isotope availability, and
+`decoys` (requested policy, resolved strategy, reason, stored-decoy count).
+Per-file `pipeline.raw_scores` records whether raw scoring was used.
+
+
+Programmatic `TargetTable::Str` accepts an optional intensity sidecar. Scoring
+assigns unique packed unknown keys (currently at most 255 peaks per entry),
+preserving the original opaque labels separately; even a string such as `y3`
+is not interpreted as chemistry. The query reader's target-list JSON schemas
+(`Target` and `ElutionGroupInput` arrays) still supply geometry without reference
+intensities, so those reader routes remain extraction-only.
 
 Standalone `calib_dash` reads saved `calibration.json`, not a spectral library.
 

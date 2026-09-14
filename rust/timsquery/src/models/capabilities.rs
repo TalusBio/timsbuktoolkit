@@ -10,10 +10,10 @@ pub struct TargetCapabilities {
     pub decoys: DecoyStrategy,
 }
 
-/// Runtime reflection of whether this arena's label carries ion chemistry
-/// (`FragmentLabel`). `IonAnnot` arenas => `Available`; string-labelled
-/// arenas => `Unavailable`. Sequence-operation eligibility is resolved from
-/// stored analyte facts by the scoring library.
+/// Whether the label representation can carry ion chemistry. `IonAnnot` may
+/// still contain unknown placeholders; scoring inspects actual labels across
+/// the whole library before enabling operations. Sequence-operation eligibility
+/// is independently resolved from stored analyte facts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum FragmentFeatureState {
     Available,
@@ -34,7 +34,8 @@ pub enum IsotopeStrategy {
 /// and generates none is [`Stored`](Self::Stored) with
 /// `n_stored_decoys() == 0`; that is a property of the rows, not of the
 /// strategy, and reporting it belongs to whoever counts rows.
-#[derive(Debug, Clone, Copy, PartialEq)]
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+#[serde(tag = "method", rename_all = "snake_case")]
 pub enum DecoyStrategy {
     /// Score the stored rows as they are. Any decoys the file shipped are the
     /// decoys; nothing is derived.
@@ -43,6 +44,51 @@ pub enum DecoyStrategy {
     /// `QueryItem::variant_shift` derives from it are its decoys. Never
     /// materialized, so the arena holds targets only.
     MassShift { offset: f64 },
+}
+
+/// Why sealing selected its decoy strategy. Preserved for downstream reports.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum DecoyResolutionReason {
+    PolicyNever,
+    SuppliedDecoys,
+    MissingFragmentChemistry,
+    FragmentChemistryAvailable,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize)]
+pub struct DecoyResolution {
+    pub requested: DecoyPolicy,
+    pub strategy: DecoyStrategy,
+    pub reason: DecoyResolutionReason,
+    pub stored_decoys: usize,
+}
+
+impl DecoyResolution {
+    pub(crate) fn resolve(
+        requested: DecoyPolicy,
+        stored_decoys: usize,
+        generation_supported: bool,
+    ) -> Self {
+        let mut strategy = requested.strategy(stored_decoys > 0);
+        let reason = match (requested, strategy) {
+            (DecoyPolicy::Never, _) => DecoyResolutionReason::PolicyNever,
+            (_, DecoyStrategy::Stored) => DecoyResolutionReason::SuppliedDecoys,
+            (_, DecoyStrategy::MassShift { .. }) if generation_supported => {
+                DecoyResolutionReason::FragmentChemistryAvailable
+            }
+            _ => {
+                strategy = DecoyStrategy::Stored;
+                DecoyResolutionReason::MissingFragmentChemistry
+            }
+        };
+        Self {
+            requested,
+            strategy,
+            reason,
+            stored_decoys,
+        }
+    }
 }
 
 /// What the caller wants done about decoys: the whole decoy decision, stated
@@ -126,9 +172,9 @@ impl std::str::FromStr for DecoyPolicy {
 /// What to do with a peak this reader cannot annotate.
 ///
 /// A kept peak lands at the m/z the file measured, where an annotated one lands
-/// at the m/z its annotation implies. Nothing downstream can tell the two apart
-/// once they are in the arena, so which of them a library is made of is the
-/// caller's decision rather than a fallback the reader picks.
+/// at the m/z its annotation implies. Unknown keys remain recognizable downstream
+/// and cannot establish fragment chemistry. The policy chooses which peaks to
+/// retain; operation eligibility is resolved over all retained labels.
 ///
 /// Asked only of a library that annotates nothing at all, with
 /// [`KeepAll`](Self::KeepAll) the exception that asks nothing. mzPAF spells

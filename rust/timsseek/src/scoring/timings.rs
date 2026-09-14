@@ -137,6 +137,8 @@ impl std::ops::AddAssign for PrescoreTimings {
 /// All timing fields are in milliseconds.
 #[derive(Debug, Default, Serialize)]
 pub struct PipelineReport {
+    /// No calibration, competition, rescoring or q-value filtering was applied.
+    pub raw_scores: bool,
     // Per-file: index loading (ms)
     pub load_index_ms: u64,
 
@@ -179,7 +181,13 @@ pub enum RunStatus {
 /// Top-level report for an entire CLI invocation.
 /// Contains shared loading costs and per-file pipeline reports.
 #[derive(Debug, Default, Serialize)]
-pub struct RunReport {
+pub struct RunReport<'a> {
+    /// The owning library's resolved decisions; serialized once for all raw files.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scoring_plan: Option<&'a super::plan::ScoringPlan>,
+    /// Present only when a separate calibration library was supplied.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub calibration_scoring_plan: Option<&'a super::plan::ScoringPlan>,
     /// Terminal status of the run. See [`RunStatus`].
     pub status: RunStatus,
     /// When `status == Aborted`, a short human-readable reason. `None` on

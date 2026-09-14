@@ -6,6 +6,8 @@ use crate::chemistry::analyte::{
 };
 use crate::models::capabilities::{
     DecoyPolicy,
+    DecoyResolution,
+    DecoyResolutionReason,
     DecoyStrategy,
     MASS_SHIFT_VARIANTS,
     TargetCapabilities,
@@ -222,6 +224,7 @@ pub enum TargetBuildError {
 #[derive(Debug, Clone)]
 pub struct TargetColumns<L: KeyLike> {
     pub(crate) caps: TargetCapabilities,
+    decoy_resolution: Option<DecoyResolution>,
     // per-target scalars, len = n_rows; addressed by `RowIdx`, never by a
     // caller-supplied id (those live in `source_ids`)
     pub(crate) precursor_mz: Vec<f64>,
@@ -287,7 +290,10 @@ impl<L: KeyLike> TargetColumnsBuilder<L> {
         self.inner.n_fragments()
     }
 
-    pub fn seal(self, decoys: DecoyPolicy) -> Result<TargetColumns<L>, TargetBuildError> {
+    pub fn seal(self, decoys: DecoyPolicy) -> Result<TargetColumns<L>, TargetBuildError>
+    where
+        L: DecoyShift,
+    {
         self.inner.seal(decoys)
     }
 }
@@ -296,6 +302,7 @@ impl<L: KeyLike> TargetColumns<L> {
     fn empty(caps: TargetCapabilities) -> Self {
         Self {
             caps,
+            decoy_resolution: None,
             precursor_mz: Vec::new(),
             charge: Vec::new(),
             rt_seconds: Vec::new(),
@@ -547,7 +554,10 @@ impl<L: KeyLike> TargetColumns<L> {
         self.frag_off[tgt] as usize..self.frag_off[tgt + 1] as usize
     }
 
-    fn seal(mut self, decoys: DecoyPolicy) -> Result<Self, TargetBuildError> {
+    fn seal(mut self, decoys: DecoyPolicy) -> Result<Self, TargetBuildError>
+    where
+        L: DecoyShift,
+    {
         assert_eq!(self.analytes.len(), self.n_rows());
         assert_eq!(self.entry_names.len(), self.n_rows());
         self.analytes
@@ -565,7 +575,20 @@ impl<L: KeyLike> TargetColumns<L> {
         self.build_decoy_groups()?;
         self.build_source_ids()?;
         let ships_decoys = self.is_decoy.iter().any(|&d| d);
-        self.caps.decoys = decoys.strategy(ships_decoys);
+        let resolution = DecoyResolution::resolve(
+            decoys,
+            stored_decoys,
+            self.frag_labels
+                .iter()
+                .all(|label| label.supports_decoy_shift()),
+        );
+        if resolution.reason == DecoyResolutionReason::MissingFragmentChemistry {
+            tracing::info!(
+                "Mass-shift decoy generation disabled library-wide: missing fragment chemistry; using retained rows only"
+            );
+        }
+        self.caps.decoys = resolution.strategy;
+        self.decoy_resolution = Some(resolution);
         // Nothing to build when no groups were declared: a row is then its own
         // group, which `decoy_group_code` derives. Only the case that actually
         // loses information is worth a word.
@@ -583,6 +606,13 @@ impl<L: KeyLike> TargetColumns<L> {
         }
         self.shrink();
         Ok(self)
+    }
+
+    /// The decision made during sealing, including why generation was disabled.
+    pub fn decoy_resolution(&self) -> &DecoyResolution {
+        self.decoy_resolution
+            .as_ref()
+            .expect("sealed arenas have a decoy resolution")
     }
 
     pub fn capabilities(&self) -> &TargetCapabilities {

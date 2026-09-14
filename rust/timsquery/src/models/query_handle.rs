@@ -300,12 +300,12 @@ mod tests {
             analyte: analyte::Analyte::from_sequence("PEP").as_input(),
             ..Default::default()
         });
-        // Sealed `IfMissing` with no shipped decoy, so the arena derives ±
-        // variants -- and variant 1 is where an ion-annotated label would shift.
+        // Opaque labels disable generation for the whole library.
         let c = c
             .seal(DecoyPolicy::IfMissing)
             .expect("fixture ids are usable");
-        let q = Query::new(&c, c.flat_for(first_row(&c), 1));
+        assert_eq!(c.variants_per_row(), 1);
+        let q = Query::new(&c, c.flat_for(first_row(&c), 0));
         let frags: Vec<_> = q.iter_fragments_refs().collect();
         assert!((frags[0].1 - 300.0).abs() < 1e-9);
     }

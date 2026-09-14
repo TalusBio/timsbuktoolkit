@@ -178,7 +178,7 @@ impl ElutionGroupCollection {
 /// `geom.frag_labels`/`geom.frag_mzs` (same length). The columnar store itself
 /// stores query geometry; readers that supply reference intensities populate
 /// the sidecar for scoring. Geometry-only `Mzpaf` inputs leave it `None`;
-/// the `Str` variant has no intensity sidecar. Extraction ignores intensities.
+/// both variants can carry the sidecar. Target-list JSON supplies none. Extraction ignores intensities.
 pub enum TargetTable {
     Mzpaf {
         geom: TargetColumns<IonAnnot>,
@@ -186,6 +186,7 @@ pub enum TargetTable {
     },
     Str {
         geom: TargetColumns<Arc<str>>,
+        frag_intens: Option<Vec<f32>>,
     },
 }
 
@@ -339,7 +340,10 @@ impl TargetTable {
                     });
                 }
                 let geom = geom.seal(DecoyPolicy::Never)?;
-                Ok(TargetTable::Str { geom })
+                Ok(TargetTable::Str {
+                    geom,
+                    frag_intens: None,
+                })
             }
         }
     }
@@ -578,7 +582,7 @@ mod tests {
         }
         match super::read_targets(path).expect("fixture loads") {
             super::TargetTable::Mzpaf { geom, .. } => ids(&geom),
-            super::TargetTable::Str { geom } => ids(&geom),
+            super::TargetTable::Str { geom, .. } => ids(&geom),
         }
     }
 
