@@ -65,6 +65,12 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
     })
 }
 
+// Identity normalization, not a reader registry. Staging separately recognizes
+// .idx/.tar (tims_stage::uri::parse_uri_shape); vendor readers recognize their formats
+// (timscentroid::reader). Keep this policy fixed independently of enabled readers:
+// adding a reader must not silently change persisted sample IDs.
+const SAMPLE_STORAGE_SUFFIXES: &[&str] = &[".idx", ".tar", ".gz", ".d", ".raw", ".mzML", ".mzml"];
+
 fn sample_name(name: &str) -> Option<String> {
     // Remote keys can contain backslashes; never turn those into nested output
     // paths on Windows. Control characters are not useful display names either.
@@ -74,7 +80,7 @@ fn sample_name(name: &str) -> Option<String> {
     let mut stem = name;
     loop {
         let before = stem;
-        for ext in [".idx", ".tar", ".gz", ".d", ".raw", ".mzML", ".mzml"] {
+        for &ext in SAMPLE_STORAGE_SUFFIXES {
             if let Some(s) = stem.strip_suffix(ext) {
                 stem = s;
             }

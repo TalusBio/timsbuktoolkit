@@ -119,10 +119,13 @@ fn execute_raw_pipeline<I: ScorerQueriable>(
         source,
         path: Some(path.clone()),
     };
-    let mut writer =
-        timsseek::scoring::parquet_writer::ResultParquetWriter::raw(&path, 20_000, library)
-            .map_err(io_error)?;
-    writer.set_sample_identity(options.sample.identity());
+    let mut writer = timsseek::scoring::parquet_writer::ResultParquetWriter::raw(
+        &path,
+        20_000,
+        library,
+        options.sample.identity(),
+    )
+    .map_err(io_error)?;
     let mut report = PipelineReport {
         raw_scores: true,
         ..Default::default()
@@ -377,13 +380,16 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     // === PHASE 6: Write Parquet output ===
     let step = TimedStep::begin("Phase 6: Write output");
     let out_path_pq = std::path::Path::new(&out_path.uri).join(RESULTS_PARQUET);
-    let mut pq_writer =
-        timsseek::scoring::parquet_writer::ResultParquetWriter::new(&out_path_pq, 20_000, speclib)
-            .map_err(|e| TimsSeekError::Io {
-                path: out_path_pq.clone().into(),
-                source: e,
-            })?;
-    pq_writer.set_sample_identity(sample.identity());
+    let mut pq_writer = timsseek::scoring::parquet_writer::ResultParquetWriter::new(
+        &out_path_pq,
+        20_000,
+        speclib,
+        sample.identity(),
+    )
+    .map_err(|e| TimsSeekError::Io {
+        path: out_path_pq.clone().into(),
+        source: e,
+    })?;
     for res in data.into_iter() {
         if res.qvalue <= max_qvalue {
             pq_writer.add(res).map_err(|e| TimsSeekError::Io {

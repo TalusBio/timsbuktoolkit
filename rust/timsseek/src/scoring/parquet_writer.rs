@@ -26,6 +26,7 @@ use super::blocks::{
     ScoreBlock,
 };
 use super::results::FinalResult;
+use crate::sample_identity::SampleIdentity;
 
 /// Bumped when a column's meaning or type changes, so a reader can tell a new
 /// file from an old one rather than silently misreading it.
@@ -215,7 +216,6 @@ fn output_batch(
 /// Borrows the arena the results were scored against to resolve each result's
 /// row handle into the external library and competition-group IDs.
 pub struct ResultParquetWriter<'a> {
-    sample: Option<crate::sample_identity::SampleIdentity>,
     writer: ArrowWriter<File>,
     buffer: Vec<FinalResult>,
     row_group_size: usize,
@@ -224,19 +224,14 @@ pub struct ResultParquetWriter<'a> {
 }
 
 impl<'a> ResultParquetWriter<'a> {
-    /// Attach identity to this single-sample artifact, including zero-row files.
-    /// CLI callers set this once before adding results. The column schema and
-    /// its version are unchanged; non-CLI writers may omit sample context.
-    pub fn set_sample_identity(&mut self, sample: &crate::sample_identity::SampleIdentity) {
-        self.sample = Some(sample.clone());
-    }
-
+    /// Identity is required at construction, including for zero-row artifacts.
     pub fn new(
         path: impl AsRef<Path>,
         row_group_size: usize,
         library: &'a crate::data_sources::reference_library::ReferenceLibrary,
+        sample: &SampleIdentity,
     ) -> std::io::Result<Self> {
-        Self::with_mode(path, row_group_size, library, false)
+        Self::with_mode(path, row_group_size, library, sample, false)
     }
 
     /// Common scores only: no competition, discriminant score or q-value columns.
@@ -244,14 +239,16 @@ impl<'a> ResultParquetWriter<'a> {
         path: impl AsRef<Path>,
         row_group_size: usize,
         library: &'a crate::ReferenceLibrary,
+        sample: &SampleIdentity,
     ) -> std::io::Result<Self> {
-        Self::with_mode(path, row_group_size, library, true)
+        Self::with_mode(path, row_group_size, library, sample, true)
     }
 
     fn with_mode(
         path: impl AsRef<Path>,
         row_group_size: usize,
         library: &'a crate::ReferenceLibrary,
+        sample: &SampleIdentity,
         raw: bool,
     ) -> std::io::Result<Self> {
         let geom = library.geometry();
@@ -268,6 +265,14 @@ impl<'a> ResultParquetWriter<'a> {
         let schema = empty_batch.schema();
 
         let kv = vec![
+            KeyValue {
+                key: "sample_id".into(),
+                value: Some(sample.sample_id().to_owned()),
+            },
+            KeyValue {
+                key: "sample_name".into(),
+                value: Some(sample.sample_name().to_owned()),
+            },
             KeyValue {
                 key: "result_mode".into(),
                 value: Some(if raw { "raw" } else { "rescored" }.into()),
@@ -296,7 +301,6 @@ impl<'a> ResultParquetWriter<'a> {
             ArrowWriter::try_new(file, schema, Some(props)).map_err(std::io::Error::other)?;
 
         Ok(Self {
-            sample: None,
             writer,
             buffer: Vec::with_capacity(row_group_size),
             row_group_size,
@@ -337,17 +341,6 @@ impl<'a> ResultParquetWriter<'a> {
 
     pub fn close(mut self) -> std::io::Result<()> {
         self.flush()?;
-        if let Some(sample) = &self.sample {
-            for (key, value) in [
-                ("sample_id", sample.sample_id()),
-                ("sample_name", sample.sample_name()),
-            ] {
-                self.writer.append_key_value_metadata(KeyValue {
-                    key: key.to_owned(),
-                    value: Some(value.to_owned()),
-                });
-            }
-        }
         self.writer.close().map_err(std::io::Error::other)?;
         Ok(())
     }
@@ -381,10 +374,12 @@ mod tests {
         for raw in [false, true] {
             for nrows in [0, 1] {
                 let path = dir.path().join(format!("{raw}-{nrows}.parquet"));
-                let mut writer = ResultParquetWriter::with_mode(&path, 1, &library, raw).unwrap();
-                // Re-setting context replaces it, not duplicate footer keys.
-                writer.set_sample_identity(&sample);
-                writer.set_sample_identity(&sample);
+                let mut writer = if raw {
+                    ResultParquetWriter::raw(&path, 1, &library, &sample)
+                } else {
+                    ResultParquetWriter::new(&path, 1, &library, &sample)
+                }
+                .unwrap();
                 if nrows == 1 {
                     writer.add(sample_in(library.geometry())).unwrap();
                 }
@@ -648,7 +643,9 @@ mod tests {
                 },
             )
             .unwrap();
-            let writer = ResultParquetWriter::new(&path, 1024, &library).expect("create writer");
+            let sample = SampleIdentity::from_location("s3://bucket/run.d").unwrap();
+            let writer =
+                ResultParquetWriter::new(&path, 1024, &library, &sample).expect("create writer");
             writer.close().expect("close");
         }
         let file = File::open(&path).expect("open");
