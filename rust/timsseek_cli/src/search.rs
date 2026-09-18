@@ -753,6 +753,14 @@ mod tests {
                 .len(),
             2
         );
+        // A second invocation is different from duplicate inputs in one batch:
+        // pre-existing outputs are explicitly replaceable with --overwrite.
+        assert!(validate_inputs(&resolved).is_err());
+        let rerun = ResolvedInputs {
+            overwrite: true,
+            ..resolved.clone()
+        };
+        assert_eq!(validate_inputs(&rerun).unwrap(), samples);
         sink.clear_existing(samples[0].sample_id()).unwrap();
         assert!(
             sink.sample_dir(samples[1].sample_id())

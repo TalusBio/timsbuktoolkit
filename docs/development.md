@@ -80,7 +80,9 @@ different working directories change what a relative input refers to.
 
 Duplicate derived IDs fail before staging/prediction/search, listing both input
 URIs, **also with `--overwrite`**. Different parents with the same stem work even
-when searched separately. Hash collisions are unsupported and rejected when
+when searched separately. Rerunning the same command with `--overwrite` is allowed:
+this duplicate check concerns inputs within one invocation, not prior outputs.
+Hash collisions are unsupported and rejected when
 present together; this is a location label, not a content-integrity guarantee.
 
 `run_report.json` file entries and `performance_report.json` contain `sample_id`
