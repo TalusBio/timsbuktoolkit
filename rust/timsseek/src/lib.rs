@@ -7,6 +7,7 @@ pub mod ml;
 pub mod models;
 pub mod protein;
 pub mod rt_calibration;
+pub mod sample_identity;
 pub mod scoring;
 pub mod traits;
 pub mod utils;

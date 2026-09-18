@@ -218,6 +218,8 @@ pub struct RunReport<'a> {
 /// them with no extra discovery step.
 #[derive(Debug, Serialize)]
 pub struct FileReport {
+    #[serde(flatten)]
+    pub sample: crate::sample_identity::SampleIdentity,
     pub file_name: String,
     pub pipeline: PipelineReport,
     #[serde(default)]
