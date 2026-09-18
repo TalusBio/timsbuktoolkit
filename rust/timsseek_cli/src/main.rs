@@ -11,6 +11,7 @@ mod output_sink;
 mod predicted_library;
 mod processing;
 mod run_inputs;
+mod sample_identity;
 mod search;
 
 use clap::Parser;

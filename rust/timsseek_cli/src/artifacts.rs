@@ -13,8 +13,8 @@ use crate::errors::CliError;
 use crate::output_sink::{
     join_output_uri,
     probe_uri_exists,
-    sample_name_from_uri,
 };
+use crate::sample_identity::SampleInput;
 
 pub(crate) const RESULTS_PARQUET: &str = "results.parquet";
 pub(crate) const PERFORMANCE_REPORT: &str = "performance_report.json";
@@ -50,7 +50,7 @@ pub(crate) const BUILT_LIBRARY_SUFFIX: &str = ".mzspeclib.txt.gz";
 ///
 /// The stem is the file name with one extension off, and a `.gz` before it, so
 /// `proteome.fasta` and `proteome.fasta.gz` name the same library. Not
-/// [`sample_name_from_uri`], which strips the `.d`/`.tar`/`.idx` a raw input
+/// the sample-name helper, which strips the `.d`/`.tar`/`.idx` a raw input
 /// carries and would leave a FASTA's own suffix in front of `.mzspeclib`.
 pub(crate) fn built_library_path(output_uri: &str, fasta: &Path) -> PathBuf {
     let name = fasta
@@ -63,16 +63,14 @@ pub(crate) fn built_library_path(output_uri: &str, fasta: &Path) -> PathBuf {
 }
 
 /// Probe every artifact a run can write, returning the URIs of the ones already
-/// there. Raw inputs rather than sample names, because the sample name is
-/// derived from the URI and a URI with no derivable name is an error worth
-/// reporting here.
+/// there. Uses the same resolved identities as the writers and upload paths.
 ///
 /// `built_library` is the library the run is about to predict, which is an
 /// output of the run like any other: one already sitting there cost minutes to
 /// predict and describes whatever FASTA and settings produced it.
 pub(crate) fn probe_collisions(
     output_uri: &str,
-    raw_inputs: &[String],
+    samples: &[SampleInput],
     built_library: Option<&Path>,
 ) -> Result<Vec<String>, CliError> {
     let mut collisions: Vec<String> = Vec::new();
@@ -87,11 +85,8 @@ pub(crate) fn probe_collisions(
             }
         }
     }
-    for raw_uri in raw_inputs {
-        let sample = sample_name_from_uri(raw_uri).ok_or_else(|| CliError::Io {
-            source: "Unable to extract file stem".to_string(),
-            path: Some(raw_uri.clone()),
-        })?;
+    for sample in samples {
+        let sample = sample.sample_id();
         for artifact in PER_SAMPLE_ARTIFACTS {
             let uri = join_output_uri(output_uri, &format!("{sample}/{artifact}"));
             if probe_uri_exists(&uri)? {
@@ -118,14 +113,15 @@ mod tests {
     #[test]
     fn the_probe_reports_a_feature_stats_sidecar_from_an_earlier_run() {
         let dir = tempfile::tempdir().unwrap();
-        let sample_dir = dir.path().join("run");
+        let samples =
+            crate::sample_identity::resolve_samples(&["/data/run.d".to_string()]).unwrap();
+        let sample_dir = dir.path().join(samples[0].sample_id());
         std::fs::create_dir_all(&sample_dir).unwrap();
         std::fs::write(sample_dir.join(FEATURE_STATS_TSV), "name\tmean\n").unwrap();
 
-        let raw_inputs = vec!["/data/run.d".to_string()];
         let output_uri = dir.path().to_string_lossy().to_string();
 
-        let collisions = probe_collisions(&output_uri, &raw_inputs, None).unwrap();
+        let collisions = probe_collisions(&output_uri, &samples, None).unwrap();
         assert_eq!(
             collisions,
             vec![
@@ -147,7 +143,7 @@ mod tests {
 
         let collisions = probe_collisions(
             &dir.path().to_string_lossy(),
-            &["/data/run.d".to_string()],
+            &crate::sample_identity::resolve_samples(&["/data/run.d".to_string()]).unwrap(),
             Some(&library),
         )
         .unwrap();

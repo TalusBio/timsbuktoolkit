@@ -215,6 +215,7 @@ fn output_batch(
 /// Borrows the arena the results were scored against to resolve each result's
 /// row handle into the external library and competition-group IDs.
 pub struct ResultParquetWriter<'a> {
+    sample: Option<crate::sample_identity::SampleIdentity>,
     writer: ArrowWriter<File>,
     buffer: Vec<FinalResult>,
     row_group_size: usize,
@@ -223,6 +224,13 @@ pub struct ResultParquetWriter<'a> {
 }
 
 impl<'a> ResultParquetWriter<'a> {
+    /// Attach identity to this single-sample artifact, including zero-row files.
+    /// CLI callers set this once before adding results. The column schema and
+    /// its version are unchanged; non-CLI writers may omit sample context.
+    pub fn set_sample_identity(&mut self, sample: &crate::sample_identity::SampleIdentity) {
+        self.sample = Some(sample.clone());
+    }
+
     pub fn new(
         path: impl AsRef<Path>,
         row_group_size: usize,
@@ -288,6 +296,7 @@ impl<'a> ResultParquetWriter<'a> {
             ArrowWriter::try_new(file, schema, Some(props)).map_err(std::io::Error::other)?;
 
         Ok(Self {
+            sample: None,
             writer,
             buffer: Vec::with_capacity(row_group_size),
             row_group_size,
@@ -328,6 +337,17 @@ impl<'a> ResultParquetWriter<'a> {
 
     pub fn close(mut self) -> std::io::Result<()> {
         self.flush()?;
+        if let Some(sample) = &self.sample {
+            for (key, value) in [
+                ("sample_id", sample.sample_id()),
+                ("sample_name", sample.sample_name()),
+            ] {
+                self.writer.append_key_value_metadata(KeyValue {
+                    key: key.to_owned(),
+                    value: Some(value.to_owned()),
+                });
+            }
+        }
         self.writer.close().map_err(std::io::Error::other)?;
         Ok(())
     }
@@ -346,6 +366,48 @@ mod tests {
         Row,
         TargetColumnsBuilder,
     };
+
+    #[test]
+    fn sample_metadata_survives_empty_and_nonempty_files_in_both_modes() {
+        let geom = one_row_arena();
+        let library = crate::ReferenceLibrary::try_from(timsquery::serde::TargetTable::Mzpaf {
+            frag_intens: Some(vec![1.0; geom.n_fragments()]),
+            geom,
+        })
+        .unwrap();
+        let sample =
+            crate::sample_identity::SampleIdentity::from_location("s3://bucket/run.d").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        for raw in [false, true] {
+            for nrows in [0, 1] {
+                let path = dir.path().join(format!("{raw}-{nrows}.parquet"));
+                let mut writer = ResultParquetWriter::with_mode(&path, 1, &library, raw).unwrap();
+                // Re-setting context replaces it, not duplicate footer keys.
+                writer.set_sample_identity(&sample);
+                writer.set_sample_identity(&sample);
+                if nrows == 1 {
+                    writer.add(sample_in(library.geometry())).unwrap();
+                }
+                writer.close().unwrap();
+                let reader = SerializedFileReader::new(File::open(path).unwrap()).unwrap();
+                let meta = reader.metadata().file_metadata();
+                assert_eq!(meta.num_rows(), nrows);
+                for (key, value) in [
+                    ("sample_id", "07cff6d98863b0e4-run"),
+                    ("sample_name", "run"),
+                ] {
+                    let entries: Vec<_> = meta
+                        .key_value_metadata()
+                        .unwrap()
+                        .iter()
+                        .filter(|kv| kv.key == key)
+                        .collect();
+                    assert_eq!(entries.len(), 1);
+                    assert_eq!(entries[0].value.as_deref(), Some(value));
+                }
+            }
+        }
+    }
 
     /// A sealed arena with one row per `(sequence, id)`, for the writer to
     /// resolve ids against. `None` for an id leaves the row to be minted.

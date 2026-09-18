@@ -122,6 +122,7 @@ fn execute_raw_pipeline<I: ScorerQueriable>(
     let mut writer =
         timsseek::scoring::parquet_writer::ResultParquetWriter::raw(&path, 20_000, library)
             .map_err(io_error)?;
+    writer.set_sample_identity(options.sample.identity());
     let mut report = PipelineReport {
         raw_scores: true,
         ..Default::default()
@@ -153,6 +154,7 @@ fn execute_raw_pipeline<I: ScorerQueriable>(
     tracing::instrument(skip_all, level = "trace")
 )]
 pub struct PipelineOptions<'a> {
+    pub sample: &'a crate::sample_identity::SampleInput,
     pub chunk_size: usize,
     pub output: &'a OutputConfig,
     pub max_qvalue: f32,
@@ -175,6 +177,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         return execute_raw_pipeline(speclib, pipeline, options);
     }
     let PipelineOptions {
+        sample,
         chunk_size,
         output: out_path,
         max_qvalue,
@@ -380,6 +383,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
                 path: out_path_pq.clone().into(),
                 source: e,
             })?;
+    pq_writer.set_sample_identity(sample.identity());
     for res in data.into_iter() {
         if res.qvalue <= max_qvalue {
             pq_writer.add(res).map_err(|e| TimsSeekError::Io {
@@ -704,10 +708,20 @@ pub fn run_pipeline(
     let mut timings = execute_pipeline(speclib, calib_lib, pipeline, options)?;
     timings.load_index_ms = load_index_ms;
     // Write per-file report
-    let perf_report =
-        serde_json::to_string_pretty(&timings).map_err(|e| TimsSeekError::ParseError {
-            msg: format!("Error serializing performance report to JSON: {}", e),
-        })?;
+    #[derive(serde::Serialize)]
+    struct SamplePerformanceReport<'a> {
+        #[serde(flatten)]
+        sample: &'a timsseek::sample_identity::SampleIdentity,
+        #[serde(flatten)]
+        timings: &'a PipelineReport,
+    }
+    let perf_report = serde_json::to_string_pretty(&SamplePerformanceReport {
+        sample: options.sample.identity(),
+        timings: &timings,
+    })
+    .map_err(|e| TimsSeekError::ParseError {
+        msg: format!("Error serializing performance report to JSON: {}", e),
+    })?;
     std::fs::write(&performance_report_path, perf_report).map_err(|e| TimsSeekError::Io {
         path: performance_report_path.into(),
         source: e,
