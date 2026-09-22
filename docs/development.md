@@ -63,44 +63,13 @@ bases cannot supply its composition counts.
 ## Sample identity and output paths
 
 Search outputs use `<output>/<sample_id>/`, not the basename alone.
-`sample_id` is opaque: `16 lowercase hex digits + "-" + sample_name`.
-The prefix is fixed FNV-1a 64-bit over the UTF-8 parent location **including its
-trailing slash**. It hashes URI text only, never raw data or directory contents.
-For example, `s3://bucket/rerun_1/my-run.d` becomes
-`0965dff92bab1aaf-my-run`; another parent gets another prefix.
+IDs combine a parent-location hash with the sample name, distinguishing same-named
+inputs in different directories without hashing file contents.
+`sample_id` and `sample_name` are recorded in run/performance reports and Parquet
+file metadata, not repeated per row. Read these fields rather than parsing paths.
 
-Local `~` is expanded and paths made absolute without filesystem canonicalization;
-on Windows separators become `/`. Remote `s3://`, `gs://`, and `az://` text is
-preserved. Trailing `/` is ignored. Staging unwraps `.idx`/`.tar`, then the reader
-registry derives the canonical name: Bruker strips `.d`; the optional mzdata
-reader strips `.mzml` (ASCII-case-insensitive). Other dots and hyphens remain.
-Standalone index/container names without a recognized raw suffix retain their
-unwrapped filename. Unsupported raw names fail rather than using a guessed naming
-rule; `.raw` and `.mzML.gz` are not currently claimed by a reader.
-Same-parent storage forms such as `run.d` and `run.d.idx` therefore
-have the same identity. Stem and parent URI case are preserved. No symlink, `..`,
-general path-case, URI-encoding, or moved-file
-equivalence is promised. Use a consistent source location across workers;
-different working directories change what a relative input refers to.
-
-Duplicate derived IDs fail before staging/prediction/search, listing both input
-URIs, **also with `--overwrite`**. Different parents with the same stem work even
-when searched separately. Rerunning the same command with `--overwrite` is allowed:
-this duplicate check concerns inputs within one invocation, not prior outputs.
-Hash collisions are unsupported and rejected when
-present together; this is a location label, not a content-integrity guarantee.
-
-`run_report.json` file entries and `performance_report.json` contain `sample_id`
-and the separate `sample_name`. Both are also Parquet file metadata, including
-empty files and raw-score outputs. Consumers must read metadata before combining
-files; IDs are not repeated per result row. The result column schema remains
-version 4. Old results have no such metadata: do not invent an ID by splitting
-their directory names. Existing basename directories are not renamed or migrated;
-use fresh output roots when upgrading. Auxiliary files inherit the sample directory.
-
-The Rust `SampleIdentity` fields are private, constructed from a location and
-exposed read-only. Reports and writers take this type, not caller-minted ID/name
-pairs. No unchecked deserializer is provided.
+Duplicate IDs within one invocation are rejected; rerunning with `--overwrite`
+still replaces prior outputs. Existing basename-only output directories are not migrated.
 
 ## Cargo features
 
