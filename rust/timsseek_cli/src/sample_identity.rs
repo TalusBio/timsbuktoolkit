@@ -5,13 +5,18 @@ use std::collections::HashMap;
 use crate::errors::CliError;
 use timsseek::sample_identity::SampleIdentity;
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone)]
 pub(crate) struct SampleInput {
     uri: String,
     identity: SampleIdentity,
+    source: tims_stage::load::PreparedSource,
 }
 
 impl SampleInput {
+    pub(crate) fn source(&self) -> &tims_stage::load::PreparedSource {
+        &self.source
+    }
+
     pub(crate) fn uri(&self) -> &str {
         &self.uri
     }
@@ -62,7 +67,11 @@ pub(crate) fn resolve_samples(uris: &[String]) -> Result<Vec<SampleInput>, CliEr
                 text.to_owned()
             }
         };
-        let identity = SampleIdentity::from_location(&location).map_err(|e| CliError::Config {
+        let source =
+            tims_stage::load::PreparedSource::new(&location).map_err(|e| CliError::Config {
+                source: e.to_string(),
+            })?;
+        let identity = SampleIdentity::from_source(&source).map_err(|e| CliError::Config {
             source: e.to_string(),
         })?;
         let sample_id = identity.sample_id();
@@ -77,6 +86,7 @@ pub(crate) fn resolve_samples(uris: &[String]) -> Result<Vec<SampleInput>, CliEr
         samples.push(SampleInput {
             uri: uri.clone(),
             identity,
+            source,
         });
     }
     Ok(samples)
@@ -99,8 +109,14 @@ mod tests {
         let samples = resolve(&uris).unwrap();
         assert_ne!(samples[0].sample_id(), samples[1].sample_id());
         assert_eq!(samples[0].sample_name(), "my-run");
-        assert_eq!(samples[0], resolve(&uris[..1]).unwrap()[0]);
-        assert_eq!(samples[0], resolve(&[uris[1], uris[0]]).unwrap()[1]);
+        assert_eq!(
+            samples[0].identity(),
+            resolve(&uris[..1]).unwrap()[0].identity()
+        );
+        assert_eq!(
+            samples[0].identity(),
+            resolve(&[uris[1], uris[0]]).unwrap()[1].identity()
+        );
     }
 
     #[test]

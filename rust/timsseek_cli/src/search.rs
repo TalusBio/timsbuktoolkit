@@ -5,11 +5,8 @@ use tims_stage::{
     expand_local_uri,
     is_remote_uri,
 };
+use timsquery::IndexedTimstofPeaks;
 use timsquery::utils::TupleRange;
-use timsquery::{
-    IndexedTimstofPeaks,
-    load_index,
-};
 use timsseek::scoring::Scorer;
 use timsseek::scoring::timings::TimedStep;
 use tracing::{
@@ -258,8 +255,8 @@ impl SearchRun<'_> {
         info!("Processing raw input: {}", raw_uri);
 
         let step = TimedStep::begin("Loading index");
-        let (index, index_source) = load_index(
-            raw_uri,
+        let (index, index_source) = timsquery::serde::index_serde::load_index_for_source(
+            sample.source(),
             self.backend,
             self.save_sidecar,
             self.config
@@ -760,7 +757,14 @@ mod tests {
             overwrite: true,
             ..resolved.clone()
         };
-        assert_eq!(validate_inputs(&rerun).unwrap(), samples);
+        let rerun_samples = validate_inputs(&rerun).unwrap();
+        assert_eq!(
+            rerun_samples
+                .iter()
+                .map(|s| s.identity())
+                .collect::<Vec<_>>(),
+            samples.iter().map(|s| s.identity()).collect::<Vec<_>>()
+        );
         sink.clear_existing(samples[0].sample_id()).unwrap();
         assert!(
             sink.sample_dir(samples[1].sample_id())

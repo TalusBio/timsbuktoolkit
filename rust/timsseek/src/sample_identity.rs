@@ -18,6 +18,14 @@ impl SampleIdentity {
     /// supported remote URI. The CLI expands local paths before calling this.
     /// No symlink resolution, URI decoding, or content equivalence is attempted.
     pub fn from_location(location: &str) -> std::io::Result<Self> {
+        let source = tims_stage::load::PreparedSource::new(location)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        Self::from_source(&source)
+    }
+
+    /// Use the name from the reader selected for loading this source.
+    pub fn from_source(source: &tims_stage::load::PreparedSource) -> std::io::Result<Self> {
+        let location = source.uri();
         let invalid = || {
             std::io::Error::new(
                 std::io::ErrorKind::InvalidInput,
@@ -36,9 +44,8 @@ impl SampleIdentity {
         } else if !std::path::Path::new(location).is_absolute() {
             return Err(invalid());
         }
-        let (parent, name) = location.rsplit_once('/').ok_or_else(invalid)?;
-        let sample_name = tims_stage::uri::sample_name(name)
-            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        let (parent, _) = location.rsplit_once('/').ok_or_else(invalid)?;
+        let sample_name = source.sample_name().to_owned();
         if matches!(sample_name.as_str(), "" | "." | "..")
             || sample_name.contains('\\')
             || sample_name.chars().any(char::is_control)
@@ -117,9 +124,15 @@ mod tests {
             assert_ne!(SampleIdentity::from_location(location).unwrap(), expected);
         }
         assert_eq!(
-            SampleIdentity::from_location("s3://bucket/Échantillon.D")
-                .unwrap()
-                .sample_name(),
+            SampleIdentity::from_location(
+                std::env::current_dir()
+                    .unwrap()
+                    .join("Échantillon.D")
+                    .to_str()
+                    .unwrap()
+            )
+            .unwrap()
+            .sample_name(),
             "Échantillon"
         );
     }

@@ -866,6 +866,32 @@ pub fn load_index(
     save_sidecar: bool,
     centroid_cfg: IndexingCentroidingConfig,
 ) -> Result<(IndexedTimstofPeaks, IndexSource), LoadIndexError> {
+    load_index_inner(uri, backend, save_sidecar, centroid_cfg, None)
+}
+
+/// Load using the reader already selected during sample preflight.
+pub fn load_index_for_source(
+    source: &tims_stage::load::PreparedSource,
+    backend: &dyn StagingBackend,
+    save_sidecar: bool,
+    centroid_cfg: IndexingCentroidingConfig,
+) -> Result<(IndexedTimstofPeaks, IndexSource), LoadIndexError> {
+    load_index_inner(
+        source.uri(),
+        backend,
+        save_sidecar,
+        centroid_cfg,
+        Some(source),
+    )
+}
+
+fn load_index_inner(
+    uri: &str,
+    backend: &dyn StagingBackend,
+    save_sidecar: bool,
+    centroid_cfg: IndexingCentroidingConfig,
+    source: Option<&tims_stage::load::PreparedSource>,
+) -> Result<(IndexedTimstofPeaks, IndexSource), LoadIndexError> {
     let canon = canonical_uri(uri);
     match resolve(&canon)? {
         Resolved::Idx { loc } => {
@@ -879,7 +905,10 @@ pub fn load_index(
                 index,
                 reader_name,
                 caches_to_idx,
-            } = load_raw(&uri, backend, &centroid_cfg)?;
+            } = match source {
+                Some(source) => source.read_raw(&uri, backend, &centroid_cfg),
+                None => load_raw(&uri, backend, &centroid_cfg),
+            }?;
             if save_sidecar && caches_to_idx {
                 write_sidecar(&canon, &index)?;
             }
@@ -901,7 +930,10 @@ pub fn load_index(
                 index,
                 reader_name,
                 caches_to_idx,
-            } = load_raw(staged_path, backend, &centroid_cfg)?;
+            } = match source {
+                Some(source) => source.read_raw(staged_path, backend, &centroid_cfg),
+                None => load_raw(staged_path, backend, &centroid_cfg),
+            }?;
             if save_sidecar && caches_to_idx {
                 write_sidecar(&canon, &index)?;
             }
