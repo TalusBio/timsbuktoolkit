@@ -106,9 +106,7 @@ mod tests {
     #[test]
     fn storage_forms_share_identity_and_collide() {
         let reference = resolve(&["s3://bucket/run.d"]).unwrap().remove(0);
-        for suffix in [
-            ".d/", ".d.tar", ".d.idx/", ".raw", ".mzML.gz", ".D.IDX/", ".RaW", ".MzMl.GZ",
-        ] {
+        for suffix in [".d/", ".d.tar", ".d.idx/", ".D.IDX/"] {
             let uri = format!("s3://bucket/run{suffix}");
             assert_eq!(
                 resolve(&[&uri]).unwrap()[0].sample_id(),

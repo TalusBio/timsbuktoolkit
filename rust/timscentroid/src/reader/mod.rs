@@ -1,7 +1,8 @@
 //! Vendor-neutral raw-format dispatch.
 //!
 //! A [`RawReader`] is a self-describing backend: it declares which URIs it
-//! claims ([`RawReader::sniff`]), which artifacts belong together
+//! claims ([`RawReader::sniff`]), their canonical sample names
+//! ([`RawReader::sample_name`]), which artifacts belong together
 //! ([`RawReader::manifest`]), and how to build the in-memory index
 //! ([`RawReader::read`]). The [`ReaderRegistry`] picks a backend for a URI by
 //! sniffing -- vendor suffix/scheme knowledge lives ONLY in each reader, never
@@ -125,6 +126,10 @@ pub trait RawReader: Send + Sync {
     /// a magic-byte peek.
     fn sniff(&self, uri: &Uri) -> Sniff;
 
+    /// Canonical sample stem from an entry filename, without opening data.
+    /// Return None when this reader does not recognize the name.
+    fn sample_name<'a>(&self, name: &'a str) -> Option<&'a str>;
+
     /// Confirm a `Maybe` by inspecting leading bytes. Only called when
     /// `sniff` == `Maybe`.
     fn sniff_bytes(&self, _head: &[u8]) -> bool {
@@ -158,10 +163,29 @@ pub trait RawReader: Send + Sync {
     ) -> Result<IndexedTimstofPeaks, ReadError>;
 }
 
-/// Ordered set of backends. First `Yes` wins.
+/// Set of backends. Multiple definite claims are rejected as ambiguous.
 pub struct ReaderRegistry(Vec<Box<dyn RawReader>>);
 
 impl ReaderRegistry {
+    /// Derive the name using the registered reader's format knowledge.
+    pub fn sample_name(&self, name: &str) -> Result<String, ReadError> {
+        let mut winner = None;
+        for reader in &self.0 {
+            if let Some(stem) = reader.sample_name(name) {
+                if let Some((first, _)) = winner {
+                    return Err(ReadError::AmbiguousFormat {
+                        first,
+                        second: reader.name(),
+                    });
+                }
+                winner = Some((reader.name(), stem));
+            }
+        }
+        winner
+            .map(|(_, stem)| stem.to_owned())
+            .ok_or_else(|| ReadError::UnknownFormat(name.to_owned()))
+    }
+
     /// The built-in readers. `BrukerTdfReader` is always present; format
     /// backends behind features are pushed under their `#[cfg]`.
     pub fn with_builtins() -> Self {
@@ -223,12 +247,12 @@ impl ReaderRegistry {
     }
 }
 
-/// Lowercased path suffix test for a URI (scheme-agnostic; keys on the path).
-fn path_ends_with(uri: &Uri, suffix_lower: &str) -> bool {
-    uri.path()
-        .trim_end_matches('/')
-        .to_ascii_lowercase()
-        .ends_with(suffix_lower)
+/// Case-insensitive format suffix matching shared by sniffing and naming.
+pub(crate) fn strip_format_suffix<'a>(name: &'a str, suffix: &str) -> Option<&'a str> {
+    let start = name.len().checked_sub(suffix.len())?;
+    name.get(start..)?
+        .eq_ignore_ascii_case(suffix)
+        .then(|| &name[..start])
 }
 
 /// Build a `file://` URI from an absolute local path, percent-encoding as
@@ -262,11 +286,15 @@ impl RawReader for BrukerTdfReader {
     }
 
     fn sniff(&self, uri: &Uri) -> Sniff {
-        if path_ends_with(uri, ".d") {
+        if self.sample_name(uri.path().trim_end_matches('/')).is_some() {
             Sniff::Yes
         } else {
             Sniff::No
         }
+    }
+
+    fn sample_name<'a>(&self, name: &'a str) -> Option<&'a str> {
+        strip_format_suffix(name, ".d")
     }
 
     fn manifest(&self, uri: &Uri) -> Manifest {
@@ -299,6 +327,43 @@ impl RawReader for BrukerTdfReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn registry_names_use_reader_suffix_rules() {
+        let registry = ReaderRegistry::with_builtins();
+        for name in ["My-Run.d", "My-Run.D"] {
+            assert_eq!(registry.sample_name(name).unwrap(), "My-Run");
+        }
+        assert_eq!(registry.sample_name("run.raw.D").unwrap(), "run.raw");
+        assert_eq!(
+            registry.sample_name("Échantillon.D").unwrap(),
+            "Échantillon"
+        );
+        for name in ["run.raw", "run.mzML.gz", "éé", "run.d.idx"] {
+            assert!(matches!(
+                registry.sample_name(name),
+                Err(ReadError::UnknownFormat(_))
+            ));
+        }
+        #[cfg(feature = "mzdata")]
+        for name in ["My-Run.mzML", "My-Run.MZML", "My-Run.MzMl"] {
+            assert_eq!(registry.sample_name(name).unwrap(), "My-Run");
+        }
+        #[cfg(not(feature = "mzdata"))]
+        assert!(matches!(
+            registry.sample_name("run.mzML"),
+            Err(ReadError::UnknownFormat(_))
+        ));
+    }
+
+    #[test]
+    fn ambiguous_names_are_not_resolved_by_registration_order() {
+        let registry = ReaderRegistry(vec![Box::new(BrukerTdfReader), Box::new(BrukerTdfReader)]);
+        assert!(matches!(
+            registry.sample_name("run.d"),
+            Err(ReadError::AmbiguousFormat { .. })
+        ));
+    }
 
     #[test]
     fn bruker_sniffs_dotd_yes_else_no() {

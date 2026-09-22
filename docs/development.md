@@ -71,9 +71,13 @@ For example, `s3://bucket/rerun_1/my-run.d` becomes
 
 Local `~` is expanded and paths made absolute without filesystem canonicalization;
 on Windows separators become `/`. Remote `s3://`, `gs://`, and `az://` text is
-preserved. Trailing `/` is ignored. The final component loses repeated known
-suffixes `.idx`, `.tar`, `.gz`, `.d`, `.raw`, `.mzml` (ASCII-case-insensitive); other dots and
-hyphens remain. Same-parent storage forms such as `run.d` and `run.d.idx` therefore
+preserved. Trailing `/` is ignored. Staging unwraps `.idx`/`.tar`, then the reader
+registry derives the canonical name: Bruker strips `.d`; the optional mzdata
+reader strips `.mzml` (ASCII-case-insensitive). Other dots and hyphens remain.
+Standalone index/container names without a recognized raw suffix retain their
+unwrapped filename. Unsupported raw names fail rather than using a guessed naming
+rule; `.raw` and `.mzML.gz` are not currently claimed by a reader.
+Same-parent storage forms such as `run.d` and `run.d.idx` therefore
 have the same identity. Stem and parent URI case are preserved. No symlink, `..`,
 general path-case, URI-encoding, or moved-file
 equivalence is promised. Use a consistent source location across workers;

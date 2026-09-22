@@ -3,6 +3,10 @@
 use crate::error::StageError;
 use std::path::Path;
 use timscentroid::StorageLocation;
+use timscentroid::reader::{
+    ReadError,
+    ReaderRegistry,
+};
 
 /// Where an URI points -- local filesystem or remote object store.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,6 +53,27 @@ pub(crate) fn parse_uri_shape(uri: &str) -> Result<UriShape, StageError> {
         NameKind::Raw
     };
     Ok(UriShape { loc, name })
+}
+
+/// Name an input before staging. Transport wrappers belong here; raw-format
+/// naming belongs to the reader registry. A standalone index/container may lack
+/// a raw-format suffix; retain its unwrapped filename in that case.
+pub fn sample_name(name: &str) -> Result<String, ReadError> {
+    let mut entry = name;
+    let mut wrapped = false;
+    loop {
+        let lower = entry.to_ascii_lowercase();
+        if lower.ends_with(".idx") || lower.ends_with(".tar") {
+            entry = &entry[..entry.len() - 4];
+            wrapped = true;
+        } else {
+            break;
+        }
+    }
+    match ReaderRegistry::with_builtins().sample_name(entry) {
+        Err(ReadError::UnknownFormat(_)) if wrapped => Ok(entry.to_owned()),
+        result => result,
+    }
 }
 
 /// Cheap test for a supported remote URI scheme.
@@ -143,6 +168,22 @@ pub fn canonical_uri(uri: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn sample_names_unwrap_transport_before_reader_dispatch() {
+        for name in [
+            "My-Run.D",
+            "My-Run.d.IDX",
+            "My-Run.D.TAR",
+            "My-Run.idx",
+            "My-Run.tar",
+        ] {
+            assert_eq!(sample_name(name).unwrap(), "My-Run");
+        }
+        assert_eq!(sample_name("run.raw.idx").unwrap(), "run.raw");
+        assert!(sample_name("run.raw").is_err());
+        assert!(sample_name("run.mzML.gz").is_err());
+    }
 
     #[test]
     fn recognizes_local_dotd() {

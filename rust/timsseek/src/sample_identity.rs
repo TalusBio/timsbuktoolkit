@@ -37,7 +37,14 @@ impl SampleIdentity {
             return Err(invalid());
         }
         let (parent, name) = location.rsplit_once('/').ok_or_else(invalid)?;
-        let sample_name = sample_name(name).ok_or_else(invalid)?;
+        let sample_name = tims_stage::uri::sample_name(name)
+            .map_err(|e| std::io::Error::new(std::io::ErrorKind::InvalidInput, e))?;
+        if matches!(sample_name.as_str(), "" | "." | "..")
+            || sample_name.contains('\\')
+            || sample_name.chars().any(char::is_control)
+        {
+            return Err(invalid());
+        }
         let sample_id = format!(
             "{:016x}-{sample_name}",
             fnv1a64(format!("{parent}/").as_bytes())
@@ -65,37 +72,6 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
     })
 }
 
-// Identity normalization, not a reader registry. Staging separately recognizes
-// .idx/.tar (tims_stage::uri::parse_uri_shape); vendor readers recognize their formats
-// (timscentroid::reader). Keep this policy fixed independently of enabled readers:
-// adding a reader must not silently change persisted sample IDs.
-const SAMPLE_STORAGE_SUFFIXES: &[&str] = &[".idx", ".tar", ".gz", ".d", ".raw", ".mzml"];
-
-fn sample_name(name: &str) -> Option<String> {
-    // Remote keys can contain backslashes; never turn those into nested output
-    // paths on Windows. Control characters are not useful display names either.
-    if name.contains('\\') || name.chars().any(char::is_control) {
-        return None;
-    }
-    let mut stem = name;
-    loop {
-        let before = stem;
-        for &ext in SAMPLE_STORAGE_SUFFIXES {
-            let start = stem.len().saturating_sub(ext.len());
-            if stem
-                .get(start..)
-                .is_some_and(|suffix| suffix.eq_ignore_ascii_case(ext))
-            {
-                stem = &stem[..start];
-            }
-        }
-        if stem == before {
-            break;
-        }
-    }
-    (!matches!(stem, "" | "." | "..")).then(|| stem.to_owned())
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -113,18 +89,26 @@ mod tests {
 
     #[test]
     fn supported_storage_suffixes() {
-        for name in ["run.d", "run.d.tar", "run.d.idx", "run.mzML.gz", "run.raw"] {
-            assert_eq!(sample_name(name).as_deref(), Some("run"));
+        for name in ["run.d", "run.d.tar", "run.d.idx", "run.idx", "run.tar"] {
+            let identity = SampleIdentity::from_location(&format!("s3://bucket/{name}")).unwrap();
+            assert_eq!(identity.sample_name(), "run");
         }
-        assert_eq!(sample_name("my-run.v2.d").as_deref(), Some("my-run.v2"));
-        assert!(sample_name("run\\..\\other.d").is_none());
-        assert!(sample_name("run\0.d").is_none());
+        for name in [
+            "run\\..\\other.d",
+            "run\0.d",
+            ".d",
+            ".idx",
+            "run.raw",
+            "run.mzML.gz",
+        ] {
+            assert!(SampleIdentity::from_location(&format!("s3://bucket/{name}")).is_err());
+        }
     }
 
     #[test]
     fn suffix_case_is_ignored_without_changing_stem_or_parent_case() {
         let expected = SampleIdentity::from_location("s3://bucket/Batch/My-Run.d").unwrap();
-        for suffix in [".D", ".D.TaR", ".D.IdX/", ".RAW", ".MzMl.GZ"] {
+        for suffix in [".D", ".D.TaR", ".D.IdX/"] {
             let location = format!("s3://bucket/Batch/My-Run{suffix}");
             assert_eq!(SampleIdentity::from_location(&location).unwrap(), expected);
         }
@@ -132,11 +116,11 @@ mod tests {
         for location in ["s3://bucket/batch/My-Run.d", "s3://bucket/Batch/my-run.d"] {
             assert_ne!(SampleIdentity::from_location(location).unwrap(), expected);
         }
-        // A candidate suffix can start inside a UTF-8 character; no slicing panic.
-        assert_eq!(sample_name("éé").as_deref(), Some("éé"));
         assert_eq!(
-            sample_name("Échantillon.MZML").as_deref(),
-            Some("Échantillon")
+            SampleIdentity::from_location("s3://bucket/Échantillon.D")
+                .unwrap()
+                .sample_name(),
+            "Échantillon"
         );
     }
 }
