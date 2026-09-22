@@ -224,8 +224,10 @@ pub struct ResultParquetWriter<'a> {
 }
 
 impl<'a> ResultParquetWriter<'a> {
+    /// Rescored results, including competition, discriminant score and q-value columns.
+    /// Writes already-computed values; this constructor does not perform rescoring.
     /// Identity is required at construction, including for zero-row artifacts.
-    pub fn new(
+    pub fn rescored(
         path: impl AsRef<Path>,
         row_group_size: usize,
         library: &'a crate::data_sources::reference_library::ReferenceLibrary,
@@ -377,7 +379,7 @@ mod tests {
                 let mut writer = if raw {
                     ResultParquetWriter::raw(&path, 1, &library, &sample)
                 } else {
-                    ResultParquetWriter::new(&path, 1, &library, &sample)
+                    ResultParquetWriter::rescored(&path, 1, &library, &sample)
                 }
                 .unwrap();
                 if nrows == 1 {
@@ -644,8 +646,8 @@ mod tests {
             )
             .unwrap();
             let sample = SampleIdentity::from_location("s3://bucket/run.d").unwrap();
-            let writer =
-                ResultParquetWriter::new(&path, 1024, &library, &sample).expect("create writer");
+            let writer = ResultParquetWriter::rescored(&path, 1024, &library, &sample)
+                .expect("create writer");
             writer.close().expect("close");
         }
         let file = File::open(&path).expect("open");

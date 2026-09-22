@@ -69,7 +69,7 @@ fn fnv1a64(bytes: &[u8]) -> u64 {
 // .idx/.tar (tims_stage::uri::parse_uri_shape); vendor readers recognize their formats
 // (timscentroid::reader). Keep this policy fixed independently of enabled readers:
 // adding a reader must not silently change persisted sample IDs.
-const SAMPLE_STORAGE_SUFFIXES: &[&str] = &[".idx", ".tar", ".gz", ".d", ".raw", ".mzML", ".mzml"];
+const SAMPLE_STORAGE_SUFFIXES: &[&str] = &[".idx", ".tar", ".gz", ".d", ".raw", ".mzml"];
 
 fn sample_name(name: &str) -> Option<String> {
     // Remote keys can contain backslashes; never turn those into nested output
@@ -81,8 +81,12 @@ fn sample_name(name: &str) -> Option<String> {
     loop {
         let before = stem;
         for &ext in SAMPLE_STORAGE_SUFFIXES {
-            if let Some(s) = stem.strip_suffix(ext) {
-                stem = s;
+            let start = stem.len().saturating_sub(ext.len());
+            if stem
+                .get(start..)
+                .is_some_and(|suffix| suffix.eq_ignore_ascii_case(ext))
+            {
+                stem = &stem[..start];
             }
         }
         if stem == before {
@@ -115,5 +119,24 @@ mod tests {
         assert_eq!(sample_name("my-run.v2.d").as_deref(), Some("my-run.v2"));
         assert!(sample_name("run\\..\\other.d").is_none());
         assert!(sample_name("run\0.d").is_none());
+    }
+
+    #[test]
+    fn suffix_case_is_ignored_without_changing_stem_or_parent_case() {
+        let expected = SampleIdentity::from_location("s3://bucket/Batch/My-Run.d").unwrap();
+        for suffix in [".D", ".D.TaR", ".D.IdX/", ".RAW", ".MzMl.GZ"] {
+            let location = format!("s3://bucket/Batch/My-Run{suffix}");
+            assert_eq!(SampleIdentity::from_location(&location).unwrap(), expected);
+        }
+        assert_eq!(expected.sample_name(), "My-Run");
+        for location in ["s3://bucket/batch/My-Run.d", "s3://bucket/Batch/my-run.d"] {
+            assert_ne!(SampleIdentity::from_location(location).unwrap(), expected);
+        }
+        // A candidate suffix can start inside a UTF-8 character; no slicing panic.
+        assert_eq!(sample_name("éé").as_deref(), Some("éé"));
+        assert_eq!(
+            sample_name("Échantillon.MZML").as_deref(),
+            Some("Échantillon")
+        );
     }
 }

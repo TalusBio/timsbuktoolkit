@@ -72,9 +72,10 @@ For example, `s3://bucket/rerun_1/my-run.d` becomes
 Local `~` is expanded and paths made absolute without filesystem canonicalization;
 on Windows separators become `/`. Remote `s3://`, `gs://`, and `az://` text is
 preserved. Trailing `/` is ignored. The final component loses repeated known
-suffixes `.idx`, `.tar`, `.gz`, `.d`, `.raw`, `.mzML`, `.mzml`; other dots and
+suffixes `.idx`, `.tar`, `.gz`, `.d`, `.raw`, `.mzml` (ASCII-case-insensitive); other dots and
 hyphens remain. Same-parent storage forms such as `run.d` and `run.d.idx` therefore
-have the same identity. No symlink, `..`, case, URI-encoding, or moved-file
+have the same identity. Stem and parent URI case are preserved. No symlink, `..`,
+general path-case, URI-encoding, or moved-file
 equivalence is promised. Use a consistent source location across workers;
 different working directories change what a relative input refers to.
 

@@ -380,7 +380,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     // === PHASE 6: Write Parquet output ===
     let step = TimedStep::begin("Phase 6: Write output");
     let out_path_pq = std::path::Path::new(&out_path.uri).join(RESULTS_PARQUET);
-    let mut pq_writer = timsseek::scoring::parquet_writer::ResultParquetWriter::new(
+    let mut pq_writer = timsseek::scoring::parquet_writer::ResultParquetWriter::rescored(
         &out_path_pq,
         20_000,
         speclib,
