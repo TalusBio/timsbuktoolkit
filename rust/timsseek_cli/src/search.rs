@@ -5,11 +5,8 @@ use tims_stage::{
     expand_local_uri,
     is_remote_uri,
 };
+use timsquery::IndexedTimstofPeaks;
 use timsquery::utils::TupleRange;
-use timsquery::{
-    IndexedTimstofPeaks,
-    load_index,
-};
 use timsseek::scoring::Scorer;
 use timsseek::scoring::timings::TimedStep;
 use tracing::{
@@ -26,14 +23,15 @@ use crate::config::{
     load_config,
 };
 use crate::logging::init_tracing;
-use crate::output_sink::{
-    OutputSink,
-    sample_name_from_uri,
-};
+use crate::output_sink::OutputSink;
 use crate::run_inputs::{
     LibrarySource,
     ResolvedInputs,
     resolve_run_inputs,
+};
+use crate::sample_identity::{
+    SampleInput,
+    resolve_samples,
 };
 use crate::{
     artifacts,
@@ -72,7 +70,12 @@ fn validate_fasta(fasta: &std::path::Path) -> std::result::Result<(), errors::Cl
 /// Probe the filesystem for everything the run is about to touch, so a missing
 /// input or a colliding artifact fails before the heavy analysis rather than
 /// after it. Every value it reads was resolved by [`resolve_run_inputs`].
-fn validate_inputs(resolved: &ResolvedInputs) -> std::result::Result<(), errors::CliError> {
+fn validate_inputs(
+    resolved: &ResolvedInputs,
+) -> std::result::Result<Vec<SampleInput>, errors::CliError> {
+    // Unconditional: --overwrite permits replacing old artifacts, never two
+    // inputs in this invocation writing to the same destination.
+    let samples = resolve_samples(&resolved.raw_inputs)?;
     info!("Validating inputs and outputs before processing...");
 
     let ResolvedInputs {
@@ -165,7 +168,7 @@ fn validate_inputs(resolved: &ResolvedInputs) -> std::result::Result<(), errors:
             LibrarySource::Build { out, .. } => Some(out.as_path()),
             LibrarySource::File(_) | LibrarySource::Fasta(_) => None,
         };
-        let collisions = artifacts::probe_collisions(output_uri, raw_inputs, built_library)?;
+        let collisions = artifacts::probe_collisions(output_uri, &samples, built_library)?;
         if !collisions.is_empty() {
             let list = collisions
                 .iter()
@@ -192,7 +195,7 @@ fn validate_inputs(resolved: &ResolvedInputs) -> std::result::Result<(), errors:
 
     info!("All validations passed! Starting processing...");
 
-    Ok(())
+    Ok(samples)
 }
 
 /// Record what the run resolved to, at the path the collision probe reserved.
@@ -241,8 +244,9 @@ struct SearchRun<'a> {
 impl SearchRun<'_> {
     fn process_file(
         &self,
-        raw_uri: &str,
+        sample: &SampleInput,
     ) -> std::result::Result<timsseek::scoring::PipelineReport, errors::CliError> {
+        let raw_uri = sample.uri();
         let file_name = std::path::Path::new(raw_uri)
             .file_name()
             .and_then(|s| s.to_str())
@@ -251,8 +255,8 @@ impl SearchRun<'_> {
         info!("Processing raw input: {}", raw_uri);
 
         let step = TimedStep::begin("Loading index");
-        let (index, index_source) = load_index(
-            raw_uri,
+        let (index, index_source) = timsquery::serde::index_serde::load_index_for_source(
+            sample.source(),
             self.backend,
             self.save_sidecar,
             self.config
@@ -293,11 +297,7 @@ impl SearchRun<'_> {
             fragmented_range,
         };
 
-        let file_stem = sample_name_from_uri(raw_uri).ok_or_else(|| errors::CliError::Io {
-            source: "Unable to derive sample name from URI".to_string(),
-            path: Some(raw_uri.to_string()),
-        })?;
-        let file_output_dir = self.sink.sample_dir(&file_stem);
+        let file_output_dir = self.sink.sample_dir(sample.sample_id());
 
         std::fs::create_dir_all(&file_output_dir).map_err(|e| errors::CliError::Io {
             source: format!("Failed to create output subdirectory: {}", e),
@@ -305,7 +305,7 @@ impl SearchRun<'_> {
         })?;
 
         if self.overwrite {
-            self.sink.clear_existing(&file_stem)?;
+            self.sink.clear_existing(sample.sample_id())?;
         }
 
         let file_output_config = OutputConfig {
@@ -313,6 +313,7 @@ impl SearchRun<'_> {
         };
 
         let options = processing::PipelineOptions {
+            sample,
             chunk_size: self.config.analysis.chunk_size,
             output: &file_output_config,
             max_qvalue: self.max_qvalue,
@@ -432,7 +433,7 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
     info!("Parsed configuration: {:#?}", config.clone());
     alloc_track::snap!("start");
 
-    validate_inputs(&validated)?;
+    let samples = validate_inputs(&validated)?;
 
     // The stale-tempdir sweep runs inside `PerRunTempdir::new`.
     let staging_cfg = config.staging.clone().unwrap_or_default();
@@ -576,7 +577,8 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
         no_feature_stats: args.no_feature_stats,
     };
 
-    for (idx, raw_uri) in validated.raw_inputs.iter().enumerate() {
+    for (idx, sample) in samples.iter().enumerate() {
+        let raw_uri = sample.uri();
         info!(
             "Processing input {} of {}: {}",
             idx + 1,
@@ -584,28 +586,17 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
             raw_uri
         );
 
-        let sample_name = match sample_name_from_uri(raw_uri) {
-            Some(s) => s,
-            None => {
-                let e = errors::CliError::Io {
-                    source: "Unable to derive sample name from URI".to_string(),
-                    path: Some(raw_uri.clone()),
-                };
-                error!("Failed to process {}: {}", raw_uri, e);
-                failed_files.push((raw_uri.clone(), e));
-                continue;
-            }
-        };
+        let sample_name = sample.sample_name();
 
         // Header/footer pair; `processing::run_pipeline` phase output lands
         // between them, so batched runs still show per-input wall time.
         println!("=== [{}/{}] {} ===", idx + 1, total_files, sample_name);
         let file_start = std::time::Instant::now();
-        let sample_dest = sink.dest_uri_for(&sample_name);
+        let sample_dest = sink.dest_uri_for(sample.sample_id());
 
-        match search_run.process_file(raw_uri) {
+        match search_run.process_file(sample) {
             Ok(report) => {
-                if let Err(e) = sink.finalize_sample(&sample_name) {
+                if let Err(e) = sink.finalize_sample(sample.sample_id()) {
                     error!("Failed to finalize sample {}: {}", sample_name, e);
                     println!(
                         "=== [{}/{}] {} failed upload after {:?} ===",
@@ -617,7 +608,7 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
                     run_report.status = timsseek::scoring::timings::RunStatus::Aborted;
                     run_report.abort_reason =
                         Some(format!("upload failure on sample {sample_name}: {e}"));
-                    failed_files.push((raw_uri.clone(), e));
+                    failed_files.push((raw_uri.to_owned(), e));
                     error!("Aborting batch due to upload failure");
                     break;
                 }
@@ -629,7 +620,7 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
                     sample_name,
                     file_start.elapsed()
                 );
-                successful_files.push(raw_uri.clone());
+                successful_files.push(raw_uri.to_owned());
                 let mut outputs = vec![format!("{sample_dest}/{}", artifacts::RESULTS_PARQUET)];
                 if !args.no_feature_stats {
                     outputs.push(format!("{sample_dest}/{}", artifacts::FEATURE_STATS_TSV));
@@ -639,7 +630,8 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
                     ));
                 }
                 run_report.files.push(timsseek::scoring::FileReport {
-                    file_name: raw_uri.clone(),
+                    sample: sample.identity().clone(),
+                    file_name: raw_uri.to_owned(),
                     pipeline: report,
                     outputs,
                 });
@@ -659,11 +651,11 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
                 if matches!(e, errors::CliError::Io { .. }) {
                     run_report.status = timsseek::scoring::timings::RunStatus::Aborted;
                     run_report.abort_reason = Some(format!("I/O error on {raw_uri}: {e}"));
-                    failed_files.push((raw_uri.clone(), e));
+                    failed_files.push((raw_uri.to_owned(), e));
                     error!("Aborting batch due to I/O error");
                     break;
                 }
-                failed_files.push((raw_uri.clone(), e));
+                failed_files.push((raw_uri.to_owned(), e));
             }
         }
     }
@@ -701,6 +693,85 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn duplicate_id_fails_before_io_even_with_overwrite() {
+        for overwrite in [false, true] {
+            let dir = tempfile::tempdir().unwrap();
+            let output = dir.path().join("not-created");
+            let resolved = ResolvedInputs {
+                raw_inputs: vec!["s3://bucket/run.d".into(), "s3://bucket/run.d.idx/".into()],
+                library: LibrarySource::Fasta(dir.path().join("absent.fasta")),
+                calib_lib_uri: None,
+                output_uri: output.to_string_lossy().into_owned(),
+                overwrite,
+            };
+            let error = validate_inputs(&resolved).unwrap_err().to_string();
+            assert!(error.contains("Duplicate sample_id"), "{error}");
+            assert!(error.contains("s3://bucket/run.d.idx/"), "{error}");
+            assert!(!output.exists());
+        }
+    }
+
+    #[test]
+    fn same_stem_inputs_have_separate_artifact_destinations_and_report_identity() {
+        let dir = tempfile::tempdir().unwrap();
+        let library = dir.path().join("library");
+        std::fs::write(&library, b"not opened by preflight").unwrap();
+        let resolved = ResolvedInputs {
+            raw_inputs: vec![
+                "s3://bucket/rerun_1/my-run.d".into(),
+                "s3://bucket/rerun_2/my-run.d".into(),
+            ],
+            library: LibrarySource::File(library.to_string_lossy().into_owned()),
+            calib_lib_uri: None,
+            output_uri: dir.path().join("out").to_string_lossy().into_owned(),
+            overwrite: false,
+        };
+        let samples = validate_inputs(&resolved).unwrap();
+        let sink = OutputSink::new(&resolved.output_uri).unwrap();
+        for sample in &samples {
+            let sample_dir = sink.sample_dir(sample.sample_id());
+            std::fs::create_dir_all(&sample_dir).unwrap();
+            std::fs::write(sample_dir.join(artifacts::RESULTS_PARQUET), sample.uri()).unwrap();
+            let report = timsseek::scoring::FileReport {
+                sample: sample.identity().clone(),
+                file_name: sample.uri().to_owned(),
+                pipeline: Default::default(),
+                outputs: vec![sink.dest_uri_for(sample.sample_id())],
+            };
+            let json = serde_json::to_value(report).unwrap();
+            assert_eq!(json["sample_id"], sample.sample_id());
+            assert_eq!(json["sample_name"], "my-run");
+        }
+        assert_eq!(
+            artifacts::probe_collisions(&resolved.output_uri, &samples, None)
+                .unwrap()
+                .len(),
+            2
+        );
+        // A second invocation is different from duplicate inputs in one batch:
+        // pre-existing outputs are explicitly replaceable with --overwrite.
+        assert!(validate_inputs(&resolved).is_err());
+        let rerun = ResolvedInputs {
+            overwrite: true,
+            ..resolved.clone()
+        };
+        let rerun_samples = validate_inputs(&rerun).unwrap();
+        assert_eq!(
+            rerun_samples
+                .iter()
+                .map(|s| s.identity())
+                .collect::<Vec<_>>(),
+            samples.iter().map(|s| s.identity()).collect::<Vec<_>>()
+        );
+        sink.clear_existing(samples[0].sample_id()).unwrap();
+        assert!(
+            sink.sample_dir(samples[1].sample_id())
+                .join(artifacts::RESULTS_PARQUET)
+                .exists()
+        );
+    }
 
     /// The first run of a script that names a library it has not built yet, and
     /// what it is told: the file is missing, and here is what would produce it.

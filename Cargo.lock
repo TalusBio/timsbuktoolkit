@@ -8395,6 +8395,7 @@ dependencies = [
  "serde_json",
  "smallvec",
  "tempfile",
+ "tims_stage",
  "timscentroid",
  "timsquery",
  "timsrust",

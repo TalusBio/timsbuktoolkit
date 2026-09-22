@@ -1,7 +1,8 @@
 //! Vendor-neutral raw-format dispatch.
 //!
 //! A [`RawReader`] is a self-describing backend: it declares which URIs it
-//! claims ([`RawReader::sniff`]), which artifacts belong together
+//! claims ([`RawReader::sniff`]), their canonical sample names
+//! ([`RawReader::sample_name`]), which artifacts belong together
 //! ([`RawReader::manifest`]), and how to build the in-memory index
 //! ([`RawReader::read`]). The [`ReaderRegistry`] picks a backend for a URI by
 //! sniffing -- vendor suffix/scheme knowledge lives ONLY in each reader, never
@@ -17,6 +18,7 @@ use std::path::{
     Path,
     PathBuf,
 };
+use std::sync::Arc;
 
 use http::Uri;
 use url::Url;
@@ -125,6 +127,10 @@ pub trait RawReader: Send + Sync {
     /// a magic-byte peek.
     fn sniff(&self, uri: &Uri) -> Sniff;
 
+    /// Canonical sample stem from an entry filename, without opening data.
+    /// Return None when this reader does not recognize the name.
+    fn sample_name<'a>(&self, name: &'a str) -> Option<&'a str>;
+
     /// Confirm a `Maybe` by inspecting leading bytes. Only called when
     /// `sniff` == `Maybe`.
     fn sniff_bytes(&self, _head: &[u8]) -> bool {
@@ -158,17 +164,17 @@ pub trait RawReader: Send + Sync {
     ) -> Result<IndexedTimstofPeaks, ReadError>;
 }
 
-/// Ordered set of backends. First `Yes` wins.
-pub struct ReaderRegistry(Vec<Box<dyn RawReader>>);
+/// Set of backends. Multiple definite claims are rejected as ambiguous.
+pub struct ReaderRegistry(Vec<Arc<dyn RawReader>>);
 
 impl ReaderRegistry {
     /// The built-in readers. `BrukerTdfReader` is always present; format
     /// backends behind features are pushed under their `#[cfg]`.
     pub fn with_builtins() -> Self {
         #[allow(unused_mut)]
-        let mut v: Vec<Box<dyn RawReader>> = vec![Box::new(BrukerTdfReader)];
+        let mut v: Vec<Arc<dyn RawReader>> = vec![Arc::new(BrukerTdfReader)];
         #[cfg(feature = "mzdata")]
-        v.push(Box::new(crate::reader::mzdata::MzdataReader));
+        v.push(Arc::new(crate::reader::mzdata::MzdataReader));
         Self(v)
     }
 
@@ -189,13 +195,13 @@ impl ReaderRegistry {
         &self,
         uri: &Uri,
         head: impl FnOnce() -> Option<Vec<u8>>,
-    ) -> Result<&dyn RawReader, ReadError> {
-        let mut winner: Option<&dyn RawReader> = None;
-        let mut maybes: Vec<&dyn RawReader> = Vec::new();
+    ) -> Result<Arc<dyn RawReader>, ReadError> {
+        let mut winner: Option<Arc<dyn RawReader>> = None;
+        let mut maybes = Vec::new();
         for r in &self.0 {
             match r.sniff(uri) {
                 Sniff::Yes => match winner {
-                    None => winner = Some(r.as_ref()),
+                    None => winner = Some(Arc::clone(r)),
                     Some(w) => {
                         return Err(ReadError::AmbiguousFormat {
                             first: w.name(),
@@ -203,7 +209,7 @@ impl ReaderRegistry {
                         });
                     }
                 },
-                Sniff::Maybe => maybes.push(r.as_ref()),
+                Sniff::Maybe => maybes.push(Arc::clone(r)),
                 Sniff::No => {}
             }
         }
@@ -223,12 +229,12 @@ impl ReaderRegistry {
     }
 }
 
-/// Lowercased path suffix test for a URI (scheme-agnostic; keys on the path).
-fn path_ends_with(uri: &Uri, suffix_lower: &str) -> bool {
-    uri.path()
-        .trim_end_matches('/')
-        .to_ascii_lowercase()
-        .ends_with(suffix_lower)
+/// Case-insensitive format suffix matching shared by sniffing and naming.
+pub(crate) fn strip_format_suffix<'a>(name: &'a str, suffix: &str) -> Option<&'a str> {
+    let start = name.len().checked_sub(suffix.len())?;
+    name.get(start..)?
+        .eq_ignore_ascii_case(suffix)
+        .then(|| &name[..start])
 }
 
 /// Build a `file://` URI from an absolute local path, percent-encoding as
@@ -262,11 +268,15 @@ impl RawReader for BrukerTdfReader {
     }
 
     fn sniff(&self, uri: &Uri) -> Sniff {
-        if path_ends_with(uri, ".d") {
+        if self.sample_name(uri.path().trim_end_matches('/')).is_some() {
             Sniff::Yes
         } else {
             Sniff::No
         }
+    }
+
+    fn sample_name<'a>(&self, name: &'a str) -> Option<&'a str> {
+        strip_format_suffix(name, ".d")
     }
 
     fn manifest(&self, uri: &Uri) -> Manifest {
@@ -299,6 +309,27 @@ impl RawReader for BrukerTdfReader {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn selected_reader_supplies_name() {
+        let registry = ReaderRegistry::with_builtins();
+        for (name, expected) in [
+            ("My-Run.d", "My-Run"),
+            ("My-Run.D", "My-Run"),
+            ("run.raw.D", "run.raw"),
+            ("Échantillon.D", "Échantillon"),
+        ] {
+            let uri = local_uri(&std::path::absolute(name).unwrap()).unwrap();
+            let reader = registry.pick(&uri, || None).unwrap();
+            assert_eq!(reader.sample_name(name), Some(expected));
+        }
+        #[cfg(feature = "mzdata")]
+        for name in ["My-Run.mzML", "My-Run.MZML", "My-Run.MzMl"] {
+            let uri = local_uri(&std::path::absolute(name).unwrap()).unwrap();
+            let reader = registry.pick(&uri, || None).unwrap();
+            assert_eq!(reader.sample_name(name), Some("My-Run"));
+        }
+    }
 
     #[test]
     fn bruker_sniffs_dotd_yes_else_no() {

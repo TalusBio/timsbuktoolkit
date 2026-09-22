@@ -60,6 +60,17 @@ shared CLI/viewer plan report and Parquet scoring-plan metadata. Other elements
 are ignored by this approximation; isotope-labelled C/S and unspecified formula
 bases cannot supply its composition counts.
 
+## Sample identity and output paths
+
+Search outputs use `<output>/<sample_id>/`, not the basename alone.
+IDs combine a parent-location hash with the sample name, distinguishing same-named
+inputs in different directories without hashing file contents.
+`sample_id` and `sample_name` are recorded in run/performance reports and Parquet
+file metadata, not repeated per row. Read these fields rather than parsing paths.
+
+Duplicate IDs within one invocation are rejected; rerunning with `--overwrite`
+still replaces prior outputs. Existing basename-only output directories are not migrated.
+
 ## Cargo features
 
 | Feature | Crate | Effect | Use case | Enable |

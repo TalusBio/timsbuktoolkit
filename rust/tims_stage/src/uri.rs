@@ -39,9 +39,10 @@ pub(crate) fn parse_uri_shape(uri: &str) -> Result<UriShape, StageError> {
     } else {
         LocKind::Local
     };
-    let name = if trimmed.ends_with(".idx") {
+    let lower = trimmed.to_ascii_lowercase();
+    let name = if lower.ends_with(".idx") {
         NameKind::Idx
-    } else if trimmed.ends_with(".tar") {
+    } else if lower.ends_with(".tar") {
         NameKind::Tar
     } else {
         // Any other suffix is a raw vendor artifact; the reader registry
@@ -143,6 +144,18 @@ pub fn canonical_uri(uri: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn transport_suffixes_are_case_insensitive() {
+        assert_eq!(
+            parse_uri_shape("/data/run.D.IDX").unwrap().name,
+            NameKind::Idx
+        );
+        assert_eq!(
+            parse_uri_shape("/data/run.D.TAR").unwrap().name,
+            NameKind::Tar
+        );
+    }
 
     #[test]
     fn recognizes_local_dotd() {

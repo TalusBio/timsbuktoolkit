@@ -192,57 +192,6 @@ pub(crate) fn probe_uri_exists(uri: &str) -> Result<bool, errors::CliError> {
     })
 }
 
-/// `sample.d.tar`, `sample.d/`, `sample.d.idx/` all collapse to `sample`.
-pub(crate) fn sample_name_from_uri(uri: &str) -> Option<String> {
-    let trimmed = uri.trim_end_matches('/');
-    let mut stem = trimmed.rsplit('/').next()?;
-    // Loop so chained suffixes collapse fully. Order matters: `.idx`/`.tar`
-    // come off before `.d` so they can't leave a bare `.d` behind.
-    loop {
-        let before = stem;
-        for ext in [".idx", ".tar", ".d"] {
-            if let Some(s) = stem.strip_suffix(ext) {
-                stem = s;
-            }
-        }
-        if stem == before {
-            break;
-        }
-    }
-    if stem.is_empty() {
-        None
-    } else {
-        Some(stem.to_string())
-    }
-}
-
-#[cfg(test)]
-mod sample_name_tests {
-    use super::sample_name_from_uri;
-    #[test]
-    fn local_dotd_plain() {
-        assert_eq!(sample_name_from_uri("/data/run.d").as_deref(), Some("run"));
-    }
-    #[test]
-    fn local_dotd_trailing_slash() {
-        assert_eq!(sample_name_from_uri("/data/run.d/").as_deref(), Some("run"));
-    }
-    #[test]
-    fn s3_tar_collapses_both_suffixes() {
-        assert_eq!(
-            sample_name_from_uri("s3://bkt/run.d.tar").as_deref(),
-            Some("run")
-        );
-    }
-    #[test]
-    fn s3_idx_directory() {
-        assert_eq!(
-            sample_name_from_uri("s3://bkt/run.d.idx/").as_deref(),
-            Some("run")
-        );
-    }
-}
-
 #[cfg(test)]
 mod destination_tests {
     use super::OutputSink;

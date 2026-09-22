@@ -26,6 +26,7 @@ use super::blocks::{
     ScoreBlock,
 };
 use super::results::FinalResult;
+use crate::sample_identity::SampleIdentity;
 
 /// Bumped when a column's meaning or type changes, so a reader can tell a new
 /// file from an old one rather than silently misreading it.
@@ -223,12 +224,16 @@ pub struct ResultParquetWriter<'a> {
 }
 
 impl<'a> ResultParquetWriter<'a> {
-    pub fn new(
+    /// Rescored results, including competition, discriminant score and q-value columns.
+    /// Writes already-computed values; this constructor does not perform rescoring.
+    /// Identity is required at construction, including for zero-row artifacts.
+    pub fn rescored(
         path: impl AsRef<Path>,
         row_group_size: usize,
         library: &'a crate::data_sources::reference_library::ReferenceLibrary,
+        sample: &SampleIdentity,
     ) -> std::io::Result<Self> {
-        Self::with_mode(path, row_group_size, library, false)
+        Self::with_mode(path, row_group_size, library, sample, false)
     }
 
     /// Common scores only: no competition, discriminant score or q-value columns.
@@ -236,14 +241,16 @@ impl<'a> ResultParquetWriter<'a> {
         path: impl AsRef<Path>,
         row_group_size: usize,
         library: &'a crate::ReferenceLibrary,
+        sample: &SampleIdentity,
     ) -> std::io::Result<Self> {
-        Self::with_mode(path, row_group_size, library, true)
+        Self::with_mode(path, row_group_size, library, sample, true)
     }
 
     fn with_mode(
         path: impl AsRef<Path>,
         row_group_size: usize,
         library: &'a crate::ReferenceLibrary,
+        sample: &SampleIdentity,
         raw: bool,
     ) -> std::io::Result<Self> {
         let geom = library.geometry();
@@ -260,6 +267,14 @@ impl<'a> ResultParquetWriter<'a> {
         let schema = empty_batch.schema();
 
         let kv = vec![
+            KeyValue {
+                key: "sample_id".into(),
+                value: Some(sample.sample_id().to_owned()),
+            },
+            KeyValue {
+                key: "sample_name".into(),
+                value: Some(sample.sample_name().to_owned()),
+            },
             KeyValue {
                 key: "result_mode".into(),
                 value: Some(if raw { "raw" } else { "rescored" }.into()),
@@ -346,6 +361,50 @@ mod tests {
         Row,
         TargetColumnsBuilder,
     };
+
+    #[test]
+    fn sample_metadata_survives_empty_and_nonempty_files_in_both_modes() {
+        let geom = one_row_arena();
+        let library = crate::ReferenceLibrary::try_from(timsquery::serde::TargetTable::Mzpaf {
+            frag_intens: Some(vec![1.0; geom.n_fragments()]),
+            geom,
+        })
+        .unwrap();
+        let sample =
+            crate::sample_identity::SampleIdentity::from_location("s3://bucket/run.d").unwrap();
+        let dir = tempfile::tempdir().unwrap();
+        for raw in [false, true] {
+            for nrows in [0, 1] {
+                let path = dir.path().join(format!("{raw}-{nrows}.parquet"));
+                let mut writer = if raw {
+                    ResultParquetWriter::raw(&path, 1, &library, &sample)
+                } else {
+                    ResultParquetWriter::rescored(&path, 1, &library, &sample)
+                }
+                .unwrap();
+                if nrows == 1 {
+                    writer.add(sample_in(library.geometry())).unwrap();
+                }
+                writer.close().unwrap();
+                let reader = SerializedFileReader::new(File::open(path).unwrap()).unwrap();
+                let meta = reader.metadata().file_metadata();
+                assert_eq!(meta.num_rows(), nrows);
+                for (key, value) in [
+                    ("sample_id", "07cff6d98863b0e4-run"),
+                    ("sample_name", "run"),
+                ] {
+                    let entries: Vec<_> = meta
+                        .key_value_metadata()
+                        .unwrap()
+                        .iter()
+                        .filter(|kv| kv.key == key)
+                        .collect();
+                    assert_eq!(entries.len(), 1);
+                    assert_eq!(entries[0].value.as_deref(), Some(value));
+                }
+            }
+        }
+    }
 
     /// A sealed arena with one row per `(sequence, id)`, for the writer to
     /// resolve ids against. `None` for an id leaves the row to be minted.
@@ -586,7 +645,9 @@ mod tests {
                 },
             )
             .unwrap();
-            let writer = ResultParquetWriter::new(&path, 1024, &library).expect("create writer");
+            let sample = SampleIdentity::from_location("s3://bucket/run.d").unwrap();
+            let writer = ResultParquetWriter::rescored(&path, 1024, &library, &sample)
+                .expect("create writer");
             writer.close().expect("close");
         }
         let file = File::open(&path).expect("open");

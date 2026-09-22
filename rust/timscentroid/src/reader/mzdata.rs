@@ -25,7 +25,6 @@ use super::{
     ReadError,
     ResolvedSource,
     Sniff,
-    path_ends_with,
 };
 use crate::centroiding::IndexingCentroidingConfig;
 use crate::dimension::MobilityKind;
@@ -68,11 +67,15 @@ impl RawReader for MzdataReader {
     fn sniff(&self, uri: &Uri) -> Sniff {
         // `.mzML.gz` is out of scope: it ends with `.gz`, not `.mzml`, so it is
         // correctly NOT claimed here (registry → UnknownFormat, loud).
-        if path_ends_with(uri, ".mzml") {
+        if self.sample_name(uri.path().trim_end_matches('/')).is_some() {
             Sniff::Yes
         } else {
             Sniff::No
         }
+    }
+
+    fn sample_name<'a>(&self, name: &'a str) -> Option<&'a str> {
+        super::strip_format_suffix(name, ".mzml")
     }
 
     fn manifest(&self, uri: &Uri) -> Manifest {
