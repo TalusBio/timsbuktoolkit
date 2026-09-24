@@ -638,7 +638,10 @@ const LINEAR_NCOLS: usize =
 const BASE_NONLINEAR_NCOLS: usize =
     ScoringFields::NONLINEAR_LEN + ResultMeta::NONLINEAR_LEN + Derived::NONLINEAR_LEN;
 fn nonlinear_ncols(library: &ReferenceLibrary) -> usize {
-    BASE_NONLINEAR_NCOLS + library.scoring_plan().width()
+    library.scoring_plan().nonlinear_indices().len()
+        + ResultMeta::NONLINEAR_LEN
+        + Derived::NONLINEAR_LEN
+        + library.scoring_plan().width()
 }
 fn linear_ncols(library: &ReferenceLibrary) -> usize {
     library.scoring_plan().linear_indices().len() + ResultMeta::LINEAR_LEN + Derived::LINEAR_LEN
@@ -721,7 +724,10 @@ fn project_nonlinear_row(
     derived: &Derived,
     out: &mut impl ValueSink,
 ) {
-    out.push(&scoring.nonlinear_feature_array());
+    let values = scoring.nonlinear_feature_array();
+    for &i in library.scoring_plan().nonlinear_indices() {
+        out.push(&values[i..i + 1]);
+    }
     out.push(&meta.nonlinear_feature_array());
     out.push(&derived.nonlinear_feature_array());
     library.scoring_plan().project(
@@ -858,9 +864,17 @@ pub fn linear_feature_name_set(library: &ReferenceLibrary) -> Vec<Arc<str>> {
 pub fn nonlinear_feature_name_set(library: &ReferenceLibrary) -> Vec<Arc<str>> {
     let mut n = NameSink::new();
     <ScoringFields as ScoreBlock>::nonlinear_feature_names(&mut n);
+    let all = n.into_names();
+    let mut n = NameSink::new();
     <ResultMeta as ScoreBlock>::nonlinear_feature_names(&mut n);
     <Derived as ScoreBlock>::nonlinear_feature_names(&mut n);
-    let mut names = n.into_names();
+    let mut names: Vec<_> = library
+        .scoring_plan()
+        .nonlinear_indices()
+        .iter()
+        .map(|&i| all[i].clone())
+        .chain(n.into_names())
+        .collect();
     names.extend(library.scoring_plan().names().cloned());
     names
 }
@@ -1046,6 +1060,7 @@ mod feature_tests {
                 analyte: analyte.as_input(),
                 charge: 2,
                 precursor_mz: 500.0,
+                rt: Some(timsquery::RtCoordinate::seconds(1.0)),
                 frags: &frags,
                 ..Default::default()
             });
@@ -1376,6 +1391,60 @@ mod feature_tests {
         assert!(
             insample_gap > 1e3 * spread.max(f64::MIN_POSITIVE),
             "hold-out separation ({spread}) must be negligible next to in-sample ({insample_gap})"
+        );
+    }
+
+    #[test]
+    fn rt_free_library_omits_rt_features_and_keeps_rescoring_and_qvalues() {
+        use timsquery::models::{
+            Row,
+            TargetCapabilities,
+            TargetColumnsBuilder,
+        };
+        let mut builder =
+            TargetColumnsBuilder::with_capabilities(TargetCapabilities::default_diann());
+        let frags = [(timsquery::ion::IonAnnot::try_from("y1").unwrap(), 300.0)];
+        let analyte = timsquery::chemistry::analyte::Analyte::from_sequence("PEPTIDEK");
+        for _ in 0..1024 {
+            builder.push_row(Row {
+                precursor_mz: 500.0,
+                charge: 2,
+                frags: &frags,
+                analyte: analyte.as_input(),
+                ..Default::default()
+            });
+        }
+        let library = ReferenceLibrary::try_from(timsquery::serde::TargetTable::Mzpaf {
+            geom: builder
+                .seal(timsquery::models::capabilities::DecoyPolicy::Force)
+                .unwrap(),
+            frag_intens: Some(vec![1.0; 1024]),
+        })
+        .unwrap();
+        assert_eq!(library.geometry().rt_axis(), &timsquery::RtAxis::Absent);
+        assert!(matches!(
+            library.geometry().capabilities().decoys,
+            timsquery::models::capabilities::DecoyStrategy::MassShift { .. }
+        ));
+        let names = all_feature_name_set(&library);
+        assert!(
+            names
+                .iter()
+                .all(|n| !n.contains("calibrated_rt") && !n.contains("calibrated_delta_rt"))
+        );
+        let data = synthetic_competed(90);
+        let mut streamed = vec![0.0; all_ncols(&library)];
+        write_competed_all_row(&library, &data[0], &mut streamed);
+        assert_eq!(
+            streamed,
+            build_all_matrix(&library, competed_rows(&data[..1]))
+        );
+        let (out, stats) = rescore_lda(data, &library).unwrap();
+        assert_eq!(out.len(), 90);
+        assert!(!stats.is_empty());
+        assert!(
+            out.iter()
+                .all(|r| r.discriminant_score.is_finite() && (0.0..=1.0).contains(&r.qvalue))
         );
     }
 

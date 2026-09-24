@@ -9,12 +9,12 @@ use std::path::{
     PathBuf,
 };
 use std::sync::Arc;
-use timsquery::Target;
+use timsquery::OwnedTarget;
 use timsquery::ion::IonAnnot;
 use timsquery::models::FlatIdx;
 use timsquery::models::tolerance::Tolerance;
 use timsquery::serde::IndexedPeaksHandle;
-use timsquery::traits::QueryGeom;
+use timsquery::traits::Target;
 use timsseek::data_sources::reference_library::ScoredIdentity;
 use timsseek::{
     ExpectedIntensities,
@@ -212,6 +212,10 @@ impl ElutionGroupData {
             .expect("row ordinal past the end of the library")
     }
 
+    pub fn rt_axis(&self) -> &timsquery::RtAxis {
+        self.inner.geometry().rt_axis()
+    }
+
     fn item_at(&self, idx: usize) -> RefQuery<'_> {
         self.inner.item_at(self.flat(idx))
     }
@@ -271,7 +275,7 @@ impl ElutionGroupData {
     pub fn get_elem(
         &self,
         index: usize,
-    ) -> Result<(Target<IonAnnot>, ExpectedIntensities<IonAnnot>), ViewerError> {
+    ) -> Result<(OwnedTarget<IonAnnot>, ExpectedIntensities<IonAnnot>), ViewerError> {
         if index >= self.len() {
             return Err(ViewerError::General(format!(
                 "Elution group index {index} out of bounds"
@@ -281,7 +285,7 @@ impl ElutionGroupData {
         // The viewer owns the selected query and its expected intensities.
         // Precursor values use the library's composition/averagine envelope.
         let q = self.item_at(index);
-        let mut eg = Target::empty_like();
+        let mut eg = OwnedTarget::empty_like();
         eg.reset_from(&q);
         let expected = ExpectedIntensities::try_from_pairs(
             q.iter_expected_fragments(),
@@ -415,7 +419,11 @@ impl ElutionGroupData {
             add_col(ui, if q.is_target() { "No" } else { "Yes" });
         });
         table_row.col(|ui| {
-            add_col(ui, &format!("{:.2}", q.rt_seconds()));
+            add_col(
+                ui,
+                &q.rt()
+                    .map_or_else(|| "—".into(), |rt| format!("{:.2} {}", rt.value, rt.axis)),
+            );
         });
         table_row.col(|ui| {
             add_col(ui, &format!("{:.4}", q.mobility_ook0()));
@@ -455,7 +463,7 @@ mod tests {
         geom.push_row(Row {
             precursor_mz: 600.0,
             charge: 1,
-            rt_seconds: 10.0,
+            rt: Some(timsquery::models::RtCoordinate::seconds(10.0)),
             mobility: 1.0,
             frags: &[
                 (IonAnnot::try_from("y3").unwrap(), 300.0),

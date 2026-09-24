@@ -94,7 +94,7 @@ pub struct CandidateMetadata {
     pub library_rt: f32,
 
     /// Calibrated retention time in seconds (predicted observed RT for this run).
-    /// Equals library_rt when no calibration has been applied.
+    /// NaN when no prediction is available.
     pub calibrated_rt_seconds: f32,
 
     /// Reference ion mobility (ook0) from library.

@@ -1,5 +1,5 @@
 use super::precursor_extras::PrecursorExtras;
-use crate::Target;
+use crate::OwnedTarget;
 use crate::ion::{
     IonAnnot,
     IonParsingError,
@@ -293,7 +293,7 @@ struct ParquetColumnData<'a> {
 
 pub fn read_targets<T: AsRef<Path>>(
     file: T,
-) -> Result<Vec<(Target<IonAnnot>, PrecursorExtras)>, DiannReadingError> {
+) -> Result<Vec<(OwnedTarget<IonAnnot>, PrecursorExtras)>, DiannReadingError> {
     let file_handle = std::fs::File::open(file.as_ref())?;
 
     let mut rdr = csv::ReaderBuilder::new()
@@ -401,7 +401,7 @@ fn parse_precursor_group(
     naming: Naming,
     rows: &[DiannLibraryRow],
     buffers: &mut ParsingBuffers,
-) -> Result<(Target<IonAnnot>, PrecursorExtras), DiannPrecursorParsingError> {
+) -> Result<(OwnedTarget<IonAnnot>, PrecursorExtras), DiannPrecursorParsingError> {
     if rows.is_empty() {
         error!("Empty precursor group encountered on {id}");
         return Err(DiannPrecursorParsingError::Other);
@@ -502,7 +502,7 @@ fn parse_precursor_group(
         relative_intensities,
     };
 
-    let eg = Target::builder()
+    let eg = OwnedTarget::builder()
         .id(naming.id_for(
             id,
             first_row.transition_group_id.as_deref(),
@@ -523,7 +523,7 @@ fn parse_precursor_group(
 /// Read a DIA-NN spectral library from a parquet file (DiaNN 2.2+ format)
 pub fn read_parquet_library_file<T: AsRef<Path>>(
     file: T,
-) -> Result<Vec<(Target<IonAnnot>, PrecursorExtras)>, DiannReadingError> {
+) -> Result<Vec<(OwnedTarget<IonAnnot>, PrecursorExtras)>, DiannReadingError> {
     use arrow::record_batch::RecordBatch;
     use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
 
@@ -741,7 +741,7 @@ fn parse_precursor_group_from_parquet(
     indices: &[usize],
     columns: &ParquetColumnData,
     buffers: &mut ParsingBuffers,
-) -> Result<(Target<IonAnnot>, PrecursorExtras), DiannPrecursorParsingError> {
+) -> Result<(OwnedTarget<IonAnnot>, PrecursorExtras), DiannPrecursorParsingError> {
     if indices.is_empty() {
         error!("Empty precursor group encountered on {id}");
         return Err(DiannPrecursorParsingError::Other);
@@ -840,7 +840,7 @@ fn parse_precursor_group_from_parquet(
         relative_intensities: rel_intensities,
     };
 
-    let eg = Target::builder()
+    let eg = OwnedTarget::builder()
         .id(naming.id_for(
             id,
             columns.precursor_ids.map(|ids| ids[first_idx].as_str()),
@@ -998,7 +998,7 @@ AAAAAAALQAK\tAAAAAAALQAK\t478.7\t2\t11.0\t0.9\tP2\t0\t300.0\ty\t3\t1\tnoloss\t1.
         // Labels as a set: the reader's fragment order is not part of the
         // contract being tested here. Keyed on the mzPAF spelling because
         // `IonAnnot` is deliberately not `Ord`.
-        fn label_set(eg: &Target<IonAnnot>) -> Vec<String> {
+        fn label_set(eg: &OwnedTarget<IonAnnot>) -> Vec<String> {
             let mut out: Vec<String> = eg
                 .iter_fragments()
                 .map(|(label, _mz)| label.to_string())

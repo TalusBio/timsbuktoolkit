@@ -231,9 +231,9 @@ pub struct CalibrationSnapshot {
 
 /// The only version [`SavedCalibration`] reads or writes. Named once so the
 /// writer and the reader's gate cannot disagree.
-pub const CALIBRATION_FORMAT_VERSION: &str = "v3";
+pub const CALIBRATION_FORMAT_VERSION: &str = "v4";
 
-/// JSON v3 calibration file format -- shared between CLI and viewer.
+/// JSON v4 calibration file format -- shared between CLI and viewer.
 ///
 /// `calibration` is the grid's own snapshot and the only record of the fit: the
 /// curve and the ridge widths are recomputed by refitting it, so the file cannot
@@ -245,6 +245,9 @@ pub const CALIBRATION_FORMAT_VERSION: &str = "v3";
 pub struct SavedCalibration<R = serde_json::Value> {
     pub version: String,
     pub rt_range_seconds: [f64; 2],
+    /// Input-axis descriptor supplied by the library consumer. The fitter maps
+    /// numerical library coordinates to observed seconds without interpreting units.
+    pub library_rt_axis: serde_json::Value,
     pub calibration: CalibrationSnapshot,
     /// The uniform RT tolerance. Every writer has one -- it is what a query falls
     /// back to where the grid measured no ridge.
@@ -269,12 +272,18 @@ impl<R> SavedCalibration<R> {
     ) -> Self {
         Self {
             version: CALIBRATION_FORMAT_VERSION.to_string(),
+            library_rt_axis: serde_json::json!({"kind": "unspecified"}),
             rt_range_seconds,
             calibration,
             rt_tolerance_minutes,
             residuals,
             n_scored,
         }
+    }
+
+    pub fn with_library_rt_axis(mut self, axis: serde_json::Value) -> Self {
+        self.library_rt_axis = axis;
+        self
     }
 
     /// Serialize to `path` in the layout [`Self::read`] expects.
@@ -299,13 +308,18 @@ impl<R> SavedCalibration<R> {
         R: serde::de::DeserializeOwned,
     {
         let json = std::fs::read_to_string(path).map_err(|e| e.to_string())?;
-        let saved: Self = serde_json::from_str(&json).map_err(|e| e.to_string())?;
-        if saved.version != CALIBRATION_FORMAT_VERSION {
+        #[derive(serde::Deserialize)]
+        struct Version {
+            version: String,
+        }
+        let version: Version = serde_json::from_str(&json).map_err(|e| e.to_string())?;
+        if version.version != CALIBRATION_FORMAT_VERSION {
             return Err(format!(
                 "Unsupported calibration version: {} (expected {CALIBRATION_FORMAT_VERSION})",
-                saved.version
+                version.version
             ));
         }
+        let saved: Self = serde_json::from_str(&json).map_err(|e| e.to_string())?;
         let warning = saved.provenance_warning(raw_rt_range);
         Ok((saved, warning))
     }

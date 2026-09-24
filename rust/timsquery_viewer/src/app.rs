@@ -50,7 +50,7 @@ type ChromatogramComputeResult = Result<
         crate::chromatogram_processor::ChromatogramCollector<IonAnnot, f32>,
         timsseek::ExpectedIntensities<IonAnnot>,
         u64, // selected_idx as cache key
-        timsquery::models::target::Target<IonAnnot>,
+        timsquery::models::target::OwnedTarget<IonAnnot>,
     ),
     String,
 >;
@@ -125,6 +125,8 @@ struct PersistentState {
     dock_state: DockState<Pane>,
     #[serde(default)]
     calibration_snapshot: Option<calibrt::CalibrationSnapshot>,
+    #[serde(default)]
+    calibration_rt_axis: Option<timsquery::RtAxis>,
 }
 
 fn default_true() -> bool {
@@ -348,6 +350,7 @@ impl ViewerApp {
                         screenshot_delay_secs: 3.0,
                         calibration: ViewerCalibrationState::from_snapshot(
                             state.calibration_snapshot,
+                            state.calibration_rt_axis,
                         ),
                     };
                 }
@@ -524,23 +527,23 @@ impl ViewerApp {
 
             let index_owned = index.clone();
             // If calibration is available, project the library RT to measured RT
-            let mut elution_group_owned = elution_group.clone();
-            if let Some(cs) = &self.calibration.calibration_state
-                && let Some(curve) = cs.curve()
-            {
-                let lib_rt = elution_group_owned.rt_seconds();
-                let calibrated_rt = match curve.predict(LibraryRT(lib_rt as f64)) {
-                    Ok(y) => y.0 as f32,
-                    Err(calibrt::CalibRtError::OutOfBounds(y)) => y as f32,
-                    Err(_) => lib_rt,
-                };
-                tracing::debug!(
-                    "RT calibration: {:.1}s (library) → {:.1}s (projected)",
-                    lib_rt,
-                    calibrated_rt,
-                );
-                elution_group_owned.set_rt_seconds(calibrated_rt);
-            }
+            let elution_group_owned = elution_group.clone();
+            let observed_rt = elution_group.rt().and_then(|rt| {
+                let curve = self
+                    .calibration
+                    .calibration_state
+                    .as_ref()
+                    .filter(|_| &self.calibration.library_rt_axis == rt.axis)
+                    .and_then(|cs| cs.curve());
+                match curve {
+                    Some(curve) => match curve.predict(LibraryRT(rt.value as f64)) {
+                        Ok(rt) => Some(rt.0 as f32),
+                        Err(calibrt::CalibRtError::OutOfBounds(seconds)) => Some(seconds as f32),
+                        Err(_) => None,
+                    },
+                    None => matches!(rt.axis, timsquery::RtAxis::Seconds).then_some(rt.value),
+                }
+            });
             let expected_intensities_owned = expected_intensities.clone();
             let tolerance_owned = self.data.tolerance.clone();
             let smoothing_owned = self.data.smoothing;
@@ -554,6 +557,7 @@ impl ViewerApp {
                     );
                     let result = Self::compute_chromatogram_background(
                         elution_group_owned,
+                        observed_rt,
                         expected_intensities_owned,
                         selected_idx,
                         index_owned,
@@ -593,11 +597,12 @@ impl ViewerApp {
 
     /// Compute chromatogram in background thread
     fn compute_chromatogram_background(
-        elution_group: timsquery::models::target::Target<IonAnnot>,
+        elution_group: timsquery::models::target::OwnedTarget<IonAnnot>,
+        observed_rt: Option<f32>,
         expected_intensities: timsseek::ExpectedIntensities<IonAnnot>,
         selected_idx: usize,
         index: Arc<IndexedPeaksHandle>,
-        tolerance: Tolerance,
+        mut tolerance: Tolerance,
         smoothing: SmoothingMethod,
         cancel_token: CancellationToken,
     ) -> ChromatogramComputeResult {
@@ -608,8 +613,27 @@ impl ViewerApp {
         }
 
         // Build collector
-        let mut collector = ComputedState::build_collector(&index, elution_group.clone())
-            .map_err(|e| format!("Failed to build collector: {:?}", e))?;
+        let mut collector = if let Some(rt) = observed_rt {
+            ComputedState::build_collector(
+                &index,
+                &timsquery::AtObservedRt::new(&elution_group, rt),
+            )
+        } else {
+            if elution_group.rt().is_some()
+                && !matches!(
+                    tolerance.rt,
+                    timsquery::models::tolerance::RtTolerance::Unrestricted
+                )
+            {
+                return Err(
+                    "Library RT is not observed seconds; calibrate or remove the RT restriction"
+                        .into(),
+                );
+            }
+            tolerance.rt = timsquery::models::tolerance::RtTolerance::Unrestricted;
+            ComputedState::build_collector(&index, &elution_group)
+        }
+        .map_err(|e| format!("Failed to build collector: {:?}", e))?;
 
         // Check if cancelled after building collector
         if cancel_token.is_cancelled() {
@@ -681,38 +705,32 @@ impl ViewerApp {
                     if let Some(elution_groups) = self.data.elution_groups.as_ref()
                         && let Ok((elution_group, _)) =
                             elution_groups.get_elem(selected_idx as usize)
+                        && let Some(rt) = elution_group.rt()
                     {
-                        let lib_rt = elution_group.rt_seconds() as f64;
-
-                        // Check if calibration projects to a different RT
                         let calibrated_rt = self
                             .calibration
                             .calibration_state
                             .as_ref()
+                            .filter(|_| &self.calibration.library_rt_axis == rt.axis)
                             .and_then(|cs| cs.curve())
-                            .and_then(|curve| match curve.predict(LibraryRT(lib_rt)) {
+                            .and_then(|curve| match curve.predict(LibraryRT(rt.value as f64)) {
                                 Ok(y) => Some(y.0),
                                 Err(calibrt::CalibRtError::OutOfBounds(y)) => Some(y),
                                 Err(_) => None,
                             });
-
-                        if let Some(cal_rt) = calibrated_rt {
-                            // Show both: dashed library RT + solid calibrated RT
+                        // Only measured seconds belong on the acquisition-time plot.
+                        if matches!(rt.axis, timsquery::RtAxis::Seconds) {
                             self.computed.insert_reference_line(
                                 "Library RT".into(),
-                                lib_rt,
-                                Color32::from_rgba_unmultiplied(100, 100, 255, 120), // dim blue
+                                rt.value as f64,
+                                Color32::BLUE,
                             );
+                        }
+                        if let Some(seconds) = calibrated_rt {
                             self.computed.insert_reference_line(
                                 "Calibrated RT".into(),
-                                cal_rt,
-                                Color32::from_rgb(255, 165, 0), // orange
-                            );
-                        } else {
-                            self.computed.insert_reference_line(
-                                "Library RT".into(),
-                                lib_rt,
-                                Color32::BLUE,
+                                seconds,
+                                Color32::from_rgb(255, 165, 0),
                             );
                         }
                     }
@@ -1404,6 +1422,7 @@ impl eframe::App for ViewerApp {
             smoothing: self.data.smoothing,
             dock_state: self.dock_state.clone(),
             calibration_snapshot: self.calibration.snapshot_for_persistence(),
+            calibration_rt_axis: Some(self.calibration.library_rt_axis.clone()),
         };
 
         if let Ok(value) = ron::to_string(&state) {
@@ -1724,7 +1743,7 @@ impl<'a> TabViewer for AppTabViewer<'a> {
                 let selected_library_rt = self.ui.selected_index.and_then(|idx| {
                     let eg_data = self.data.elution_groups.as_ref()?;
                     let (eg, _) = eg_data.get_elem(idx).ok()?;
-                    Some(eg.rt_seconds() as f64)
+                    eg.rt().map(|rt| rt.value as f64)
                 });
                 self.calibration.render_panel(
                     ui,

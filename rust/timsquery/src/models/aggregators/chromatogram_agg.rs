@@ -6,7 +6,7 @@ use crate::models::base::{
     Chromatogram,
     MzMajorIntensityArray,
 };
-use crate::traits::QueryGeom;
+use crate::traits::Target;
 use crate::traits::queriable_data::HasQueryData;
 use crate::{
     KeyLike,
@@ -63,7 +63,7 @@ pub struct ChromatogramCollector<T: KeyLike, V: ArrayElement + ValueLike> {
 
 impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
     pub fn new(
-        eg: &impl QueryGeom<Label = T>,
+        eg: &impl Target<Label = T>,
         rt_range_ms: TupleRange<u32>,
         ref_rt_ms: &CycleToRTMapping<MS1CycleIndex>,
     ) -> Result<Self, DataProcessingError> {
@@ -90,7 +90,7 @@ impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
             MzMajorIntensityArray::try_new_empty(fragment_order, num_cycles, start.index())?;
         Ok(Self {
             mobility_ook0: eg.mobility_ook0(),
-            rt_seconds: eg.rt_seconds(),
+            rt_seconds: eg.observed_rt_seconds().unwrap_or(f32::NAN),
             precursor_mono_mz: eg.mono_precursor_mz(),
             precursor_charge: eg.precursor_charge(),
             precursor_mz_limits: eg.precursor_mz_limits(),
@@ -105,7 +105,7 @@ impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
 
     pub fn try_reset_with(
         &mut self,
-        eg: &impl QueryGeom<Label = T>,
+        eg: &impl Target<Label = T>,
         rt_range_ms: TupleRange<u32>,
         ref_rt_ms: &CycleToRTMapping<MS1CycleIndex>,
     ) -> Result<(), DataProcessingError> {
@@ -117,7 +117,7 @@ impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
     /// and `eg.clone().with_mobility(..)` clone-then-mutate pattern.
     pub fn try_reset_with_overrides(
         &mut self,
-        eg: &impl QueryGeom<Label = T>,
+        eg: &impl Target<Label = T>,
         rt_override: Option<f32>,
         mobility_override: Option<f32>,
         rt_range_ms: TupleRange<u32>,
@@ -135,7 +135,8 @@ impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
         }
 
         self.mobility_ook0 = mobility_override.unwrap_or_else(|| eg.mobility_ook0());
-        self.rt_seconds = rt_override.unwrap_or_else(|| eg.rt_seconds());
+        self.rt_seconds =
+            rt_override.unwrap_or_else(|| eg.observed_rt_seconds().unwrap_or(f32::NAN));
         self.precursor_mono_mz = eg.mono_precursor_mz();
         self.precursor_charge = eg.precursor_charge();
         self.precursor_mz_limits = eg.precursor_mz_limits();
@@ -243,12 +244,12 @@ impl<T: KeyLike, V: ArrayElement + ValueLike> HasQueryData<T> for ChromatogramCo
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::Target;
+    use crate::OwnedTarget;
     use tinyvec::tiny_vec;
 
     #[test]
     fn test_filter_ions_with_custom_predicate() {
-        let eg = Target::builder()
+        let eg = OwnedTarget::builder()
             .id(1)
             .mobility_ook0(0.8)
             .rt_seconds(100.0)

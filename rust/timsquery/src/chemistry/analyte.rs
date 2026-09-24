@@ -55,7 +55,7 @@
 //! modification spellings therefore collapse. Incomparable entries remain separate;
 //! formula equality and labels do not establish chemical identity or competition.
 //!
-//! Results format version 4 resolves metadata from the library. `sequence` is nullable
+//! Results format version 5 resolves metadata from the library. `sequence` is nullable
 //! and canonically formatted; `entry_name`, `molecular_formula`, and `formula_basis`
 //! are nullable columns. Unformattable properties produce null. The viewer's Analyte
 //! column displays sequence or formula. `Analyte` serialization preserves property
@@ -871,7 +871,7 @@ mod tests {
         TargetCapabilities,
         TargetColumnsBuilder,
     };
-    use crate::traits::QueryGeom;
+    use crate::traits::Target;
 
     #[test]
     fn geometry_and_formula_rows_need_no_peptide() {

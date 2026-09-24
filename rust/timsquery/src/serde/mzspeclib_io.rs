@@ -34,6 +34,10 @@ use std::collections::HashSet;
 use std::io::BufRead;
 use std::path::Path;
 
+use crate::models::{
+    RtAxis,
+    RtCoordinate,
+};
 use micromzpaf::{
     IonAnnot,
     IonSeriesOrdinal,
@@ -49,12 +53,16 @@ use mzannotate::mzdata::params::{
     ParamValue,
 };
 use mzannotate::mzdata::prelude::PeakCollection;
+use mzannotate::mzspeclib::record::{
+    HeaderView,
+    MzSpecLibLibrary,
+    SpectrumRecord,
+};
 use mzannotate::mzspeclib::{
     AnalyteTarget,
     Attribute,
     AttributeValue,
     EntryType,
-    LibraryHeader,
     MzSpecLibTextParser,
 };
 use mzannotate::spectrum::AnnotatedSpectrum;
@@ -220,7 +228,7 @@ fn read_counting_degradation(
         policy.unannotated
     };
     let reader = open_reader(path)?;
-    let parser = MzSpecLibTextParser::open(reader, Some(path.to_path_buf()), ontologies())
+    let mut parser = MzSpecLibLibrary::open(reader, Some(path.to_path_buf()), ontologies())
         .map_err(|e| TargetReadingError::SpeclibParse(format!("mzSpecLib header: {e}")))?;
 
     let mut geom = TargetColumnsBuilder::with_capabilities(TargetCapabilities::default_diann());
@@ -230,19 +238,23 @@ fn read_counting_degradation(
     // the only place it can be read: it is what an entry declaring nothing about
     // its mass provenance falls back to.
     let library_theoretical_mz = library_declares_theoretical_mz(parser.header());
+    let normalized_axis = normalized_rt_axis(parser.header());
     let spectrum_attribute_sets: HashSet<String> = parser
         .header()
-        .attribute_classes
-        .get(&EntryType::Spectrum)
-        .into_iter()
-        .flatten()
-        .map(|set| set.id.clone())
+        .attribute_sets()
+        .filter(|s| s.entry_type() == EntryType::Spectrum)
+        .map(|s| s.name().to_owned())
         .collect();
-
-    for (index, spectrum) in parser.enumerate() {
-        let spectrum = spectrum.map_err(|e| {
-            TargetReadingError::SpeclibParse(format!("mzSpecLib spectrum {}: {e}", index + 1))
-        })?;
+    let mut reader = parser.reader();
+    let mut record = reader.empty_record();
+    while reader
+        .read_into(&mut record)
+        .map_err(|e| TargetReadingError::SpeclibParse(e.to_string()))?
+    {
+        let rt = record_rt(&record, &normalized_axis)?;
+        let spectrum = record
+            .materialize()
+            .map_err(|e| TargetReadingError::SpeclibParse(e.to_string()))?;
         let row = SpectrumRow::extract(
             &spectrum,
             library_theoretical_mz,
@@ -280,7 +292,7 @@ fn read_counting_degradation(
         geom.push_row(Row {
             precursor_mz: row.precursor_mz,
             charge: row.charge,
-            rt_seconds: row.rt_seconds,
+            rt,
             mobility: row.mobility,
             frags: &row.frags,
             analyte: row.analyte.as_input(),
@@ -345,10 +357,7 @@ struct Degradation {
     peaks_over_the_label_ceiling: usize,
     rows_without_sequence: usize,
     rows_without_fragments: usize,
-    // No count of entries missing a retention time. Zero is an ordinary value
-    // on a normalized scale rather than an absence -- it is an anchor point, and
-    // it is what msspeculator's own libraries write -- so there is nothing to
-    // test for. See the CONTEXT.md entry on retention time.
+    // RT availability is validated library-wide by the geometry builder.
 }
 
 impl Degradation {
@@ -422,7 +431,6 @@ struct SpectrumRow {
     entry_name: Option<String>,
     precursor_mz: f64,
     charge: u8,
-    rt_seconds: f32,
     mobility: f32,
     is_decoy: bool,
     declared_group: Option<String>,
@@ -551,7 +559,6 @@ impl SpectrumRow {
                 .then(|| spectrum.description.id.clone()),
             precursor_mz: precursor_mz(spectrum, peptidoform),
             charge: charge(spectrum, peptidoform),
-            rt_seconds: rt_seconds(spectrum),
             mobility: mobility(spectrum),
             is_decoy: is_decoy(spectrum)?,
             declared_group: declared_group(spectrum),
@@ -646,23 +653,72 @@ fn charge(spectrum: &Spectrum, peptidoform: Option<&mzcore::sequence::Peptidofor
         .unwrap_or(0)
 }
 
-/// Whatever the file's retention time is, scaled from the minutes mzannotate
-/// normalises every declared unit into.
-///
-/// Not necessarily a duration. `MS:1000896|normalized retention time` is an
-/// index on a reference scale, which is what msspeculator writes and what the
-/// Spectronaut export carries, so this can hold a dimensionless value where
-/// zero and negative numbers are ordinary. Calibration fits a monotone path
-/// from it to observed time, so ordering is what has to survive here, not
-/// units. See the CONTEXT.md entry on retention time.
-fn rt_seconds(spectrum: &Spectrum) -> f32 {
-    const SECONDS_PER_MINUTE: f64 = 60.0;
-    spectrum
-        .description
-        .acquisition
-        .scans
-        .first()
-        .map_or(0.0, |scan| (scan.start_time * SECONDS_PER_MINUTE) as f32)
+/// Read the raw coordinate with its grouped unit before legacy materialization.
+/// Measured time takes precedence; normalized indices never undergo unit scaling.
+fn record_rt<'axis>(
+    record: &SpectrumRecord<'_>,
+    normalized_axis: &'axis RtAxis,
+) -> Result<Option<RtCoordinate<'axis>>, TargetReadingError> {
+    let error = |message: String| {
+        TargetReadingError::SpeclibParse(format!("spectrum {:?} RT: {message}", record.key()))
+    };
+    let attrs = record.attributes().map_err(|e| error(e.to_string()))?;
+    for (accession, normalized) in [
+        (mzcv::curie!(MS:1000894), false),
+        (mzcv::curie!(MS:1000896), true),
+    ] {
+        let mut selected = None;
+        for attr in attrs.by_accession(accession) {
+            let mut value = attr.to_f64().map_err(|e| error(e.to_string()))?;
+            let axis = if normalized {
+                normalized_axis
+            } else {
+                let units: Vec<_> = attr
+                    .group()
+                    .into_iter()
+                    .flat_map(|g| g.by_accession(mzcv::curie!(UO:0000000)).collect::<Vec<_>>())
+                    .map(|u| u.raw_value())
+                    .collect();
+                match units.as_slice() {
+                    [] => &RtAxis::Unspecified,
+                    [unit] if unit.starts_with("UO:0000010|") || *unit == "UO:0000010" => {
+                        &RtAxis::Seconds
+                    }
+                    [unit] if unit.starts_with("UO:0000031|") || *unit == "UO:0000031" => {
+                        value *= 60.0;
+                        &RtAxis::Seconds
+                    }
+                    _ => return Err(error("unknown or ambiguous measured RT unit".into())),
+                }
+            };
+            let value = value as f32;
+            if !value.is_finite() {
+                return Err(error("RT is not finite".into()));
+            }
+            let next = (value, axis);
+            if selected.as_ref().is_some_and(|old| old != &next) {
+                return Err(error("conflicting RT declarations".into()));
+            }
+            selected = Some(next);
+        }
+        if selected.is_some() {
+            return Ok(selected.map(|(value, axis)| RtCoordinate { value, axis }));
+        }
+    }
+    Ok(None)
+}
+
+/// Header provenance describes a possible normalized scale. Records still
+/// select the actual axis; a declaration alone does not make RT present.
+fn normalized_rt_axis(header: HeaderView<'_>) -> RtAxis {
+    let scale = header
+        .attributes()
+        .by_accession(mzcv::curie!(MS:1003275))
+        .find(|attr| attr.raw_value() == "msspeculator:retention.normalized.scale")
+        .and_then(|attr| attr.group())
+        .and_then(|group| group.by_accession(mzcv::curie!(MS:1003276)).next())
+        .map(|value| value.raw_value().to_owned());
+    RtAxis::NormalizedIndex { scale }
 }
 
 /// `MS:1002815|inverse reduced ion mobility` first, because that is the axis a
@@ -803,19 +859,12 @@ fn peak_mz_is_theoretical(spectrum: &Spectrum, library_declares_theoretical_mz: 
 ///
 /// The header is parsed by `MzSpecLibTextParser::open`, so this is answerable
 /// before the first entry is yielded.
-fn library_declares_theoretical_mz(header: &LibraryHeader) -> bool {
-    header
-        .attribute_classes
-        .get(&EntryType::Spectrum)
-        .into_iter()
-        .flatten()
-        .filter(|set| set.id == "all")
-        .flat_map(|set| set.attributes.iter().flatten())
-        .filter(|attribute| {
-            attribute.name.accession == mzcv::curie!(MS:1003072)
-                || attribute.name.accession == mzcv::curie!(MS:1003065)
-        })
-        .filter_map(|attribute| ms_accession(&attribute.value.to_string()))
+fn library_declares_theoretical_mz(header: HeaderView<'_>) -> bool {
+    header.attribute_sets()
+        .filter(|s| s.entry_type() == EntryType::Spectrum && s.name() == "all")
+        .flat_map(|s| s.attributes().iter())
+        .filter(|a| matches!(a.accession(), Some(x) if x == mzcv::curie!(MS:1003072) || x == mzcv::curie!(MS:1003065)))
+        .filter_map(|a| ms_accession(a.raw_value()))
         .any(declares_theoretical_mz)
 }
 
@@ -1021,6 +1070,106 @@ mod tests {
     use crate::models::TargetColumns;
     use crate::models::capabilities::DecoyPolicy;
     use std::path::PathBuf;
+
+    fn rt_library(
+        header: &str,
+        rows: &[&str],
+    ) -> Result<TargetColumns<IonAnnot>, TargetReadingError> {
+        let mut text = format!(
+            "<mzSpecLib>\nMS:1003186|library format version=1.0\nMS:1003188|library name=rt\n{header}"
+        );
+        for (i, rt) in rows.iter().enumerate() {
+            text.push_str(&format!("<Spectrum={}>\nMS:1003061|library spectrum name=entry{i}\nMS:1000744|selected ion m/z=500\n{rt}MS:1003059|number of peaks=1\n<Analyte=1>\nMS:1000041|charge state=2\n<Peaks>\n100.0\t10.0\n", i + 1));
+        }
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("rt.mzspeclib.txt");
+        std::fs::write(&path, text).unwrap();
+        match read_mzspeclib_library_file(&path, LoadPolicy::default())? {
+            TargetTable::Mzpaf { geom, .. } => Ok(geom),
+            _ => unreachable!(),
+        }
+    }
+
+    #[test]
+    fn measured_rt_converts_units_and_preserves_zero() {
+        let geom = rt_library(
+            "",
+            &[
+                "[1]MS:1000894|retention time=2\n[1]UO:0000000|unit=UO:0000031|minute\n",
+                "[1]MS:1000894|retention time=120\n[1]UO:0000000|unit=UO:0000010|second\n",
+                "[1]MS:1000894|retention time=0\n[1]UO:0000000|unit=UO:0000010|second\n",
+            ],
+        )
+        .unwrap();
+        assert_eq!(geom.rt_axis(), &RtAxis::Seconds);
+        assert_eq!(
+            geom.rows().map(|r| geom.library_rt(r)).collect::<Vec<_>>(),
+            vec![Some(120.0), Some(120.0), Some(0.0)]
+        );
+    }
+
+    #[test]
+    fn records_select_the_axis_even_when_the_header_declares_a_normalized_scale() {
+        let header = "[1]MS:1003275|other attribute name=unrelated\n[1]MS:1003276|other attribute value=wrong scale\n[2]MS:1003275|other attribute name=msspeculator:retention.normalized.scale\n[2]MS:1003276|other attribute value=reference anchors\n";
+        let normalized = "MS:1000896|normalized retention time=-20\n";
+        let geom = rt_library(header, &[normalized, normalized]).unwrap();
+        assert_eq!(
+            geom.rt_axis(),
+            &RtAxis::NormalizedIndex {
+                scale: Some("reference anchors".into())
+            }
+        );
+        assert!(geom.rows().all(|r| geom.library_rt(r) == Some(-20.0)));
+        let measured = "[1]MS:1000894|retention time=2\n[1]UO:0000000|unit=UO:0000031|minute\nMS:1000896|normalized retention time=-20\n";
+        let geom = rt_library(header, &[measured]).unwrap();
+        assert_eq!(geom.rt_axis(), &RtAxis::Seconds);
+        assert_eq!(geom.library_rt(geom.rows().next().unwrap()), Some(120.0));
+        assert_eq!(
+            rt_library(header, &["", ""]).unwrap().rt_axis(),
+            &RtAxis::Absent
+        );
+        assert!(rt_library(header, &["", normalized]).is_err());
+        assert!(rt_library(header, &[normalized, measured]).is_err());
+    }
+
+    #[test]
+    fn normalized_rt_is_not_a_duration() {
+        let geom = rt_library("", &[
+            "[1]MS:1000896|normalized retention time=-12\n[1]UO:0000000|unit=UO:0000031|minute\n",
+            "[1]MS:1000896|normalized retention time=0\n[1]UO:0000000|unit=UO:0000031|minute\n",
+        ]).unwrap();
+        assert_eq!(geom.rt_axis(), &RtAxis::NormalizedIndex { scale: None });
+        assert_eq!(
+            geom.rows().map(|r| geom.library_rt(r)).collect::<Vec<_>>(),
+            vec![Some(-12.0), Some(0.0)]
+        );
+    }
+
+    #[test]
+    fn absent_and_unspecified_rt_are_distinct_and_mixtures_are_rejected() {
+        let absent = rt_library("", &["", ""]).unwrap();
+        assert_eq!(absent.rt_axis(), &RtAxis::Absent);
+        assert!(absent.rows().all(|r| absent.library_rt(r).is_none()));
+        let present = "MS:1000894|retention time=0\n";
+        let geom = rt_library("", &[present]).unwrap();
+        assert_eq!(geom.rt_axis(), &RtAxis::Unspecified);
+        assert_eq!(geom.library_rt(geom.rows().next().unwrap()), Some(0.0));
+        for rows in [
+            [present, ""],
+            ["", present],
+            [present, "MS:1000896|normalized retention time=0\n"],
+        ] {
+            let err = format!("{:?}", rt_library("", &rows).unwrap_err());
+            assert!(err.contains("mixed RT"), "{err}");
+        }
+    }
+
+    #[test]
+    fn inherited_grouped_rt_keeps_its_unit() {
+        let geom = rt_library("<AttributeSet Spectrum=all>\n[1]MS:1000894|retention time=2\n[1]UO:0000000|unit=UO:0000031|minute\n", &["", ""]).unwrap();
+        assert_eq!(geom.rt_axis(), &RtAxis::Seconds);
+        assert!(geom.rows().all(|r| geom.library_rt(r) == Some(120.0)));
+    }
 
     fn fixture(name: &str) -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1377,7 +1526,7 @@ mod tests {
         let first = diann.rows().next().unwrap();
         assert!((diann.precursor_mz(first) - 778.412_96).abs() < 1e-4);
         assert_eq!(diann.charge(first), 2);
-        assert_eq!(diann.rt_seconds(first), 0.0, "DIA-NN declares no RT");
+        assert_eq!(diann.library_rt(first), None, "DIA-NN declares no RT");
         assert_eq!(diann.output_id(first).to_string(), "AAAAAAAAAAAAAAAASAGGK2");
 
         // Spectronaut writes `MS:1003208|experimental precursor monoisotopic
@@ -1392,7 +1541,7 @@ mod tests {
             "ion mobility drift time, the spelling both exports use"
         );
         assert!(
-            spectronaut.rt_seconds(first) > 0.0,
+            spectronaut.library_rt(first).unwrap() > 0.0,
             "Spectronaut declares RT"
         );
     }
@@ -1436,7 +1585,7 @@ mod tests {
             );
             assert_eq!(plain.precursor_mz(a), gzipped.precursor_mz(b));
             assert_eq!(plain.charge(a), gzipped.charge(b));
-            assert_eq!(plain.rt_seconds(a), gzipped.rt_seconds(b));
+            assert_eq!(plain.library_rt(a), gzipped.library_rt(b));
             assert_eq!(plain.mobility(a), gzipped.mobility(b));
             assert_eq!(plain.frag_mzs(a), gzipped.frag_mzs(b));
             assert_eq!(plain.frag_labels(a), gzipped.frag_labels(b));
@@ -1669,17 +1818,12 @@ mod tests {
             "VLSAAKPEDR"
         );
         assert_eq!(geom.frag_labels(first).len(), 4);
-        // The only fixture declaring `MS:1000896` in `minute`, and so the only
-        // one that pins the minute path: the entry says 1.559414, and 60x that
-        // is what a reader has to come back with. Which mzannotate build is in
-        // the graph decides it -- the pinned one leaves a `minute`-declared
-        // value alone for the `* 60` here to scale, a release divides it by
-        // sixty first and hands back a sixtieth of the number.
-        assert!(
-            (geom.rt_seconds(first) - 93.564_84).abs() < 1e-3,
-            "declared 1.559414 minute, got {} s",
-            geom.rt_seconds(first),
+        // Normalized RT remains an index, even when the exporter labels it minute.
+        assert_eq!(
+            geom.rt_axis(),
+            &crate::RtAxis::NormalizedIndex { scale: Some("linear interpolation anchored at TFAHTESHISK = 0 and SILDYVSLVEK = 100 (PROCAL standards, PROSPECT convention)".into()) }
         );
+        assert!((geom.library_rt(first).unwrap() - 1.559414).abs() < 1e-5);
     }
 
     /// A third-party library carries no `msspeculator:` attributes and no
@@ -1709,7 +1853,7 @@ mod tests {
     #[test]
     fn every_declared_retention_time_survives_the_load() {
         let geom = arena("target_decoy_attribute_set.mzspeclib.txt");
-        let rts: Vec<f32> = geom.rows().map(|r| geom.rt_seconds(r)).collect();
+        let rts: Vec<f32> = geom.rows().map(|r| geom.library_rt(r).unwrap()).collect();
 
         // Read straight off the fixture, target and decoy of each pair sharing
         // one value.

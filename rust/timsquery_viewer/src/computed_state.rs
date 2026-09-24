@@ -1,7 +1,7 @@
 use egui::Color32;
 use std::collections::HashMap;
 use timsquery::ion::IonAnnot;
-use timsquery::models::target::Target;
+use timsquery::models::target::OwnedTarget;
 use timsquery::models::tolerance::{
     RtTolerance,
     Tolerance,
@@ -47,7 +47,7 @@ pub(crate) struct ChromatogramComputationResult {
     pub output: ChromatogramOutput,
     pub collector: ChromatogramCollector<IonAnnot, f32>,
     pub expected_intensities: ExpectedIntensities<IonAnnot>,
-    pub elution_group: Target<IonAnnot>,
+    pub elution_group: OwnedTarget<IonAnnot>,
 }
 
 #[derive(Debug)]
@@ -65,7 +65,7 @@ struct ChromatogramResult {
     output: ChromatogramOutput,
     scoring: Option<ScoringResult>,
     expected_intensities: ExpectedIntensities<IonAnnot>,
-    elution_group: Target<IonAnnot>,
+    elution_group: OwnedTarget<IonAnnot>,
 }
 
 #[derive(Debug, Default)]
@@ -270,11 +270,11 @@ impl ComputedState {
 
     pub(crate) fn build_collector(
         index: &IndexedPeaksHandle,
-        elution_group: Target<IonAnnot>,
+        elution_group: &impl timsquery::Target<Label = IonAnnot>,
     ) -> Result<ChromatogramCollector<IonAnnot, f32>, ViewerError> {
         let max_range = index.ms1_cycle_mapping().range_milis();
         let collector = ChromatogramCollector::new(
-            &elution_group,
+            elution_group,
             TupleRange::try_new(max_range.0, max_range.1)
                 .expect("Reference RTs should be sorted and valid"),
             index.ms1_cycle_mapping(),
@@ -286,7 +286,7 @@ impl ComputedState {
     #[instrument(skip_all, fields(eg_id = %elution_group.id()))]
     pub(crate) fn generate_chromatogram(
         collector: &mut ChromatogramCollector<IonAnnot, f32>,
-        elution_group: &Target<IonAnnot>,
+        elution_group: &OwnedTarget<IonAnnot>,
         index: &IndexedPeaksHandle,
         tolerance: &Tolerance,
         smoothing: &SmoothingMethod,

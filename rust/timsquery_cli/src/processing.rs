@@ -28,7 +28,7 @@ use timsquery::models::tolerance::Tolerance;
 use timsquery::serde::ChromatogramOutput;
 use timsquery::traits::{
     DecoyShift,
-    QueryGeom,
+    Target,
 };
 use timsquery::{
     KeyLike,
@@ -98,6 +98,15 @@ impl<T: KeyLike + Display> AggregatorContainer<T> {
     where
         T: DecoyShift,
     {
+        if !matches!(
+            tolerance.rt,
+            timsquery::models::tolerance::RtTolerance::Unrestricted
+        ) && queries
+            .iter()
+            .any(|q| q.rt().is_some() && q.observed_rt_seconds().is_none())
+        {
+            return Err(CliError::DataProcessing("RT-restricted queries require observed seconds; calibrate library indices first or use unrestricted RT".into()));
+        }
         Ok(match aggregator {
             PossibleAggregator::PointIntensity => AggregatorContainer::Point(
                 queries.iter().map(PointIntensityAggregator::new).collect(),
@@ -106,7 +115,11 @@ impl<T: KeyLike + Display> AggregatorContainer<T> {
                 let collectors = queries
                     .iter()
                     .map(|q| {
-                        let rt_range = match tolerance.rt_range_as_milis(q.rt_seconds()) {
+                        let rt_range = match if let Some(rt) = q.observed_rt_seconds() {
+                            tolerance.rt_range_as_milis(rt)
+                        } else {
+                            timsquery::OptionallyRestricted::Unrestricted
+                        } {
                             timsquery::OptionallyRestricted::Unrestricted => {
                                 let range = ref_rts.range_milis();
                                 timsquery::TupleRange::try_new(range.0, range.1)

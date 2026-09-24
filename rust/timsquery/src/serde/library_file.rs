@@ -25,7 +25,7 @@ use super::spectronaut_io::{
     read_targets as read_spectronaut_tsv,
     sniff_spectronaut_library_file,
 };
-use crate::Target;
+use crate::OwnedTarget;
 use crate::ion::IonAnnot;
 use crate::models::capabilities::{
     DecoyPolicy,
@@ -87,8 +87,8 @@ impl From<ElutionGroupInputError> for TargetReadingError {
 
 #[derive(Debug)]
 pub enum ElutionGroupCollection {
-    StringLabels(Vec<Target<String>>, Option<Vec<PrecursorExtras>>),
-    MzpafLabels(Vec<Target<IonAnnot>>, Option<Vec<PrecursorExtras>>),
+    StringLabels(Vec<OwnedTarget<String>>, Option<Vec<PrecursorExtras>>),
+    MzpafLabels(Vec<OwnedTarget<IonAnnot>>, Option<Vec<PrecursorExtras>>),
 }
 
 impl ElutionGroupCollection {
@@ -134,17 +134,17 @@ impl ElutionGroupCollection {
                     .into_iter()
                     .map(|x| x.try_fill_labels_annot())
                     .collect();
-                let out: Result<Vec<Target<IonAnnot>>, ElutionGroupInputError> =
+                let out: Result<Vec<OwnedTarget<IonAnnot>>, ElutionGroupInputError> =
                     filled?.into_iter().map(|x| x.try_into()).collect();
                 return Ok(ElutionGroupCollection::MzpafLabels(out?, None));
             }
-            let out: Result<Vec<Target<IonAnnot>>, ElutionGroupInputError> =
+            let out: Result<Vec<OwnedTarget<IonAnnot>>, ElutionGroupInputError> =
                 eg_inputs.into_iter().map(|x| x.try_into()).collect();
             return Ok(ElutionGroupCollection::MzpafLabels(out?, None));
         }
         debug!("Attempting to deserialize elution group inputs with string labels");
         if let Ok(eg_inputs) = serde_json::from_str::<Vec<ElutionGroupInput<String>>>(content) {
-            let out: Result<Vec<Target<String>>, ElutionGroupInputError> =
+            let out: Result<Vec<OwnedTarget<String>>, ElutionGroupInputError> =
                 eg_inputs.into_iter().map(|x| x.try_into()).collect();
             return Ok(ElutionGroupCollection::StringLabels(out?, None));
         }
@@ -157,11 +157,11 @@ impl ElutionGroupCollection {
         // here only turned a loadable file into a rejection.
         debug!("Attempting direct deserialization of elution groups");
         debug!("Attempting to deserialize elution groups with mzpaf labels");
-        if let Ok(egs) = serde_json::from_str::<Vec<Target<IonAnnot>>>(content) {
+        if let Ok(egs) = serde_json::from_str::<Vec<OwnedTarget<IonAnnot>>>(content) {
             return Ok(ElutionGroupCollection::MzpafLabels(egs, None));
         }
         debug!("Attempting to deserialize elution groups with string labels");
-        if let Ok(egs) = serde_json::from_str::<Vec<Target<String>>>(content) {
+        if let Ok(egs) = serde_json::from_str::<Vec<OwnedTarget<String>>>(content) {
             return Ok(ElutionGroupCollection::StringLabels(egs, None));
         }
         Err(TargetReadingError::UnableToParseElutionGroups)
@@ -205,7 +205,7 @@ impl TargetTable {
     /// modified sequence.
     fn mzpaf_with_intensities(
         decoys: DecoyPolicy,
-        egs: Vec<Target<IonAnnot>>,
+        egs: Vec<OwnedTarget<IonAnnot>>,
         rows: Vec<PrecursorExtras>,
     ) -> Result<Self, TargetReadingError> {
         if egs.len() != rows.len() {
@@ -243,7 +243,7 @@ impl TargetTable {
             geom.push_row(Row {
                 precursor_mz: eg.precursor_mz(),
                 charge: eg.precursor_charge(),
-                rt_seconds: eg.rt_seconds(),
+                rt: eg.rt(),
                 mobility: eg.mobility_ook0(),
                 frags: &frags,
                 analyte: row.analyte.as_input(),
@@ -300,7 +300,7 @@ impl TargetTable {
                     geom.push_row(Row {
                         precursor_mz: eg.precursor_mz(),
                         charge: eg.precursor_charge(),
-                        rt_seconds: eg.rt_seconds(),
+                        rt: eg.rt(),
                         mobility: eg.mobility_ook0(),
                         frags: &frags,
                         id: Some(eg.id().to_owned_id()),
@@ -332,7 +332,7 @@ impl TargetTable {
                     geom.push_row(Row {
                         precursor_mz: eg.precursor_mz(),
                         charge: eg.precursor_charge(),
-                        rt_seconds: eg.rt_seconds(),
+                        rt: eg.rt(),
                         mobility: eg.mobility_ook0(),
                         frags: &frags,
                         id: Some(eg.id().to_owned_id()),
@@ -590,6 +590,59 @@ mod tests {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("tests/diann_io_files")
             .join(name)
+    }
+
+    #[test]
+    fn optional_json_labels_do_not_change_rt_coordinates() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("targets.json");
+        for axis in [
+            None,
+            Some(crate::RtAxis::Absent),
+            Some(crate::RtAxis::Seconds),
+            Some(crate::RtAxis::Unspecified),
+            Some(crate::RtAxis::NormalizedIndex {
+                scale: Some("reference".into()),
+            }),
+        ] {
+            for label in ["y3", "opaque"] {
+                for omit_precursors in [false, true] {
+                    for omit_fragments in [false, true] {
+                        let mut entry = serde_json::json!({"id":1, "mobility":1.0, "rt_seconds":20.0,
+                            "precursor_mz":500.0, "precursor_charge":2, "fragments":[300.0],
+                            "fragment_labels":[label], "precursor_labels":[0]});
+                        let fields = entry.as_object_mut().unwrap();
+                        if let Some(axis) = &axis {
+                            fields.insert("rt_axis".into(), serde_json::to_value(axis).unwrap());
+                        }
+                        if omit_precursors {
+                            fields.remove("precursor_labels");
+                        }
+                        if omit_fragments {
+                            fields.remove("fragment_labels");
+                        }
+                        std::fs::write(&path, serde_json::to_vec(&vec![entry]).unwrap()).unwrap();
+                        let table = super::read_targets(&path).unwrap();
+                        let expected = axis.as_ref().unwrap_or(&crate::RtAxis::Seconds);
+                        fn check<L: crate::KeyLike>(
+                            geom: &crate::models::TargetColumns<L>,
+                            expected: &crate::RtAxis,
+                        ) {
+                            assert_eq!(geom.rt_axis(), expected);
+                            let row = geom.rows().next().unwrap();
+                            assert_eq!(
+                                geom.library_rt(row),
+                                (expected != &crate::RtAxis::Absent).then_some(20.0)
+                            );
+                        }
+                        match table {
+                            super::TargetTable::Mzpaf { geom, .. } => check(&geom, expected),
+                            super::TargetTable::Str { geom, .. } => check(&geom, expected),
+                        }
+                    }
+                }
+            }
+        }
     }
 
     /// JSON naming no fragment labels loads, with labels minted.

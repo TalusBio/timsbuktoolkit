@@ -143,6 +143,9 @@ pub struct ScoringPlan {
     fragment_isotopes: FragmentIsotopeDecision,
     #[serde(skip)]
     linear_indices: Vec<usize>,
+    #[serde(skip)]
+    nonlinear_indices: Vec<usize>,
+    library_rt_axis: timsquery::RtAxis,
     rows: usize,
     unmodified_rows: usize,
     operations: Vec<OperationDecision>,
@@ -164,13 +167,29 @@ impl ScoringPlan {
         let mut isotope_names = NameSink::new();
         FragmentIsotopeScores::linear_feature_names(&mut isotope_names);
         let isotope_names = isotope_names.into_names();
+        let has_rt = geom.rt_axis() != &timsquery::RtAxis::Absent;
+        let mut rt_names = NameSink::new();
+        crate::scoring::blocks::rt::Rt::linear_feature_names(&mut rt_names);
+        crate::scoring::blocks::rt::Rt::nonlinear_feature_names(&mut rt_names);
+        let rt_names = rt_names.into_names();
+        let mut nonlinear_names = NameSink::new();
+        ScoringFields::nonlinear_feature_names(&mut nonlinear_names);
+        let nonlinear_indices = nonlinear_names
+            .into_names()
+            .iter()
+            .enumerate()
+            .filter_map(|(i, name)| (has_rt || !rt_names.contains(name)).then_some(i))
+            .collect();
         let mut linear_names = NameSink::new();
         ScoringFields::linear_feature_names(&mut linear_names);
         let linear_indices = linear_names
             .into_names()
             .iter()
             .enumerate()
-            .filter_map(|(i, name)| (enabled || !isotope_names.contains(name)).then_some(i))
+            .filter_map(|(i, name)| {
+                ((enabled || !isotope_names.contains(name)) && (has_rt || !rt_names.contains(name)))
+                    .then_some(i)
+            })
             .collect();
         let fragment_isotopes = FragmentIsotopeDecision {
             enabled,
@@ -226,6 +245,8 @@ impl ScoringPlan {
             isotopes,
             fragment_isotopes,
             linear_indices,
+            nonlinear_indices,
+            library_rt_axis: geom.rt_axis().clone(),
             rows,
             unmodified_rows,
             operations,
@@ -257,6 +278,10 @@ impl ScoringPlan {
     /// values use the same selection; disabled scores never enter a model.
     pub(crate) fn linear_indices(&self) -> &[usize] {
         &self.linear_indices
+    }
+
+    pub(crate) fn nonlinear_indices(&self) -> &[usize] {
+        &self.nonlinear_indices
     }
 
     pub fn isotopes(&self) -> &IsotopePlan {

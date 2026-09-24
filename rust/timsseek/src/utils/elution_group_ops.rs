@@ -1,4 +1,4 @@
-use timsquery::Target;
+use timsquery::OwnedTarget;
 use timsquery::utils::constants::C13_C12_MASS_DIFF;
 
 use crate::IonAnnot;
@@ -7,8 +7,8 @@ use crate::IonAnnot;
 /// (reusing Vec/TinyVec capacity), then apply an isotope-spacing m/z shift and label
 /// rewrite to every fragment in place. Zero alloc after warm-up.
 pub fn apply_isotope_offset_fragments_into(
-    dst: &mut Target<IonAnnot>,
-    src: &impl timsquery::traits::QueryGeom<Label = IonAnnot>,
+    dst: &mut OwnedTarget<IonAnnot>,
+    src: &impl timsquery::traits::Target<Label = IonAnnot>,
     offset: i8,
 ) {
     dst.reset_from(src);

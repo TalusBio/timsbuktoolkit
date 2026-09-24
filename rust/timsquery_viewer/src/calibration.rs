@@ -121,6 +121,7 @@ fn broad_calibration_tolerance() -> Tolerance {
 /// Owns the calibration background thread and collects results.
 pub struct ViewerCalibrationState {
     pub phase: CalibrationPhase,
+    pub library_rt_axis: timsquery::RtAxis,
     pub calibration_state: Option<CalibrationState>,
     pub generation: u64,
     pub n_scored: usize,
@@ -152,6 +153,7 @@ impl Default for ViewerCalibrationState {
             phase: CalibrationPhase::Idle,
             calibration_state: None,
             generation: 0,
+            library_rt_axis: timsquery::RtAxis::Unspecified,
             n_scored: 0,
             n_calibrants_found: 0,
             heap_capacity: search.n_calibrants,
@@ -169,8 +171,11 @@ impl Default for ViewerCalibrationState {
 
 impl ViewerCalibrationState {
     /// Reconstruct from a persisted snapshot (app state restore).
-    pub fn from_snapshot(snapshot: Option<calibrt::CalibrationSnapshot>) -> Self {
-        let Some(snapshot) = snapshot else {
+    pub fn from_snapshot(
+        snapshot: Option<calibrt::CalibrationSnapshot>,
+        axis: Option<timsquery::RtAxis>,
+    ) -> Self {
+        let (Some(snapshot), Some(axis)) = (snapshot, axis) else {
             return Self::default();
         };
         if snapshot.points.is_empty() {
@@ -195,6 +200,7 @@ impl ViewerCalibrationState {
             },
             calibration_state,
             generation: 0,
+            library_rt_axis: axis,
             n_scored: n_calibrants_found,
             n_calibrants_found,
             heap_capacity: search.n_calibrants,
@@ -247,6 +253,10 @@ impl ViewerCalibrationState {
             return;
         }
 
+        self.library_rt_axis = elution_groups.rt_axis().clone();
+        if self.library_rt_axis == timsquery::RtAxis::Absent {
+            return;
+        }
         // Increment generation to invalidate stale data.
         self.generation += 1;
         self.n_scored = 0;
@@ -517,6 +527,9 @@ impl ViewerCalibrationState {
                             return (scorer, local_heap);
                         };
 
+                        let Some(library_rt) = elution_group.rt().map(|rt| rt.value) else {
+                            return (scorer, local_heap);
+                        };
                         let extraction = match build_extraction(
                             &elution_group,
                             expected_intensities,
@@ -548,7 +561,7 @@ impl ViewerCalibrationState {
                                 score: apex.score,
                                 apex_rt: ObservedRTSeconds(apex.retention_time_ms as f32 / 1000.0),
                                 speclib_index: elution_groups.flat(eg_idx),
-                                library_rt: LibraryRT(elution_group.rt_seconds()),
+                                library_rt: LibraryRT(library_rt),
                             });
                         }
                         (scorer, local_heap)
@@ -609,6 +622,9 @@ impl ViewerCalibrationState {
             self.residuals.clone(),
             self.n_scored,
         )
+        .with_library_rt_axis(
+            serde_json::to_value(&self.library_rt_axis).map_err(|e| e.to_string())?,
+        )
         .write(path)
     }
 
@@ -623,6 +639,11 @@ impl ViewerCalibrationState {
 
         let (saved, warning) = SavedCalibration::read(path, raw_rt_range)?;
 
+        self.library_rt_axis = serde_json::from_value(saved.library_rt_axis.clone())
+            .map_err(|e| format!("Invalid calibration RT axis: {e}"))?;
+
+        self.snapshot_points.clear();
+        self.calibration_state = None;
         // Reconstruct CalibrationState from the snapshot
         if let Ok(cal) = calibrt::CalibrationState::from_snapshot(&saved.calibration) {
             self.snapshot_points = saved
@@ -786,7 +807,7 @@ impl ViewerCalibrationState {
         let plot_id = format!("calibration_plot_{}", self.generation);
         let plot = Plot::new(plot_id)
             .height(ui.available_height().max(100.0))
-            .x_axis_label("Library RT (s)")
+            .x_axis_label(format!("Library RT ({})", self.library_rt_axis))
             .y_axis_label("Measured RT (s)")
             .allow_zoom(true)
             .allow_drag(true);
@@ -1068,6 +1089,22 @@ impl ViewerCalibrationState {
         }
 
         ui.vertical(|ui| {
+            if let Some(residuals) = &self.residuals {
+                ui.horizontal(|ui| {
+                    ui.label(format!(
+                        "m/z: {:?}; mobility: {:?}",
+                        residuals.tolerance.ms, residuals.tolerance.mobility,
+                    ));
+                    if ui.button("Apply saved tolerances").clicked() {
+                        tolerance.ms = residuals.tolerance.ms.clone();
+                        tolerance.mobility = residuals.tolerance.mobility.clone();
+                        tolerance.quad = residuals.tolerance.quad.clone();
+                        if self.calibration_state.as_ref().and_then(|s| s.curve()).is_none() {
+                            tolerance.rt = RtTolerance::Unrestricted;
+                        }
+                    }
+                });
+            }
             if let Some((rt_min, stats)) = suggested {
                 ui.horizontal(|ui| {
                     ui.label(format!(
@@ -1157,5 +1194,51 @@ fn simple_shuffle(indices: &mut [usize]) {
             .wrapping_add(1);
         let j = (state >> 33) as usize % (i + 1);
         indices.swap(i, j);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loading_mass_only_calibration_clears_previous_rt_fit() {
+        use timsseek::rt_calibration::{
+            CalibrationResult,
+            DerivationParams,
+            DimensionErrors,
+            ErrorStats,
+        };
+        let mut grid = CalibrationState::deferred(10, 3).unwrap();
+        grid.refit(10, [(0.0, 30.0), (100.0, 180.0)].into_iter())
+            .unwrap();
+        assert!(grid.curve().is_some());
+        let mut viewer = ViewerCalibrationState::default();
+        viewer.calibration_state = Some(grid);
+        viewer.snapshot_points = vec![(LibraryRT(0.0), ObservedRTSeconds(30.0))];
+        let calibration = CalibrationResult::from_measurements(
+            CalibrationState::deferred(10, 3).unwrap(),
+            &Tolerance::default(),
+            DimensionErrors {
+                mz_ppm: ErrorStats::from_slice(&[2.0, 3.0]),
+                ..Default::default()
+            },
+            DerivationParams::default(),
+        )
+        .with_rt_axis(&timsquery::RtAxis::Absent);
+        let path = std::env::temp_dir().join(format!(
+            "tbtk-viewer-mass-calibration-{}.json",
+            std::process::id()
+        ));
+        calibration.save_json([0.0, 600.0], 2, &path).unwrap();
+        let loaded = viewer.load_from_file(&path, None);
+        std::fs::remove_file(&path).unwrap();
+        loaded.unwrap();
+        assert!(viewer.calibration_state.is_none());
+        assert!(viewer.snapshot_points.is_empty());
+        assert_eq!(viewer.library_rt_axis, timsquery::RtAxis::Absent);
+        let residuals = viewer.residuals.as_ref().unwrap();
+        assert_eq!(residuals.errors.mz_ppm.n, 2);
+        assert_eq!(&residuals.tolerance.ms, calibration.mz_tolerance());
     }
 }

@@ -230,22 +230,25 @@ pub fn execute_pipeline<I: ScorerQueriable>(
     // === PHASE 2: Calibration (fit RT + measure errors + derive tolerances) ===
     info!("Phase 2: Calibration...");
     let step = TimedStep::begin("Phase 2: Calibrate");
-    let calibration = match calibrate_from_phase1(
-        calibrants,
-        phase1_lib,
-        main_lookup.as_ref(),
-        pipeline,
-        calib_config,
-    ) {
-        Ok(calib) => {
-            info!("Calibration succeeded");
-            calib
-        }
-        Err(e) => {
-            tracing::error!("Calibration failed: {:?}. Using fallback.", e);
-            CalibrationResult::fallback(pipeline)
+    let calibration = {
+        match calibrate_from_phase1(
+            calibrants,
+            phase1_lib,
+            main_lookup.as_ref(),
+            pipeline,
+            calib_config,
+        ) {
+            Ok(calib) => {
+                info!("Calibration succeeded");
+                calib
+            }
+            Err(e) => {
+                tracing::error!("Calibration failed: {:?}. Using fallback.", e);
+                CalibrationResult::fallback(pipeline)
+            }
         }
     };
+    let calibration = calibration.with_rt_axis(speclib.geometry().rt_axis());
     let phase2_ms = step
         .finish_with(format_args!(
             "{} fit points → {} path nodes",
@@ -265,28 +268,19 @@ pub fn execute_pipeline<I: ScorerQueriable>(
             summary.in_ridge_ratio * 100.0,
         );
     }
-    // The mobility tolerance is only meaningful for a searchable TIMS 1/K0 run;
-    // for mzML/FAIMS it is fit from sentinel mobilities and never used (the
-    // query gate unrestricts mobility), so report it as disabled rather than
-    // print a misleading number.
-    if pipeline.index.mobility_kind().is_scoreable() {
-        println!(
-            "  m/z: ({:.1}, {:.1}) ppm   mobility: ({:.1}, {:.1}) %",
-            calibration.mz_tolerance().0,
-            calibration.mz_tolerance().1,
-            calibration.mobility_tolerance().0,
-            calibration.mobility_tolerance().1,
-        );
-    } else {
-        println!(
-            "  m/z: ({:.1}, {:.1}) ppm   mobility: disabled (no searchable axis)",
-            calibration.mz_tolerance().0,
-            calibration.mz_tolerance().1,
-        );
-    }
+    println!(
+        "  m/z: {:?}   mobility: {}   RT fit: {}",
+        calibration.mz_tolerance(),
+        if pipeline.index.mobility_kind().is_scoreable() {
+            format!("{:?}", calibration.mobility_tolerance())
+        } else {
+            "disabled (no searchable axis)".to_owned()
+        },
+        calibration.has_rt_calibration()
+    );
 
     // Save the calibration for the viewer to load.
-    if !calibration.is_fallback() {
+    {
         let (rt_lo_ms, rt_hi_ms) = pipeline.index.ms1_cycle_mapping().range_milis();
         let rt_lo = rt_lo_ms as f64 / 1000.0;
         let rt_hi = rt_hi_ms as f64 / 1000.0;

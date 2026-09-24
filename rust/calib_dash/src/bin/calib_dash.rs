@@ -28,6 +28,10 @@ fn main() {
             std::process::exit(1);
         }
     };
+    if snapshot.points.is_empty() {
+        eprintln!("No RT fit in {}; no RT curve to replay.", path.display());
+        return;
+    }
     if let Err(e) = validate_snapshot(&snapshot) {
         eprintln!("invalid calibration snapshot in {}: {e}", path.display());
         std::process::exit(1);

@@ -4,7 +4,7 @@ use timscentroid::indexing::IndexedPeak;
 use timscentroid::rt_mapping::RTIndex;
 use tinyvec::TinyVec;
 
-use crate::traits::QueryGeom;
+use crate::traits::Target;
 use crate::traits::queriable_data::{
     HasQueryData,
     PeakAddable,
@@ -50,7 +50,7 @@ pub struct SpectralCollector<T: KeyLike, V: Default + ValueLike> {
 }
 
 impl<T: KeyLike, V: ValueLike + Default> SpectralCollector<T, V> {
-    pub fn new(eg: &impl QueryGeom<Label = T>) -> Self {
+    pub fn new(eg: &impl Target<Label = T>) -> Self {
         let mut out = Self {
             mobility_ook0: 0.0,
             rt_seconds: 0.0,
@@ -68,7 +68,7 @@ impl<T: KeyLike, V: ValueLike + Default> SpectralCollector<T, V> {
         out
     }
 
-    pub fn reset_with(&mut self, eg: &impl QueryGeom<Label = T>) {
+    pub fn reset_with(&mut self, eg: &impl Target<Label = T>) {
         self.reset_with_overrides(eg, None, None);
     }
 
@@ -76,12 +76,13 @@ impl<T: KeyLike, V: ValueLike + Default> SpectralCollector<T, V> {
     /// `item.query.clone().with_rt_seconds(r).with_mobility(m)` at callers.
     pub fn reset_with_overrides(
         &mut self,
-        eg: &impl QueryGeom<Label = T>,
+        eg: &impl Target<Label = T>,
         rt_override: Option<f32>,
         mobility_override: Option<f32>,
     ) {
         self.mobility_ook0 = mobility_override.unwrap_or_else(|| eg.mobility_ook0());
-        self.rt_seconds = rt_override.unwrap_or_else(|| eg.rt_seconds());
+        self.rt_seconds =
+            rt_override.unwrap_or_else(|| eg.observed_rt_seconds().unwrap_or(f32::NAN));
         self.precursor_mono_mz = eg.mono_precursor_mz();
         self.precursor_charge = eg.precursor_charge();
         self.precursor_mz_limits = eg.precursor_mz_limits();

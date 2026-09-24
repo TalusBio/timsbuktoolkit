@@ -5,7 +5,7 @@ use crate::models::aggregators::{
     PointIntensityAggregator,
     SpectralCollector,
 };
-use crate::models::target::Target;
+use crate::models::target::OwnedTarget;
 use crate::{
     KeyLike,
     Tolerance,
@@ -40,21 +40,21 @@ pub trait HasQueryData<FH: KeyLike> {
         FH: 'a;
 }
 
-impl<FH: KeyLike> HasQueryData<FH> for Target<FH> {
+impl<FH: KeyLike> HasQueryData<FH> for OwnedTarget<FH> {
     fn precursor_mz_limits(&self) -> (f64, f64) {
         self.precursor_mz_limits()
     }
 
     fn mobility_ook0(&self) -> f32 {
-        Target::mobility_ook0(self)
+        OwnedTarget::mobility_ook0(self)
     }
 
     fn rt_seconds(&self) -> f32 {
-        Target::rt_seconds(self)
+        OwnedTarget::rt_seconds(self)
     }
 
     fn iter_precursors(&self) -> impl Iterator<Item = (i8, f64)> + '_ {
-        Target::iter_precursors(self)
+        OwnedTarget::iter_precursors(self)
     }
 
     fn iter_fragments<'a>(&'a self) -> impl Iterator<Item = (&'a FH, f64)> + 'a

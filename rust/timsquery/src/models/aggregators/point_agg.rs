@@ -1,6 +1,6 @@
 use crate::KeyLike;
-use crate::models::target::Target;
-use crate::traits::QueryGeom;
+use crate::models::target::OwnedTarget;
+use crate::traits::Target;
 use crate::traits::queriable_data::HasQueryData;
 use serde::Serialize;
 use std::sync::Arc;
@@ -24,11 +24,11 @@ pub struct PointIntensityAggregator<T: KeyLike> {
 }
 
 impl<T: KeyLike> PointIntensityAggregator<T> {
-    pub fn new_with_elution_group(elution_group: Arc<Target<T>>) -> Self {
+    pub fn new_with_elution_group(elution_group: Arc<OwnedTarget<T>>) -> Self {
         Self::new(elution_group.as_ref())
     }
 
-    pub fn new(eg: &impl QueryGeom<Label = T>) -> Self {
+    pub fn new(eg: &impl Target<Label = T>) -> Self {
         let mut precursor_labels = TinyVec::new();
         let mut precursor_mzs = TinyVec::new();
         for (lbl, mz) in eg.iter_precursors() {
@@ -44,7 +44,7 @@ impl<T: KeyLike> PointIntensityAggregator<T> {
         Self {
             id: eg.output_id().to_owned_id(),
             mobility_ook0: eg.mobility_ook0(),
-            rt_seconds: eg.rt_seconds(),
+            rt_seconds: eg.observed_rt_seconds().unwrap_or(f32::NAN),
             precursor_mono_mz: eg.mono_precursor_mz(),
             precursor_charge: eg.precursor_charge(),
             precursor_mz_limits: eg.precursor_mz_limits(),
@@ -89,12 +89,12 @@ impl<T: KeyLike> HasQueryData<T> for PointIntensityAggregator<T> {
 
 #[derive(Debug, Clone)]
 pub struct RawPeakVectorAggregator<T: KeyLike> {
-    pub query: Arc<Target<T>>,
+    pub query: Arc<OwnedTarget<T>>,
     pub peaks: RawPeakVectorArrays,
 }
 
 impl<T: KeyLike> RawPeakVectorAggregator<T> {
-    pub fn new_with_elution_group(elution_group: Arc<Target<T>>) -> Self {
+    pub fn new_with_elution_group(elution_group: Arc<OwnedTarget<T>>) -> Self {
         Self {
             query: elution_group,
             peaks: RawPeakVectorArrays::new(),

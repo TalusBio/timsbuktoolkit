@@ -1,13 +1,9 @@
 //! Shared extraction builder -- used by both CLI (Scorer) and viewer.
 
-use crate::data_sources::reference_library::{
-    ExpectedIntensity,
-    RefQuery,
-};
+use crate::data_sources::reference_library::ExpectedIntensity;
 use crate::models::ExpectedIntensities;
 use crate::scoring::apex_finding::Extraction;
 use crate::traits::MappableRTCycles;
-use timsquery::traits::QueryGeom;
 use timsquery::utils::TupleRange;
 use timsquery::{
     ChromatogramCollector,
@@ -29,7 +25,7 @@ use super::skip::SkipReason;
 ///   Some(n) -> filter_zero_intensity_ions + select_top_n_fragments(n)
 ///   None    -> no filtering, all ions kept
 pub fn build_extraction<T, I>(
-    query: &timsquery::Target<T>,
+    query: &impl timsquery::Target<Label = T>,
     mut expected_intensities: ExpectedIntensities<T>,
     index: &I,
     tolerance: &Tolerance,
@@ -44,7 +40,7 @@ where
     let max_range = TupleRange::try_new(max_range.0, max_range.1)
         .expect("Reference RTs should be sorted and valid");
 
-    let rt_range = match tolerance.rt_range_as_milis(query.rt_seconds()) {
+    let rt_range = match extraction_rt_range(query, tolerance)? {
         OptionallyRestricted::Unrestricted => max_range,
         OptionallyRestricted::Restricted(r) => r,
     };
@@ -96,15 +92,15 @@ fn classify_post_add_query<T: KeyLike>(
 ///
 /// On first call the `scratch` slot is `None` and a fresh `Extraction` is
 /// allocated. Subsequent calls reset the existing one in place.
-pub fn build_extraction_into<I>(
+pub fn build_extraction_into<I, Q>(
     scratch: &mut Option<Extraction<IonAnnot>>,
-    query: &RefQuery<'_>,
-    rt_override: Option<f32>,
+    query: &Q,
     index: &I,
     tolerance: &Tolerance,
     top_n_fragments: Option<usize>,
 ) -> Result<(), SkipReason>
 where
+    Q: timsquery::Target<Label = IonAnnot> + ExpectedIntensity,
     I: QueriableData<ChromatogramCollector<IonAnnot, f32>> + MappableRTCycles,
 {
     let cycle_mapping = index.ms1_cycle_mapping();
@@ -112,8 +108,7 @@ where
     let max_range = TupleRange::try_new(max_range.0, max_range.1)
         .expect("Reference RTs should be sorted and valid");
 
-    let query_rt = rt_override.unwrap_or_else(|| query.rt_seconds());
-    let rt_range = match tolerance.rt_range_as_milis(query_rt) {
+    let rt_range = match extraction_rt_range(query, tolerance)? {
         OptionallyRestricted::Unrestricted => max_range,
         OptionallyRestricted::Restricted(r) => r,
     };
@@ -125,15 +120,12 @@ where
     match scratch {
         Some(extr) => {
             extr.chromatograms
-                .try_reset_with_overrides(query, rt_override, None, rt_range, cycle_mapping)
+                .try_reset_with_overrides(query, None, None, rt_range, cycle_mapping)
                 .map_err(|_| SkipReason::RetentionTimeOutOfBounds)?;
         }
         None => {
-            let mut agg = ChromatogramCollector::new(query, rt_range, cycle_mapping)
+            let agg = ChromatogramCollector::new(query, rt_range, cycle_mapping)
                 .map_err(|_| SkipReason::RetentionTimeOutOfBounds)?;
-            if let Some(rt) = rt_override {
-                agg.rt_seconds = rt;
-            }
             *scratch = Some(Extraction {
                 expected_intensities: ExpectedIntensities::default(),
                 chromatograms: agg,
@@ -165,7 +157,7 @@ where
 }
 
 /// Copy validated reference values only into the buffers filtering will mutate.
-fn refill_expected(extraction: &mut Extraction<IonAnnot>, query: &RefQuery<'_>) {
+fn refill_expected(extraction: &mut Extraction<IonAnnot>, query: &impl ExpectedIntensity) {
     let expected = &mut extraction.expected_intensities;
     expected.fragment_intensities.clear();
     expected
@@ -187,6 +179,25 @@ fn refill_expected(extraction: &mut Extraction<IonAnnot>, query: &RefQuery<'_>) 
     );
 }
 
+fn extraction_rt_range(
+    query: &impl timsquery::Target,
+    tolerance: &Tolerance,
+) -> Result<OptionallyRestricted<TupleRange<u32>>, SkipReason> {
+    if query.rt().is_none()
+        || matches!(
+            tolerance.rt,
+            timsquery::models::tolerance::RtTolerance::Unrestricted
+        )
+    {
+        return Ok(OptionallyRestricted::Unrestricted);
+    }
+    let seconds = query
+        .observed_rt_seconds()
+        .filter(|v| v.is_finite() && *v >= 0.0)
+        .ok_or(SkipReason::RetentionTimeOutOfBounds)?;
+    Ok(tolerance.rt_range_as_milis(seconds))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,6 +211,55 @@ mod tests {
         Row,
         TargetColumnsBuilder,
     };
+
+    #[test]
+    fn restricted_extraction_requires_seconds_but_absent_rt_is_unrestricted() {
+        let mut builder =
+            TargetColumnsBuilder::with_capabilities(TargetCapabilities::default_diann());
+        let axis = timsquery::RtAxis::NormalizedIndex { scale: None };
+        let frags = [(IonAnnot::try_from("y1").unwrap(), 300.0)];
+        builder.push_row(Row {
+            precursor_mz: 500.0,
+            charge: 2,
+            frags: &frags,
+            rt: Some(timsquery::RtCoordinate {
+                value: -20.0,
+                axis: &axis,
+            }),
+            ..Default::default()
+        });
+        let lib = ReferenceLibrary::try_from(timsquery::serde::TargetTable::Mzpaf {
+            geom: builder.seal(crate::models::DecoyPolicy::Never).unwrap(),
+            frag_intens: Some(vec![1.0]),
+        })
+        .unwrap();
+        let query = lib.iter().next().unwrap();
+        let tolerance = Tolerance::default().with_rt_tolerance(
+            timsquery::models::tolerance::RtTolerance::Minutes((0.5, 0.5)),
+        );
+        assert!(extraction_rt_range(&query, &tolerance).is_err());
+        let observed = timsquery::AtObservedRt::new(&query, 120.0);
+        let OptionallyRestricted::Restricted(range) =
+            extraction_rt_range(&observed, &tolerance).unwrap()
+        else {
+            panic!("observed RT must constrain extraction")
+        };
+        assert_eq!((range.start(), range.end()), (90_000, 150_000));
+        assert_eq!(timsquery::Target::library_rt(&query), Some(-20.0));
+        assert_eq!(
+            timsquery::Target::output_id(&observed),
+            timsquery::Target::output_id(&query)
+        );
+        assert_eq!(
+            observed.iter_expected_fragments().collect::<Vec<_>>(),
+            query.iter_expected_fragments().collect::<Vec<_>>()
+        );
+        let absent = timsquery::OwnedTarget::<IonAnnot>::empty_like();
+        assert!(matches!(
+            extraction_rt_range(&absent, &tolerance).unwrap(),
+            OptionallyRestricted::Unrestricted
+        ));
+    }
 
     struct TestIndex(CycleToRTMapping<MS1CycleIndex>);
 
@@ -243,6 +303,7 @@ mod tests {
         for count in [20, 2] {
             builder.push_row(Row {
                 precursor_mz: 500.0,
+                rt: Some(timsquery::RtCoordinate::seconds(0.0)),
                 charge: 2,
                 frags: &fragments[..count],
                 analyte: timsquery::chemistry::analyte::Analyte::from_sequence("PEPTIDEK")
@@ -264,10 +325,10 @@ mod tests {
         for query in lib.iter() {
             // Compare both unfiltered extraction and zero-signal/top-N filtering.
             for top_n in [None, Some(8)] {
-                let mut materialized = timsquery::Target::empty_like();
+                let mut materialized = timsquery::OwnedTarget::empty_like();
                 materialized.reset_from(&query);
-                let mut shifted_direct = timsquery::Target::empty_like();
-                let mut shifted_owned = timsquery::Target::empty_like();
+                let mut shifted_direct = timsquery::OwnedTarget::empty_like();
+                let mut shifted_owned = timsquery::OwnedTarget::empty_like();
                 crate::utils::elution_group_ops::apply_isotope_offset_fragments_into(
                     &mut shifted_direct,
                     &query,
@@ -289,7 +350,7 @@ mod tests {
                 .unwrap();
                 let baseline =
                     build_extraction(&materialized, expected, &index, &tolerance, top_n).unwrap();
-                build_extraction_into(&mut slot, &query, None, &index, &tolerance, top_n).unwrap();
+                build_extraction_into(&mut slot, &query, &index, &tolerance, top_n).unwrap();
                 let actual = slot.as_ref().unwrap();
                 assert_eq!(
                     actual.expected_intensities.fragment_intensities,
@@ -309,10 +370,17 @@ mod tests {
                 }
                 allocation = Some(ptr);
             }
-            build_extraction_into(&mut slot, &query, Some(0.01), &index, &tolerance, None).unwrap();
+            build_extraction_into(
+                &mut slot,
+                &timsquery::AtObservedRt::new(&query, 0.01),
+                &index,
+                &tolerance,
+                None,
+            )
+            .unwrap();
             assert_eq!(slot.as_ref().unwrap().chromatograms.rt_seconds, 0.01);
             assert_eq!(
-                query.rt_seconds(),
+                timsquery::Target::library_rt(&query).unwrap(),
                 0.0,
                 "calibration must not change library RT"
             );

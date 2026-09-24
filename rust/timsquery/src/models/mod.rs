@@ -4,6 +4,11 @@ pub mod capabilities;
 pub mod indexed_data;
 mod lazy;
 pub mod query_handle;
+pub mod retention_time;
+pub use retention_time::{
+    RtAxis,
+    RtCoordinate,
+};
 pub mod source_id;
 pub mod target;
 pub mod target_columns;

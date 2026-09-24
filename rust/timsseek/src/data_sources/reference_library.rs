@@ -18,7 +18,7 @@ use timsquery::models::{
     RowIdx,
     TargetColumns,
 };
-use timsquery::traits::QueryGeom;
+use timsquery::traits::Target;
 #[cfg(test)]
 use timsquery::utils::constants::PROTON_MASS;
 
@@ -42,7 +42,7 @@ pub trait ExpectedIntensity {
     fn expected_precursor_envelope(&self) -> SmallVec<[(i8, f32); 3]>;
 }
 
-/// Flyweight over a `ReferenceLibrary`: `QueryGeom` (geometry, delegated to the
+/// Flyweight over a `ReferenceLibrary`: `Target` (geometry, delegated to the
 /// arena flyweight) + `ExpectedIntensity` (reference intensities + envelope).
 #[derive(Clone, Copy)]
 pub struct RefQuery<'a> {
@@ -105,7 +105,7 @@ impl ReferenceLibrary {
     /// Finite library-RT extent across every scored variant.
     pub fn rt_range(&self) -> Option<(f32, f32)> {
         self.iter()
-            .map(|q| q.rt_seconds())
+            .filter_map(|q| q.library_rt())
             .filter(|rt| rt.is_finite())
             .fold(None, |range, rt| {
                 Some(match range {
@@ -214,7 +214,7 @@ impl ReferenceLibrary {
                     builder.push_row(Row {
                         precursor_mz: geom.precursor_mz(row),
                         charge: geom.charge(row),
-                        rt_seconds: geom.rt_seconds(row),
+                        rt: geom.rt(row),
                         mobility: geom.mobility(row),
                         frags: &fragments,
                         analyte: analyte.as_input(),
@@ -305,7 +305,7 @@ impl<'a> ExpectedIntensity for RefQuery<'a> {
     }
 }
 
-impl<'a> QueryGeom for RefQuery<'a> {
+impl<'a> Target for RefQuery<'a> {
     type Label = IonAnnot;
 
     fn source_id(&self) -> Option<timsquery::models::SourceId<'_>> {
@@ -324,8 +324,8 @@ impl<'a> QueryGeom for RefQuery<'a> {
         self.geom.precursor_charge()
     }
 
-    fn rt_seconds(&self) -> f32 {
-        self.geom.rt_seconds()
+    fn rt(&self) -> Option<timsquery::models::RtCoordinate<'_>> {
+        self.geom.rt()
     }
 
     fn mobility_ook0(&self) -> f32 {
@@ -365,7 +365,7 @@ pub struct RowHandles {
     pub group: GroupCode,
 }
 
-/// Identity accessors used by generic scoring loops alongside `QueryGeom`
+/// Identity accessors used by generic scoring loops alongside `Target`
 /// and `ExpectedIntensity`. `RefQuery` resolves handles without copying row
 /// data. Candidates retain handles; chemistry consumers borrow the owning library.
 pub trait ScoredIdentity {
@@ -563,7 +563,7 @@ mod tests {
         geom.push_row(Row {
             precursor_mz: 900.4,
             charge: 2,
-            rt_seconds: 1.0,
+            rt: Some(timsquery::models::RtCoordinate::seconds(1.0)),
             mobility: 1.0,
             frags: &[
                 (IonAnnot::try_from("y3").unwrap(), 300.0),
@@ -676,7 +676,7 @@ mod tests {
         geom.push_row(Row {
             precursor_mz: 900.4,
             charge: 2,
-            rt_seconds: 1.0,
+            rt: Some(timsquery::models::RtCoordinate::seconds(1.0)),
             mobility: 1.0,
             frags: &[(timsquery::IonAnnot::try_from("y3").unwrap(), 300.0)],
             analyte: timsquery::chemistry::analyte::Analyte::from_sequence("PEP").as_input(),
@@ -890,7 +890,7 @@ mod tests {
         let lib = tiny_ref_lib();
         let expected = lib
             .iter()
-            .map(|q| q.rt_seconds())
+            .filter_map(|q| q.library_rt())
             .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), rt| {
                 (lo.min(rt), hi.max(rt))
             });
@@ -990,7 +990,7 @@ mod load_tests {
     /// policy and triples, and one that ships its own stays 1:1.
     #[test]
     fn every_format_loads_to_the_same_shape() {
-        use timsquery::traits::QueryGeom;
+        use timsquery::traits::Target;
 
         struct Case {
             fixture: &'static str,
@@ -1101,7 +1101,7 @@ mod load_tests {
 
     #[test]
     fn test_mass_shift_decoys() {
-        use timsquery::traits::QueryGeom;
+        use timsquery::traits::Target;
 
         let test_file = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .parent()
@@ -1141,8 +1141,8 @@ mod load_tests {
             // Verify other properties are preserved
             for decoy in [&plus, &minus] {
                 assert_eq!(
-                    decoy.rt_seconds(),
-                    target.rt_seconds(),
+                    decoy.library_rt(),
+                    target.library_rt(),
                     "RT should be preserved"
                 );
                 assert_eq!(
@@ -1248,7 +1248,7 @@ mod load_tests {
             geom.push_row(Row {
                 precursor_mz: 500.0 + 100.0 * i as f64,
                 charge: 2,
-                rt_seconds: 120.0,
+                rt: Some(timsquery::models::RtCoordinate::seconds(120.0)),
                 mobility: 0.75,
                 frags: &frags,
                 analyte: timsquery::chemistry::analyte::Analyte::from_sequence(spec.sequence)
@@ -1627,7 +1627,7 @@ mod load_tests {
         geom.push_row(Row {
             precursor_mz: 900.4,
             charge: 2,
-            rt_seconds: 1.0,
+            rt: Some(timsquery::models::RtCoordinate::seconds(1.0)),
             mobility: 1.0,
             frags: &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
             analyte: timsquery::chemistry::analyte::Analyte::from_sequence("PEP").as_input(),
@@ -1641,5 +1641,17 @@ mod load_tests {
             frag_intens: None,
         };
         assert!(ReferenceLibrary::try_from(arena).is_err());
+    }
+}
+
+impl<T: timsquery::Target + ExpectedIntensity + ?Sized> ExpectedIntensity
+    for timsquery::AtObservedRt<'_, T>
+{
+    fn iter_expected_fragments(&self) -> impl Iterator<Item = (IonAnnot, f32)> {
+        self.inner().iter_expected_fragments()
+    }
+
+    fn expected_precursor_envelope(&self) -> SmallVec<[(i8, f32); 3]> {
+        self.inner().expected_precursor_envelope()
     }
 }

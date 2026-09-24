@@ -1,4 +1,4 @@
-use crate::models::target::target_builder::{
+use crate::models::target::owned_target_builder::{
     SetPrecursorCharge,
     SetPrecursorMonoMz,
 };
@@ -15,12 +15,15 @@ use tinyvec::TinyVec;
 /// [`crate::models::TargetColumns`].
 #[derive(Debug, Serialize, Deserialize, Clone, bon::Builder)]
 #[builder(finish_fn(vis = "", name = try_build_internal))]
-pub struct Target<T: KeyLike> {
+pub struct OwnedTarget<T: KeyLike> {
     #[builder(into)]
     id: crate::models::OwnedSourceId,
     #[serde(alias = "mobility")]
     mobility_ook0: f32,
     rt_seconds: f32,
+    #[serde(default = "legacy_rt_axis")]
+    #[builder(default = crate::models::RtAxis::Seconds)]
+    rt_axis: crate::models::RtAxis,
     #[serde(alias = "precursor")]
     #[serde(alias = "precursor_mz")]
     precursor_mono_mz: f64,
@@ -44,7 +47,7 @@ pub struct Target<T: KeyLike> {
     // regardless of the types (bc those are just fat pointers)
     //
     // Changing the labels to TinyVec with capaciry of 13 makes the struct 144 bytes for
-    // the concrete type Target<IonAnnot> but 408 bytes for Target<String>
+    // the concrete type OwnedTarget<IonAnnot> but 408 bytes for OwnedTarget<String>
     //
     // In theory I can make this lighter if it was a genetic ...
     #[serde(alias = "fragments")]
@@ -54,8 +57,8 @@ pub struct Target<T: KeyLike> {
     precursor_labels: TinyVec<[i8; 13]>,
 }
 
-impl<T: KeyLike + Default, S: target_builder::IsComplete> TargetBuilder<T, S> {
-    pub fn try_build(self) -> Result<Target<T>, crate::errors::DataProcessingError> {
+impl<T: KeyLike + Default, S: owned_target_builder::IsComplete> OwnedTargetBuilder<T, S> {
+    pub fn try_build(self) -> Result<OwnedTarget<T>, crate::errors::DataProcessingError> {
         let candidate = self.try_build_internal();
         if candidate.fragment_labels.is_empty() | candidate.precursor_labels.is_empty() {
             return Err(crate::DataProcessingError::ExpectedNonEmptyData);
@@ -68,31 +71,32 @@ impl<T: KeyLike + Default, S: target_builder::IsComplete> TargetBuilder<T, S> {
     }
 }
 
-impl<T: KeyLike + Default, S: target_builder::State> TargetBuilder<T, S> {
+impl<T: KeyLike + Default, S: owned_target_builder::State> OwnedTargetBuilder<T, S> {
     pub fn precursor(
         self,
         mz_mono: f64,
         charge: u8,
-    ) -> TargetBuilder<T, SetPrecursorCharge<SetPrecursorMonoMz<S>>>
+    ) -> OwnedTargetBuilder<T, SetPrecursorCharge<SetPrecursorMonoMz<S>>>
     where
-        S::PrecursorCharge: target_builder::IsUnset,
-        S::PrecursorMonoMz: target_builder::IsUnset,
+        S::PrecursorCharge: owned_target_builder::IsUnset,
+        S::PrecursorMonoMz: owned_target_builder::IsUnset,
     {
         self.precursor_mono_mz(mz_mono).precursor_charge(charge)
     }
 }
 
-impl<T: KeyLike + Default> Target<T> {
+impl<T: KeyLike + Default> OwnedTarget<T> {
     /// Build an empty scratch group DIRECTLY (bypassing the `bon` builder,
     /// which rejects empty fragment/precursor label sets). All scalars are
     /// zeroed and all vecs empty; the intended use is a reuse-in-place scratch
-    /// buffer that gets refilled via [`Target::reset_from`] before
+    /// buffer that gets refilled via [`OwnedTarget::reset_from`] before
     /// every query, so the zeroed initial state is never observed.
     pub fn empty_like() -> Self {
         Self {
             id: crate::models::OwnedSourceId::placeholder(),
             mobility_ook0: 0.0,
             rt_seconds: 0.0,
+            rt_axis: crate::models::RtAxis::Absent,
             precursor_mono_mz: 0.0,
             precursor_charge: 0,
             fragment_mzs: Vec::new(),
@@ -102,7 +106,7 @@ impl<T: KeyLike + Default> Target<T> {
     }
 }
 
-impl<T: KeyLike> Target<T> {
+impl<T: KeyLike> OwnedTarget<T> {
     pub fn id(&self) -> crate::models::SourceId<'_> {
         self.id.as_ref()
     }
@@ -115,8 +119,20 @@ impl<T: KeyLike> Target<T> {
         self.fragment_mzs.len()
     }
 
+    pub fn rt(&self) -> Option<crate::models::RtCoordinate<'_>> {
+        (self.rt_axis != crate::models::RtAxis::Absent).then_some(crate::models::RtCoordinate {
+            value: self.rt_seconds,
+            axis: &self.rt_axis,
+        })
+    }
+
+    /// Observed-time center; unavailable for absent or uncalibrated library axes.
     pub fn rt_seconds(&self) -> f32 {
-        self.rt_seconds
+        if self.rt_axis == crate::models::RtAxis::Seconds {
+            self.rt_seconds
+        } else {
+            f32::NAN
+        }
     }
 
     pub fn precursor_charge(&self) -> u8 {
@@ -135,18 +151,21 @@ impl<T: KeyLike> Target<T> {
     // NOTE: I am thinking about removing this and leave the rest as a trait
     pub fn set_rt_seconds(&mut self, rt_seconds: f32) {
         self.rt_seconds = rt_seconds;
+        self.rt_axis = crate::models::RtAxis::Seconds;
     }
 
     /// In-place copy reusing Vec/TinyVec capacity. The `clear()` + `push`
     /// pattern preserves the destination's heap buffer capacity across
     /// resets -- after warm-up, zero alloc. Used by the isotope-offset
-    /// scratch in timsseek. `G` is any `QueryGeom` (e.g. the columnar
+    /// scratch in timsseek. `G` is any `Target` (e.g. the columnar
     /// flyweight), not necessarily `Self` -- the body reads `src` only
     /// through trait methods.
-    pub fn reset_from<G: crate::traits::QueryGeom<Label = T>>(&mut self, src: &G) {
+    pub fn reset_from<G: crate::traits::Target<Label = T>>(&mut self, src: &G) {
         self.id.set_from(src.output_id());
         self.mobility_ook0 = src.mobility_ook0();
-        self.rt_seconds = src.rt_seconds();
+        let rt = src.rt();
+        self.rt_seconds = rt.map_or(0.0, |r| r.value);
+        self.rt_axis = rt.map_or(crate::models::RtAxis::Absent, |r| r.axis.clone());
         self.precursor_mono_mz = src.mono_precursor_mz();
         self.precursor_charge = src.precursor_charge();
         self.fragment_mzs.clear();
@@ -220,14 +239,15 @@ impl<T: KeyLike> Target<T> {
             .map(|(label, mz)| (label, *mz))
     }
 
-    pub fn cast<U: KeyLike>(&self, f: impl Fn(&T) -> U) -> Target<U> {
+    pub fn cast<U: KeyLike>(&self, f: impl Fn(&T) -> U) -> OwnedTarget<U> {
         let fragment_labels_converted: TinyVec<[U; 13]> =
             self.fragment_labels.iter().map(f).collect();
 
-        Target {
+        OwnedTarget {
             id: self.id.clone(),
             mobility_ook0: self.mobility_ook0,
             rt_seconds: self.rt_seconds,
+            rt_axis: self.rt_axis.clone(),
             precursor_mono_mz: self.precursor_mono_mz,
             precursor_charge: self.precursor_charge,
             fragment_mzs: self.fragment_mzs.clone(),
@@ -235,4 +255,8 @@ impl<T: KeyLike> Target<T> {
             precursor_labels: self.precursor_labels.clone(),
         }
     }
+}
+
+pub(crate) fn legacy_rt_axis() -> crate::models::RtAxis {
+    crate::models::RtAxis::Seconds
 }

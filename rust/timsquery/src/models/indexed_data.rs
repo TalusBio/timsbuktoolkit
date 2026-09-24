@@ -151,7 +151,11 @@ impl QueryRanges {
         } else {
             Unrestricted
         };
-        let rt_range_milliseconds = tolerance.rt_range_as_milis(query.rt_seconds());
+        let rt_range_milliseconds = if query.rt_seconds().is_finite() {
+            tolerance.rt_range_as_milis(query.rt_seconds())
+        } else {
+            Unrestricted
+        };
         let ms1_cycle_range = match rt_range_milliseconds {
             Restricted(x) => Restricted(
                 TupleRange::try_new(rt_ms_to_cycle(x.start()), rt_ms_to_cycle(x.end())).unwrap(),
@@ -187,9 +191,12 @@ impl QueryRanges {
             Unrestricted
         };
 
-        let rt_range_milliseconds = match tolerance
-            .rt_range_as_milis(query.rt_seconds())
-            .map(|x| x.try_intercept(rt_limits_milis))
+        let rt_range_milliseconds = match (if query.rt_seconds().is_finite() {
+            tolerance.rt_range_as_milis(query.rt_seconds())
+        } else {
+            Unrestricted
+        })
+        .map(|x| x.try_intercept(rt_limits_milis))
         {
             Restricted(Some(x)) => Restricted(x),
             Restricted(None) => return None,
@@ -672,7 +679,7 @@ mod mobility_gate_tests {
         use crate::Tolerance;
         use crate::models::aggregators::PointIntensityAggregator;
         use crate::models::indexed_data::QueryRanges;
-        use crate::models::target::Target;
+        use crate::models::target::OwnedTarget;
         use timscentroid::rt_mapping::{
             MS1CycleIndex,
             RTIndex,
@@ -680,7 +687,7 @@ mod mobility_gate_tests {
         use timscentroid::utils::OptionallyRestricted;
         use tinyvec::tiny_vec;
 
-        let eg = Target::<usize>::builder()
+        let eg = OwnedTarget::<usize>::builder()
             .id(1)
             .mobility_ook0(0.8)
             .rt_seconds(100.0)

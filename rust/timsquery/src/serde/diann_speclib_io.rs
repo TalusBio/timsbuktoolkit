@@ -650,7 +650,15 @@ fn append_arena(dst: &mut TargetColumnsBuilder<IonAnnot>, src: TargetColumnsBuil
 
     dst.precursor_mz.append(&mut src.precursor_mz);
     dst.charge.append(&mut src.charge);
-    dst.rt_seconds.append(&mut src.rt_seconds);
+    if dst.rt_values.is_empty() {
+        dst.rt_axis = src.rt_axis.clone();
+    } else if !src.rt_values.is_empty() && dst.rt_axis != src.rt_axis {
+        dst.rt_error = Some("incompatible RT axes in library shards".into());
+    }
+    if src.rt_error.is_some() {
+        dst.rt_error = src.rt_error.take();
+    }
+    dst.rt_values.append(&mut src.rt_values);
     dst.mobility.append(&mut src.mobility);
     dst.is_decoy.append(&mut src.is_decoy);
     dst.pending_ids.append(&mut src.pending_ids);
@@ -846,7 +854,10 @@ fn map_entry(
         charge: charge as u8,
         // Library iRT is dimensionless here; keep it raw (no minute->second
         // scaling) -- Phase 1 RT tolerance is unrestricted.
-        rt_seconds: pep.i_rt(),
+        rt: Some(crate::models::RtCoordinate {
+            value: pep.i_rt(),
+            axis: &crate::models::RtAxis::NormalizedIndex { scale: None },
+        }),
         mobility: pep.i_im(),
         frags: &frags,
         analyte: crate::chemistry::analyte::Analyte::from_sequence(&modified_peptide).as_input(),
@@ -1002,6 +1013,36 @@ mod tests {
     // independent decoder), not from this reader -- so the test is not circular.
 
     #[test]
+    fn shard_merge_preserves_rt_axis_and_rejects_incompatible_presence() {
+        fn shard(rt: Option<crate::RtCoordinate<'_>>) -> TargetColumnsBuilder<IonAnnot> {
+            let mut builder =
+                TargetColumnsBuilder::with_capabilities(TargetCapabilities::default_diann());
+            builder.push_row(Row {
+                rt,
+                charge: 2,
+                precursor_mz: 500.0,
+                ..Default::default()
+            });
+            builder
+        }
+        let axis = crate::RtAxis::NormalizedIndex { scale: None };
+        let index = Some(crate::RtCoordinate {
+            value: -20.0,
+            axis: &axis,
+        });
+        let mut merged = shard(index);
+        append_arena(&mut merged, shard(index));
+        let geom = merged.seal(DecoyPolicy::Never).unwrap();
+        assert_eq!(geom.rt_axis(), &axis);
+        assert_eq!(geom.n_rows(), 2);
+        for rt in [None, Some(crate::RtCoordinate::seconds(120.0))] {
+            let mut merged = shard(index);
+            append_arena(&mut merged, shard(rt));
+            assert!(merged.seal(DecoyPolicy::Never).is_err());
+        }
+    }
+
+    #[test]
     fn test_sniff_diann_speclib() {
         assert!(
             sniff_diann_speclib_library_file(fixture_path()),
@@ -1079,7 +1120,7 @@ mod tests {
         assert_eq!(geom.charge[0], 2);
         assert!((geom.precursor_mz[0] - 654.85541).abs() < 1e-3);
         // Library iRT kept raw (dimensionless), not scaled to seconds.
-        assert!((geom.rt_seconds[0] - (-3.8674114)).abs() < 1e-3);
+        assert!((geom.rt_values[0] - (-3.8674114)).abs() < 1e-3);
         assert!((geom.mobility[0] - 1.0254545).abs() < 1e-4);
 
         // The fixture has Peptide.length == 0, so y-series is recovered from the
@@ -1140,7 +1181,7 @@ mod tests {
         );
         assert_eq!(geom.charge[532], 2);
         assert!((geom.precursor_mz[532] - 707.85052).abs() < 1e-3);
-        assert!((geom.rt_seconds[532] - (-31.935_83)).abs() < 1e-3);
+        assert!((geom.rt_values[532] - (-31.935_83)).abs() < 1e-3);
         assert!((geom.mobility[532] - 0.9704546).abs() < 1e-4);
         assert_eq!(geom.frag_range(row(&geom, 532)).len(), 6);
     }

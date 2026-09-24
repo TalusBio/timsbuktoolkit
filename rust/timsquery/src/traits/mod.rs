@@ -16,4 +16,4 @@ pub use queriable_data::{
     PeakAddable,
     QueriableData,
 };
-pub use query_geom::QueryGeom;
+pub use query_geom::Target;

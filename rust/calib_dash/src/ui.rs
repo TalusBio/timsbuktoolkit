@@ -457,7 +457,7 @@ fn draw_heatmap(frame: &mut Frame, area: Rect, app: &App) {
         return;
     };
 
-    let title_left = " Fit -- observed RT (s) \u{2191} vs library RT (s) \u{2192} ";
+    let title_left = " Fit -- observed RT (s) \u{2191} vs library RT coordinate \u{2192} ";
     // `batch` only -- the active layer gets its own subtitle row below.
     let title_right = format!(" b{} ", app.batch());
     frame.render_widget(

@@ -4925,11 +4925,12 @@ checksum = "2195bf6aa996a481483b29d62a7663eed3fe39600c460e323f8ff41e90bdd89b"
 [[package]]
 name = "mzannotate"
 version = "0.2.0"
-source = "git+https://github.com/jspaezp/rustyms?rev=142c96ed1d31c56936c003af5f599d0c8f740005#142c96ed1d31c56936c003af5f599d0c8f740005"
+source = "git+https://github.com/jspaezp/rustyms?rev=c033092561166e1b9960fa2a6678299af52a94e1#c033092561166e1b9960fa2a6678299af52a94e1"
 dependencies = [
  "context_error",
  "indexmap",
- "itertools 0.14.0",
+ "itertools 0.13.0",
+ "memchr",
  "mzcore",
  "mzcv",
  "mzdata",
@@ -4944,12 +4945,12 @@ dependencies = [
 [[package]]
 name = "mzcore"
 version = "0.2.0"
-source = "git+https://github.com/jspaezp/rustyms?rev=142c96ed1d31c56936c003af5f599d0c8f740005#142c96ed1d31c56936c003af5f599d0c8f740005"
+source = "git+https://github.com/jspaezp/rustyms?rev=c033092561166e1b9960fa2a6678299af52a94e1#c033092561166e1b9960fa2a6678299af52a94e1"
 dependencies = [
  "bincode",
  "context_error",
  "flate2",
- "itertools 0.14.0",
+ "itertools 0.13.0",
  "mzcv",
  "ordered-float 5.3.0",
  "roxmltree",
@@ -4963,7 +4964,7 @@ dependencies = [
 [[package]]
 name = "mzcv"
 version = "0.3.0"
-source = "git+https://github.com/jspaezp/rustyms?rev=142c96ed1d31c56936c003af5f599d0c8f740005#142c96ed1d31c56936c003af5f599d0c8f740005"
+source = "git+https://github.com/jspaezp/rustyms?rev=c033092561166e1b9960fa2a6678299af52a94e1#c033092561166e1b9960fa2a6678299af52a94e1"
 dependencies = [
  "bincode",
  "chrono",

@@ -46,7 +46,7 @@ use super::results::FinalResult;
 /// keys`), and then a target and its shipped decoy share one `decoy_group_id`
 /// across two `library_id`s. Other formats declare nothing, so for them the
 /// duplication is expected, not a bug.
-pub const RESULTS_FORMAT_VERSION: u32 = 4;
+pub const RESULTS_FORMAT_VERSION: u32 = 5;
 
 // ---------------------------------------------------------------------------
 // Build a RecordBatch from a slice of FinalResult
@@ -261,6 +261,10 @@ impl<'a> ResultParquetWriter<'a> {
 
         let kv = vec![
             KeyValue {
+                key: "library_rt_axis".into(),
+                value: Some(serde_json::to_string(geom.rt_axis()).map_err(std::io::Error::other)?),
+            },
+            KeyValue {
                 key: "result_mode".into(),
                 value: Some(if raw { "raw" } else { "rescored" }.into()),
             },
@@ -375,7 +379,7 @@ mod tests {
             geom.push_row(Row {
                 precursor_mz: 900.4,
                 charge: 2,
-                rt_seconds: 1.0,
+                rt: Some(timsquery::models::RtCoordinate::seconds(1.0)),
                 mobility: 1.0,
                 frags: &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
                 analyte: timsquery::chemistry::analyte::Analyte::from_sequence(seq).as_input(),
@@ -593,6 +597,12 @@ mod tests {
         let reader = SerializedFileReader::new(file).expect("reader");
         let meta = reader.metadata().file_metadata();
         let kv_list = meta.key_value_metadata().expect("kv metadata present");
+        let axis = kv_list
+            .iter()
+            .find(|k| k.key == "library_rt_axis")
+            .expect("RT metadata");
+        let axis: serde_json::Value = serde_json::from_str(axis.value.as_deref().unwrap()).unwrap();
+        assert_eq!(axis["kind"], "seconds");
         let plan = kv_list
             .iter()
             .find(|k| k.key == "scoring_plan")

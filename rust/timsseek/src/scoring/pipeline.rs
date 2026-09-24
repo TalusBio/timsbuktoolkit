@@ -44,14 +44,14 @@ use timscentroid::rt_mapping::{
     RTIndex,
 };
 use timsquery::models::FlatIdx;
-use timsquery::traits::QueryGeom;
+use timsquery::traits::Target;
 use timsquery::utils::TupleRange;
 use timsquery::{
     ChromatogramCollector,
     KeyLike,
     MzMobilityStatsCollector,
+    OwnedTarget,
     SpectralCollector,
-    Target,
     Tolerance,
 };
 
@@ -102,7 +102,7 @@ pub struct ScoringWorker {
     pub extraction: Option<Extraction<IonAnnot>>,
     pub inner_collector: Option<SpectralCollector<IonAnnot, MzMobilityStatsCollector>>,
     pub isotope_collector: Option<SpectralCollector<IonAnnot, f32>>,
-    pub isotope_query: Option<timsquery::Target<IonAnnot>>,
+    pub isotope_query: Option<timsquery::OwnedTarget<IonAnnot>>,
 }
 
 impl ScoringWorker {
@@ -196,11 +196,13 @@ fn calibrant_heap_group(index: FlatIdx) -> usize {
 }
 
 /// Two independent calibration folds, each split into equal-width library-RT
-/// bands. This is a bounded, mergeable accumulator for the parallel prescore.
+/// bands (observed RT when library RT is absent). This is a bounded, mergeable
+/// accumulator for the parallel prescore.
 pub struct StratifiedCalibrantHeaps {
     heaps: [[CalibrantHeap; CALIBRANT_RT_BANDS]; CALIBRANT_HEAP_GROUPS],
     rt_min: f32,
     band_scale: f32,
+    observed_rt_bands: bool,
 }
 
 impl StratifiedCalibrantHeaps {
@@ -217,7 +219,21 @@ impl StratifiedCalibrantHeaps {
             }),
             rt_min,
             band_scale,
+            observed_rt_bands: false,
         }
+    }
+
+    pub fn for_library(
+        capacity: usize,
+        library_range: Option<(f32, f32)>,
+        observed_range: (f64, f64),
+    ) -> Self {
+        let mut heaps = Self::new(
+            capacity,
+            library_range.unwrap_or((observed_range.0 as f32, observed_range.1 as f32)),
+        );
+        heaps.observed_rt_bands = library_range.is_none();
+        heaps
     }
 
     fn band_of(&self, library_rt: f32) -> usize {
@@ -229,7 +245,11 @@ impl StratifiedCalibrantHeaps {
 
     pub fn push(&mut self, candidate: CalibrantCandidate) -> Result<(), SkipReason> {
         let group = calibrant_heap_group(candidate.speclib_index);
-        let band = self.band_of(candidate.library_rt.0);
+        let band = self.band_of(if self.observed_rt_bands {
+            candidate.apex_rt.0
+        } else {
+            candidate.library_rt.0
+        });
         self.heaps[group][band].push(candidate)
     }
 
@@ -602,7 +622,9 @@ impl<I: ScorerQueriable> Scorer<I> {
 
         // Isotope query holds `query` with +1 neutron offset applied
         // (buffer-override -- reuses Vec capacity after warm-up).
-        let isotope_query = worker.isotope_query.get_or_insert_with(Target::empty_like);
+        let isotope_query = worker
+            .isotope_query
+            .get_or_insert_with(OwnedTarget::empty_like);
         crate::utils::elution_group_ops::apply_isotope_offset_fragments_into(
             isotope_query,
             query,
@@ -669,30 +691,50 @@ impl<I: ScorerQueriable> Scorer<I> {
         calibration: &CalibrationResult,
         worker: &mut ScoringWorker,
     ) -> Result<super::apex_finding::CandidateMetadata, SkipReason> {
-        let original_irt = LibraryRT(query.rt_seconds());
-        let calibrated_rt = calibration.convert_irt(original_irt);
-        let tolerance = calibration.get_tolerance(
-            query.mono_precursor_mz(),
-            query.mobility_ook0(),
-            original_irt, // library RT -- ridge widths are indexed by library RT
-        );
-
-        super::extraction::build_extraction_into(
-            &mut worker.extraction,
-            query,
-            Some(calibrated_rt.0),
-            &self.index,
-            &tolerance,
-            Some(TOP_N_FRAGMENTS),
-        )?;
+        let original_rt = query.library_rt();
+        let calibrated_rt = if !calibration.has_rt_calibration() {
+            None
+        } else {
+            original_rt
+                .map(|rt| {
+                    calibration
+                        .convert_irt(LibraryRT(rt))
+                        .map_err(|_| SkipReason::RetentionTimeOutOfBounds)
+                })
+                .transpose()?
+        };
+        if let (Some(original_rt), Some(observed_rt)) = (original_rt, calibrated_rt) {
+            let tolerance = calibration.get_tolerance(
+                query.mono_precursor_mz(),
+                query.mobility_ook0(),
+                LibraryRT(original_rt),
+            );
+            let observed_query = timsquery::AtObservedRt::new(query, observed_rt.0);
+            super::extraction::build_extraction_into(
+                &mut worker.extraction,
+                &observed_query,
+                &self.index,
+                &tolerance,
+                Some(TOP_N_FRAGMENTS),
+            )?;
+        } else {
+            let tolerance = calibration.unrestricted_rt_tolerance();
+            super::extraction::build_extraction_into(
+                &mut worker.extraction,
+                query,
+                &self.index,
+                &tolerance,
+                Some(TOP_N_FRAGMENTS),
+            )?;
+        }
 
         Ok(super::apex_finding::CandidateMetadata {
             is_target: identity.is_target,
             charge: query.precursor_charge(),
             handles: identity.handles,
             source_id: identity.source_id,
-            library_rt: original_irt.0,
-            calibrated_rt_seconds: calibrated_rt.0,
+            library_rt: original_rt.unwrap_or(f32::NAN),
+            calibrated_rt_seconds: calibrated_rt.map_or(f32::NAN, |r| r.0),
             ref_mobility_ook0: query.mobility_ook0(),
             ref_precursor_mz: query.mono_precursor_mz(),
         })
@@ -728,7 +770,6 @@ impl<I: ScorerQueriable> Scorer<I> {
                         super::extraction::build_extraction_into(
                             &mut worker.extraction,
                             query,
-                            None,
                             &self.index,
                             &tolerance,
                             Some(TOP_N_FRAGMENTS),
@@ -738,7 +779,7 @@ impl<I: ScorerQueriable> Scorer<I> {
                             charge: query.precursor_charge(),
                             handles: identity.handles,
                             source_id: identity.source_id,
-                            library_rt: query.rt_seconds(),
+                            library_rt: query.library_rt().unwrap_or(f32::NAN),
                             calibrated_rt_seconds: f32::NAN,
                             ref_mobility_ook0: query.mobility_ook0(),
                             ref_precursor_mz: query.mono_precursor_mz(),
@@ -932,7 +973,6 @@ impl<I: ScorerQueriable> Scorer<I> {
                 super::extraction::build_extraction_into(
                     &mut worker.extraction,
                     query,
-                    None,
                     &self.index,
                     &self.broad_tolerance,
                     Some(TOP_N_FRAGMENTS),
@@ -971,7 +1011,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         lib: &ReferenceLibrary,
         flats: &[FlatIdx],
         capacity_per_band: usize,
-        library_rt_range: (f32, f32),
+        library_rt_range: Option<(f32, f32)>,
         timings: &mut PrescoreTimings,
     ) -> StratifiedCalibrantHeaps {
         let get_item = |f| lib.item_at(f);
@@ -1009,7 +1049,11 @@ impl<I: ScorerQueriable> Scorer<I> {
                 );
                 (
                     ScoringWorker::new(num_cycles, max_frags),
-                    StratifiedCalibrantHeaps::new(capacity_per_band, library_rt_range),
+                    StratifiedCalibrantHeaps::for_library(
+                        capacity_per_band,
+                        library_rt_range,
+                        self.acquisition_rt_range_seconds(),
+                    ),
                     PrescoreTimings::default(),
                 )
             },
@@ -1025,7 +1069,7 @@ impl<I: ScorerQueriable> Scorer<I> {
                             score: loc.score,
                             apex_rt: ObservedRTSeconds(loc.retention_time_ms as f32 / 1000.0),
                             speclib_index: flat,
-                            library_rt: LibraryRT(q.rt_seconds()),
+                            library_rt: LibraryRT(q.library_rt().unwrap_or(f32::NAN)),
                         };
                         if let Err(reason) = heap.push(cand) {
                             t.skips.bump(reason);
@@ -1071,7 +1115,7 @@ mod tests {
         geom.push_row(Row {
             precursor_mz: 900.4,
             charge: 2,
-            rt_seconds: 1.0,
+            rt: Some(timsquery::models::RtCoordinate::seconds(1.0)),
             mobility: 1.0,
             frags: &[
                 (IonAnnot::try_from("y3").unwrap(), 300.0),
@@ -1115,6 +1159,39 @@ mod tests {
             forward.iter().next().unwrap().speclib_index,
             reverse.iter().next().unwrap().speclib_index
         );
+    }
+
+    #[test]
+    fn rt_free_candidates_are_bounded_by_observed_rt_bands() {
+        let lib = tiny_lazy_lib();
+        let flat = lib.geometry().flats().next().unwrap();
+        let make = || StratifiedCalibrantHeaps::for_library(1, None, (0.0, 300.0));
+        let mut direct = make();
+        let mut left = make();
+        let mut right = make();
+        for i in 0..30 {
+            let candidate = CalibrantCandidate {
+                score: i as f32 + 1.0,
+                apex_rt: ObservedRTSeconds(i as f32 * 10.0),
+                library_rt: LibraryRT(f32::NAN),
+                speclib_index: flat,
+            };
+            direct.push(candidate.clone()).unwrap();
+            if i % 2 == 0 {
+                left.push(candidate).unwrap();
+            } else {
+                right.push(candidate).unwrap();
+            }
+        }
+        left.merge_in_place(right);
+        let scores = |heap: StratifiedCalibrantHeaps| {
+            let mut scores: Vec<_> = heap.into_vec().into_iter().map(|c| c.score).collect();
+            scores.sort_by(f32::total_cmp);
+            scores
+        };
+        let retained = scores(direct);
+        assert_eq!(retained.len(), CALIBRANT_RT_BANDS);
+        assert_eq!(retained, scores(left));
     }
 
     #[test]

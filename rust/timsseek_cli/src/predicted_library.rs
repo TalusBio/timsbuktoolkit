@@ -48,21 +48,7 @@ use timsseek::data_sources::reference_library::ReferenceLibrary;
 
 use crate::errors::CliError;
 
-/// The scale the file route puts retention on: sixty times what msspeculator
-/// reported, whatever that number means.
-///
-/// With no chromatography context it is a dimensionless PROCAL-anchored index,
-/// which the mzSpecLib writer has to declare in `minute` because the vocabulary
-/// has no unit for an index, and the mzSpecLib reader multiplies by sixty
-/// regardless -- which recovers the declared minutes only because the pinned
-/// mzannotate leaves a `minute`-declared value alone (a release divides it by
-/// sixty). Scoring only requires `rt_seconds` to be ordered, so scaling one
-/// route and not the other gives two libraries 60x apart that each work alone
-/// and disagree the moment a run holds one of each --
-/// `check_rt_scale_compatibility` then reports a pair with no overlapping RT
-/// range. That the unit is wrong for the context-free case is
-/// <https://github.com/TalusBio/timsbuktoolkit/issues/115>, which is a different
-/// question from the two routes agreeing.
+/// Convert predicted gradient minutes to acquisition seconds; indices remain unchanged.
 const SECONDS_PER_MINUTE: f32 = 60.0;
 
 /// A library that was predicted rather than read, plus what produced it.
@@ -163,9 +149,16 @@ impl PredictedLibraryHandle {
                     .to_string(),
             });
         };
-        let arena = build_arena(rows, decoys).map_err(|e| CliError::LibraryBuild {
-            source: format!("assembling the predicted library: {e:?}"),
-        })?;
+        let normalized_axis = timsquery::RtAxis::NormalizedIndex {
+            scale: provenance
+                .pointer("/retention/normalized/scale")
+                .and_then(serde_json::Value::as_str)
+                .map(str::to_owned),
+        };
+        let arena =
+            build_arena(rows, decoys, &normalized_axis).map_err(|e| CliError::LibraryBuild {
+                source: format!("assembling the predicted library: {e:?}"),
+            })?;
         let library = ReferenceLibrary::try_from(arena).map_err(|e| CliError::LibraryBuild {
             source: format!("finalizing the predicted library: {e:?}"),
         })?;
@@ -196,7 +189,7 @@ impl PredictedLibrarySink {
 impl LibrarySink for PredictedLibrarySink {
     fn header(&mut self, provenance: &LibraryProvenance) -> Result<()> {
         // Kept as the JSON `to_json` builds, unflattened: this is a record of
-        // what produced the library, and nothing here reads it.
+        // what produced the library, including its normalized RT scale.
         self.record_provenance(provenance.to_json());
         Ok(())
     }
@@ -227,7 +220,8 @@ struct PredictedRow {
     analyte: timsquery::chemistry::analyte::Analyte,
     precursor_mz: f64,
     charge: u8,
-    rt_seconds: f32,
+    rt_value: f32,
+    rt_axis: timsquery::RtAxis,
     mobility: f32,
     frags: Vec<(IonAnnot, f64)>,
     /// Parallel to `frags`, kept apart because the arena stores the two in
@@ -266,7 +260,16 @@ impl PredictedRow {
             // chromatography context, the normalized index without one. `irt`
             // carries the index alongside a gradient time, under a term the
             // reader keeps as a scan param and never scores on.
-            rt_seconds: row.rt * SECONDS_PER_MINUTE,
+            rt_value: if row.irt.is_some() {
+                row.rt * SECONDS_PER_MINUTE
+            } else {
+                row.rt
+            },
+            rt_axis: if row.irt.is_some() {
+                timsquery::RtAxis::Seconds
+            } else {
+                timsquery::RtAxis::NormalizedIndex { scale: None }
+            },
             mobility: row.mobility as f32,
             frags,
             intensities,
@@ -304,6 +307,7 @@ fn ion_annot(peak: &Peak<'_>) -> Result<IonAnnot> {
 fn build_arena(
     rows: Vec<PredictedRow>,
     decoys: DecoyPolicy,
+    normalized_axis: &timsquery::RtAxis,
 ) -> Result<TargetTable, TargetReadingError> {
     // A zero-row arena seals: ids and groups are both vacuously consistent, the
     // parse gate has nothing to reject, and the result searches to zero results
@@ -336,7 +340,14 @@ fn build_arena(
         geom.push_row(Row {
             precursor_mz: row.precursor_mz,
             charge: row.charge,
-            rt_seconds: row.rt_seconds,
+            rt: Some(timsquery::RtCoordinate {
+                value: row.rt_value,
+                axis: if matches!(row.rt_axis, timsquery::RtAxis::NormalizedIndex { .. }) {
+                    normalized_axis
+                } else {
+                    &row.rt_axis
+                },
+            }),
             mobility: row.mobility,
             frags: &row.frags,
 
@@ -481,8 +492,16 @@ mod tests {
     /// Borrows the rows rather than taking them so one set can be put through
     /// this route and the file route both.
     fn build(rows: &[SpectrumRow<'_>], decoys: DecoyPolicy) -> PredictedLibrary {
+        build_with_scale(rows, decoys, None)
+    }
+
+    fn build_with_scale(
+        rows: &[SpectrumRow<'_>],
+        decoys: DecoyPolicy,
+        scale: Option<&str>,
+    ) -> PredictedLibrary {
         let (handle, mut collector) = sink();
-        collector.record_test_provenance();
+        collector.record_provenance(serde_json::json!({"generator":{"tool":"test"}, "retention":{"normalized":{"scale":scale}}}));
         for row in rows {
             collector.spectrum(row).expect("row converts");
         }
@@ -507,7 +526,7 @@ mod tests {
                     geom.decoy_group(tgt),
                     geom.charge(tgt),
                     geom.precursor_mz(tgt),
-                    geom.rt_seconds(tgt),
+                    geom.library_rt(tgt).unwrap(),
                     geom.analyte(tgt)
                         .peptide
                         .known()
@@ -693,12 +712,47 @@ mod tests {
     }
 
     #[test]
+    fn declared_scale_survives_prediction_and_file_loading_only_for_normalized_rows() {
+        let fixture = Fixture::new("PEPTIDEK", "PEPTIDEK");
+        for scale in [None, Some("reference anchors")] {
+            for irt in [None, Some(37.75)] {
+                let rows = [SpectrumRow {
+                    irt,
+                    rt: 2.0,
+                    ..fixture.row(2, false, None, peaks(2))
+                }];
+                let predicted = build_with_scale(&rows, DecoyPolicy::Never, scale);
+                let TargetTable::Mzpaf {
+                    geom: from_file, ..
+                } = via_file_table_with_scale(&rows, scale)
+                else {
+                    panic!("expected mzpaf")
+                };
+                let expected = if irt.is_some() {
+                    timsquery::RtAxis::Seconds
+                } else {
+                    timsquery::RtAxis::NormalizedIndex {
+                        scale: scale.map(str::to_owned),
+                    }
+                };
+                let sunk = predicted.library.geometry();
+                assert_eq!(sunk.rt_axis(), &expected);
+                assert_eq!(from_file.rt_axis(), &expected);
+                assert_eq!(
+                    sunk.library_rt(sunk.rows().next().unwrap()),
+                    from_file.library_rt(from_file.rows().next().unwrap())
+                );
+            }
+        }
+    }
+
+    #[test]
     fn retention_is_stored_on_the_scale_the_file_route_reads_the_same_library_back_on() {
         let fixture = Fixture::new("PEPTIDEK", "PEPTIDEK");
         let lib = build(&[fixture.row(2, false, None, peaks(2))], DecoyPolicy::Never);
 
         let tgt = lib.library.geometry().rows().next().unwrap();
-        assert!((lib.library.geometry().rt_seconds(tgt) - 93.56484).abs() < 1e-3);
+        assert!((lib.library.geometry().library_rt(tgt).unwrap() - 1.559414).abs() < 1e-3);
     }
 
     #[test]
@@ -715,7 +769,7 @@ mod tests {
         let lib = build(&[contextual], DecoyPolicy::Never);
 
         let tgt = lib.library.geometry().rows().next().unwrap();
-        assert!((lib.library.geometry().rt_seconds(tgt) - 1890.0).abs() < 1e-3);
+        assert!((lib.library.geometry().library_rt(tgt).unwrap() - 1890.0).abs() < 1e-3);
     }
 
     #[test]
@@ -744,9 +798,8 @@ mod tests {
     /// out of the real writer; what is reproduced here is only the framing the
     /// reader needs to parse one -- the format version, and the two attribute
     /// sets that carry `spectrum origin type`, which is where `is_decoy` reads
-    /// from. The provenance pairs are dropped because no per-row value comes from
-    /// them.
-    fn write_mzspeclib_header(out: &mut impl std::io::Write) {
+    /// from. Only the normalized-scale provenance is included when requested.
+    fn write_mzspeclib_header(out: &mut impl std::io::Write, scale: Option<&str>) {
         for line in [
             "<mzSpecLib>",
             "MS:1003186|library format version=1.0",
@@ -759,6 +812,16 @@ mod tests {
             "MS:1003072|spectrum origin type=MS:1003195|unnatural peptidoform decoy spectrum",
         ] {
             writeln!(out, "{line}").expect("header writes");
+            if line == "MS:1003188|library name=both_routes"
+                && let Some(scale) = scale
+            {
+                writeln!(
+                    out,
+                    "[1]MS:1003275|other attribute name=msspeculator:retention.normalized.scale"
+                )
+                .unwrap();
+                writeln!(out, "[1]MS:1003276|other attribute value={scale}").unwrap();
+            }
         }
     }
 
@@ -766,13 +829,17 @@ mod tests {
     /// project's reader back off it, which is what a `build-library` followed by
     /// a `search` does.
     fn via_file_table(rows: &[SpectrumRow<'_>]) -> TargetTable {
+        via_file_table_with_scale(rows, None)
+    }
+
+    fn via_file_table_with_scale(rows: &[SpectrumRow<'_>], scale: Option<&str>) -> TargetTable {
         let dir = tempfile::tempdir().expect("temp dir");
         // The name the sniffer dispatches on: it takes `.mzspeclib.` anywhere in
         // the file name, and reads plain text for anything not ending `.gz`.
         let path = dir.path().join("both_routes.mzspeclib.txt");
         {
             let mut file = std::fs::File::create(&path).expect("library file");
-            write_mzspeclib_header(&mut file);
+            write_mzspeclib_header(&mut file, scale);
             // The sink appends to the same handle at the cursor the header left,
             // and closes it when this scope drops it.
             let mut writer = msspeculator_inference::mzspeclib::MzSpecLibSink::new(file, &path);
@@ -905,16 +972,18 @@ mod tests {
                 "precursor m/z of {id}",
             );
             assert!(
-                (sunk.rt_seconds(row) - from_file.rt_seconds(mirror)).abs() < 1e-3,
+                (sunk.library_rt(row).unwrap() - from_file.library_rt(mirror).unwrap()).abs()
+                    < 1e-3,
                 "retention of {id}: {} against {}",
-                sunk.rt_seconds(row),
-                from_file.rt_seconds(mirror),
+                sunk.library_rt(row).unwrap(),
+                from_file.library_rt(mirror).unwrap(),
             );
             assert!(
                 (sunk.mobility(row) - from_file.mobility(mirror)).abs() < 1e-6,
                 "mobility of {id}",
             );
 
+            assert_eq!(sunk.rt_axis(), from_file.rt_axis());
             let (sunk_frags, file_frags) = (fragments(sunk, row), fragments(&from_file, mirror));
             assert_eq!(
                 sunk_frags.keys().collect::<Vec<_>>(),

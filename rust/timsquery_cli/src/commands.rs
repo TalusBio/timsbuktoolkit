@@ -80,7 +80,7 @@ pub fn main_query_index(args: QueryIndexArgs) -> Result<(), CliError> {
 
     // Every format funnels into one of the two label-typed arenas; extraction
     // is generic over the label, so both arms call the same driver over the
-    // columnar flyweights (`QueryGeom`). The readers hand back target geometry
+    // columnar flyweights (`Target`). The readers hand back target geometry
     // only (`caps.decoys == DecoyStrategy::Stored`, so `expanded_len() ==
     // n_rows()`): decoy generation is a scoring decision the cli never makes, so
     // a `QueryRef` (geometry only) is all the collectors need.
@@ -368,7 +368,7 @@ pub fn process_and_serialize<L: KeyLike + Display + DecoyShift>(
 mod tests {
     use super::*;
     use std::path::PathBuf;
-    use timsquery::models::target::Target;
+    use timsquery::models::target::OwnedTarget;
     use timsquery::models::tolerance::{
         MobilityTolerance,
         MzTolerance,
@@ -441,7 +441,7 @@ mod tests {
     fn test_elution_group_template_deserializable() {
         use timsquery::IonAnnot;
         let elution_groups =
-            serde_json::from_str::<Vec<Target<IonAnnot>>>(ELUTION_GROUP_TEMPLATE).unwrap();
+            serde_json::from_str::<Vec<OwnedTarget<IonAnnot>>>(ELUTION_GROUP_TEMPLATE).unwrap();
         assert!(elution_groups.len() == 2);
         // Write to a temp file ... while I implement direct reading api
         let tmp_file = tempfile::NamedTempFile::new().unwrap();
@@ -486,7 +486,7 @@ mod tests {
             PointIntensityAggregator,
             SpectralCollector,
         };
-        use timsquery::traits::QueryGeom;
+        use timsquery::traits::Target;
 
         let tmp_file = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp_file.path(), STRING_LABEL_TEMPLATE).unwrap();
