@@ -5,7 +5,7 @@ edition.workspace = true
 license.workspace = true
 
 [dependencies]
-geo = {version="0.31", features = ["serde"]}
+geo = {version="0.33", features = ["serde"]}
 geo-types = { version = "0.7", features = ["serde"] }
 
 # Workspace
