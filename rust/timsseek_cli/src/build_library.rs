@@ -392,7 +392,7 @@ pub(crate) fn predict_in_memory(
     // dropped before `stream_library` is called.
     let progress = BuildProgress::new();
     let report = progress.callback();
-    let (handle, sink) = predicted_library::sink();
+    let (handle, sink) = predicted_library::sink(decoys);
     let stats = stream_library(&stream_options(prediction, model, &report), sink).map_err(|e| {
         CliError::LibraryBuild {
             source: format!("predicting from {}: {e:#}", prediction.fasta.display()),
@@ -408,7 +408,8 @@ pub(crate) fn predict_in_memory(
         "{} proteins -> {} peptides -> {} precursors ({} decoys) -> {} fragments",
         stats.proteins, stats.peptides, stats.precursors, stats.decoys, stats.fragments,
     );
-    handle.into_library(&stats, decoys)
+    info!("Finalizing predicted library");
+    handle.into_library(&stats)
 }
 
 /// Predict a library and write it, with no network and no server.

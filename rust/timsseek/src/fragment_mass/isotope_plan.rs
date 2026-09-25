@@ -32,7 +32,10 @@ use timsquery::models::{
 };
 use timsquery::utils::constants::PROTON_MASS;
 
-use super::averagine::isotope_dist_from_mass;
+use super::averagine::{
+    averagine_cs_from_mass,
+    isotope_dist_from_mass,
+};
 use crate::isotopes::peptide_isotopes;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
@@ -57,7 +60,7 @@ pub enum UnavailableReason {
 type Counts = (i64, i64);
 type Resolution = Result<Counts, UnavailableReason>;
 
-/// Reported with the scoring plan; cached envelopes never enter feature metadata.
+/// Reported with the scoring plan; envelopes are calculated only when queried.
 #[derive(Debug, Clone, Serialize)]
 pub struct IsotopePlan {
     pub method: IsotopeMethod,
@@ -65,7 +68,7 @@ pub struct IsotopePlan {
     pub total_rows: usize,
     pub unavailable: BTreeMap<UnavailableReason, usize>,
     #[serde(skip)]
-    envelopes: RowValues<[f32; 3]>,
+    composition_counts: Option<RowValues<(u16, u16)>>,
 }
 
 impl IsotopePlan {
@@ -79,7 +82,7 @@ impl IsotopePlan {
             match result {
                 Ok(Ok(cs)) => {
                     composition_rows += 1;
-                    Some(cs)
+                    Some((cs.0 as u16, cs.1 as u16))
                 }
                 Ok(Err(reason)) => {
                     *unavailable.entry(reason).or_insert(0) += 1;
@@ -100,39 +103,42 @@ impl IsotopePlan {
         } else {
             IsotopeMethod::MassEstimatedCs
         };
-        let mut invalid_mass = None;
-        let envelopes = geom.map_rows(|row| match method {
-            IsotopeMethod::CompositionCs => {
-                let (c, s) = counts[row].expect("library plan promised C/S counts");
-                peptide_isotopes(c as u16, s as u16)
-            }
-            IsotopeMethod::MassEstimatedCs => {
-                // Stored geometry, never the synthetic variant's shifted mass.
+        if method == IsotopeMethod::MassEstimatedCs {
+            // Validate the model range before scoring, without making envelopes.
+            for row in geom.rows() {
                 let z = f64::from(geom.charge(row));
-                let envelope = isotope_dist_from_mass(geom.precursor_mz(row) * z - z * PROTON_MASS);
-                if !envelope.iter().all(|v| v.is_finite()) {
-                    invalid_mass = Some(format!(
+                let (c, s) = averagine_cs_from_mass(geom.precursor_mz(row) * z - z * PROTON_MASS);
+                if !model_finite(c, s) {
+                    return Err(format!(
                         "entry {}: precursor mass exceeds the C/S isotope model's numerical range",
                         geom.output_id(row)
                     ));
                 }
-                envelope
             }
-        });
-        if let Some(message) = invalid_mass {
-            return Err(message);
         }
+        let composition_counts = (method == IsotopeMethod::CompositionCs)
+            .then(|| geom.map_rows(|row| counts[row].expect("library plan promised C/S counts")));
         Ok(Self {
             method,
             composition_rows,
             total_rows,
             unavailable,
-            envelopes,
+            composition_counts,
         })
     }
 
-    pub(crate) fn envelope(&self, row: RowIdx) -> &[f32; 3] {
-        &self.envelopes[row]
+    pub(crate) fn envelope(&self, row: RowIdx, geom: &TargetColumns<IonAnnot>) -> [f32; 3] {
+        match &self.composition_counts {
+            Some(counts) => {
+                let (c, s) = counts[row];
+                peptide_isotopes(c, s)
+            }
+            None => {
+                // Stored geometry, never the synthetic variant's shifted mass.
+                let z = f64::from(geom.charge(row));
+                isotope_dist_from_mass(geom.precursor_mz(row) * z - z * PROTON_MASS)
+            }
+        }
     }
 }
 
@@ -289,14 +295,18 @@ fn elements_cs(elements: &[(Element, Option<std::num::NonZeroU16>, i32)]) -> Res
 fn valid_counts(cs: Counts) -> Resolution {
     if !(0..=i64::from(u16::MAX)).contains(&cs.0) || !(0..=i64::from(u16::MAX)).contains(&cs.1) {
         Err(UnavailableReason::InvalidCounts)
-    } else if !peptide_isotopes(cs.0 as u16, cs.1 as u16)
-        .iter()
-        .all(|v| v.is_finite())
-    {
+    } else if !model_finite(cs.0 as u16, cs.1 as u16) {
         Err(UnavailableReason::ModelRange)
     } else {
         Ok(cs)
     }
+}
+
+/// Below this rate, the zero-isotope product stays positive in f32. Check the
+/// exact model only for extreme counts near its underflow boundary.
+fn model_finite(c: u16, s: u16) -> bool {
+    let rate = c as f32 * 0.011 + s as f32 * (0.0076 + 0.044);
+    rate <= 80.0 || peptide_isotopes(c, s).iter().all(|v| v.is_finite())
 }
 
 #[cfg(test)]
@@ -479,6 +489,15 @@ mod tests {
 
     #[test]
     fn numerical_model_limits_are_checked() {
+        for c in [0, 1, 100, 1000, 5000, 7000, 9000, 12000, u16::MAX] {
+            for s in [0, 1, 10, 100, 500, 1000, 2000, u16::MAX] {
+                assert_eq!(
+                    model_finite(c, s),
+                    peptide_isotopes(c, s).iter().all(|v| v.is_finite()),
+                    "C={c} S={s}"
+                );
+            }
+        }
         assert_eq!(
             valid_counts((65536, 0)),
             Err(UnavailableReason::InvalidCounts)
