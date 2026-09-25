@@ -357,7 +357,8 @@ struct Degradation {
     peaks_over_the_label_ceiling: usize,
     rows_without_sequence: usize,
     rows_without_fragments: usize,
-    // RT availability is validated library-wide by the geometry builder.
+    // TargetColumnsBuilder checks RT consistency on insertion;
+    // seal rejects mixed availability or axes.
 }
 
 impl Degradation {
