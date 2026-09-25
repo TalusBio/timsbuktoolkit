@@ -630,9 +630,7 @@ impl ViewerCalibrationState {
             self.residuals.clone(),
             self.n_scored,
         )
-        .with_library_rt_axis(
-            serde_json::to_value(&self.library_rt_axis).map_err(|e| e.to_string())?,
-        )
+        .with_library_rt_axis(self.library_rt_axis.clone())
         .write(path)
     }
 
@@ -647,8 +645,7 @@ impl ViewerCalibrationState {
 
         let (saved, warning) = SavedCalibration::read(path, raw_rt_range)?;
 
-        self.library_rt_axis = serde_json::from_value(saved.library_rt_axis.clone())
-            .map_err(|e| format!("Invalid calibration RT axis: {e}"))?;
+        self.library_rt_axis = saved.library_rt_axis.clone();
 
         self.snapshot_points.clear();
         self.calibration_state = None;
