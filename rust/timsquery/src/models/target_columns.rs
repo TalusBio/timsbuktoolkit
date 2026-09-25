@@ -154,7 +154,7 @@ pub struct DecoyGroups {
 /// geom.push_row(Row {
 ///     precursor_mz: 900.4,
 ///     charge: 2,
-///     rt_seconds: 1.0,
+///     rt: Some(crate::models::RtCoordinate::seconds(1.0)),
 ///     mobility: 0.8,
 ///     frags: &frags,
 ///     analyte: Default::default(),
@@ -165,7 +165,7 @@ pub struct DecoyGroups {
 pub struct Row<'a, L: KeyLike> {
     pub precursor_mz: f64,
     pub charge: u8,
-    pub rt_seconds: f32,
+    pub rt: Option<crate::models::RtCoordinate<'a>>,
     pub mobility: f32,
     pub frags: &'a [(L, f64)],
     pub analyte: AnalyteInput<'a>,
@@ -201,7 +201,7 @@ impl<L: KeyLike> Default for Row<'_, L> {
         Self {
             precursor_mz: 0.0,
             charge: 0,
-            rt_seconds: 0.0,
+            rt: None,
             mobility: 0.0,
             frags: &[],
             analyte: AnalyteInput::default(),
@@ -219,6 +219,8 @@ pub enum TargetBuildError {
     Identity(#[from] SourceIdError),
     #[error("invalid analyte: {message}")]
     InvalidAnalyte { message: String },
+    #[error("invalid library RT: {message}")]
+    InvalidRt { message: String },
 }
 
 #[derive(Debug, Clone)]
@@ -229,7 +231,9 @@ pub struct TargetColumns<L: KeyLike> {
     // caller-supplied id (those live in `source_ids`)
     pub(crate) precursor_mz: Vec<f64>,
     pub(crate) charge: Vec<u8>,
-    pub(crate) rt_seconds: Vec<f32>,
+    pub(crate) rt_values: Vec<f32>,
+    pub(crate) rt_axis: crate::models::RtAxis,
+    pub(crate) rt_error: Option<String>,
     pub(crate) mobility: Vec<f32>,
     // per-row decoy flag (len = n_rows)
     pub(crate) is_decoy: Vec<bool>,
@@ -305,7 +309,9 @@ impl<L: KeyLike> TargetColumns<L> {
             decoy_resolution: None,
             precursor_mz: Vec::new(),
             charge: Vec::new(),
-            rt_seconds: Vec::new(),
+            rt_values: Vec::new(),
+            rt_axis: crate::models::RtAxis::Absent,
+            rt_error: None,
             mobility: Vec::new(),
             is_decoy: Vec::new(),
             pending_ids: Vec::new(),
@@ -326,7 +332,7 @@ impl<L: KeyLike> TargetColumns<L> {
         let Row {
             precursor_mz,
             charge,
-            rt_seconds,
+            rt,
             mobility,
             frags,
             analyte,
@@ -337,7 +343,16 @@ impl<L: KeyLike> TargetColumns<L> {
         } = row;
         self.precursor_mz.push(precursor_mz);
         self.charge.push(charge);
-        self.rt_seconds.push(rt_seconds);
+        let axis = rt.map_or(&crate::models::RtAxis::Absent, |r| r.axis);
+        if self.rt_values.is_empty() {
+            self.rt_axis = axis.clone();
+        } else if &self.rt_axis != axis {
+            self.rt_error = Some("mixed RT availability or incompatible axes; every retained entry must have RT on one axis, or none may have RT".into());
+        }
+        if rt.is_some_and(|r| !r.value.0.is_finite() || *r.axis == crate::models::RtAxis::Absent) {
+            self.rt_error = Some("present RT must be finite and have a non-absent axis".into());
+        }
+        self.rt_values.push(rt.map_or(0.0, |r| r.value.0));
         self.mobility.push(mobility);
         self.pending_ids.push(id);
         self.pending_groups.push(decoy_group);
@@ -509,8 +524,19 @@ impl<L: KeyLike> TargetColumns<L> {
         self.precursor_mz[tgt.get()]
     }
 
-    pub fn rt_seconds(&self, tgt: RowIdx) -> f32 {
-        self.rt_seconds[tgt.get()]
+    pub fn rt_axis(&self) -> &crate::models::RtAxis {
+        &self.rt_axis
+    }
+
+    pub fn rt(&self, tgt: RowIdx) -> Option<crate::models::RtCoordinate<'_>> {
+        (self.rt_axis != crate::models::RtAxis::Absent).then(|| crate::models::RtCoordinate {
+            value: calibrt::LibraryRT(self.rt_values[tgt.get()]),
+            axis: &self.rt_axis,
+        })
+    }
+
+    pub fn library_rt(&self, tgt: RowIdx) -> Option<calibrt::LibraryRT<f32>> {
+        self.rt(tgt).map(|r| r.value)
     }
 
     pub fn mobility(&self, tgt: RowIdx) -> f32 {
@@ -558,6 +584,9 @@ impl<L: KeyLike> TargetColumns<L> {
     where
         L: DecoyShift,
     {
+        if let Some(message) = self.rt_error.take() {
+            return Err(TargetBuildError::InvalidRt { message });
+        }
         assert_eq!(self.analytes.len(), self.n_rows());
         assert_eq!(self.entry_names.len(), self.n_rows());
         self.analytes
@@ -657,7 +686,7 @@ impl<L: KeyLike> TargetColumns<L> {
     fn shrink(&mut self) {
         self.precursor_mz.shrink_to_fit();
         self.charge.shrink_to_fit();
-        self.rt_seconds.shrink_to_fit();
+        self.rt_values.shrink_to_fit();
         self.mobility.shrink_to_fit();
         self.is_decoy.shrink_to_fit();
         self.frag_off.shrink_to_fit();
@@ -837,7 +866,7 @@ mod tests {
             c.push_row(Row {
                 precursor_mz: 500.0,
                 charge: spec.charge,
-                rt_seconds: 1.0,
+                rt: Some(crate::models::RtCoordinate::seconds(1.0)),
                 mobility: 0.8,
                 frags: &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
                 analyte: crate::chemistry::analyte::Analyte::from_sequence("PEP").as_input(),
@@ -934,7 +963,7 @@ mod tests {
             c.push_row(Row {
                 precursor_mz: 500.0,
                 charge: 2,
-                rt_seconds: 1.0,
+                rt: Some(crate::models::RtCoordinate::seconds(1.0)),
                 mobility: 0.8,
                 frags: &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
                 analyte: crate::chemistry::analyte::Analyte::from_sequence("PEP").as_input(),
@@ -986,7 +1015,7 @@ mod tests {
         c.push_row(Row {
             precursor_mz: 500.0,
             charge: 2,
-            rt_seconds: 1.0,
+            rt: Some(crate::models::RtCoordinate::seconds(1.0)),
             mobility: 0.8,
             frags: &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
             analyte: crate::chemistry::analyte::Analyte::from_sequence("PEP").as_input(),
@@ -1009,7 +1038,7 @@ mod tests {
         c.push_row(Row {
             precursor_mz: 500.0,
             charge: 2,
-            rt_seconds: 1.0,
+            rt: Some(crate::models::RtCoordinate::seconds(1.0)),
             mobility: 0.8,
             frags: &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
             analyte: crate::chemistry::analyte::Analyte::from_sequence("PEP").as_input(),
@@ -1018,7 +1047,7 @@ mod tests {
         c.push_row(Row {
             precursor_mz: 510.0,
             charge: 2,
-            rt_seconds: 1.0,
+            rt: Some(crate::models::RtCoordinate::seconds(1.0)),
             mobility: 0.8,
             frags: &[(IonAnnot::try_from("y3").unwrap(), 300.0)],
             analyte: crate::chemistry::analyte::Analyte::from_sequence("PEP").as_input(),
@@ -1042,7 +1071,7 @@ mod tests {
         c.push_row(Row {
             precursor_mz: 500.0,
             charge: 2,
-            rt_seconds: 1.0,
+            rt: Some(crate::models::RtCoordinate::seconds(1.0)),
             mobility: 0.8,
             frags: &[
                 (IonAnnot::try_from("y3").unwrap(), 300.0),
@@ -1054,7 +1083,7 @@ mod tests {
         c.push_row(Row {
             precursor_mz: 600.0,
             charge: 3,
-            rt_seconds: 2.0,
+            rt: Some(crate::models::RtCoordinate::seconds(2.0)),
             mobility: 0.9,
             frags: &[
                 (IonAnnot::try_from("y2").unwrap(), 200.0),
@@ -1093,7 +1122,7 @@ mod tests {
         c.push_row(Row {
             precursor_mz: 500.0,
             charge: 2,
-            rt_seconds: 1.0,
+            rt: Some(crate::models::RtCoordinate::seconds(1.0)),
             mobility: 0.8,
             frags: &[(Arc::<str>::from("frag_a"), 300.0)],
             analyte: crate::chemistry::analyte::Analyte::from_sequence("PEP").as_input(),
@@ -1102,7 +1131,7 @@ mod tests {
         c.push_row(Row {
             precursor_mz: 600.0,
             charge: 2,
-            rt_seconds: 1.0,
+            rt: Some(crate::models::RtCoordinate::seconds(1.0)),
             mobility: 0.8,
             frags: &[(Arc::<str>::from("frag_b"), 400.0)],
             analyte: crate::chemistry::analyte::Analyte::from_sequence("TIDE").as_input(),

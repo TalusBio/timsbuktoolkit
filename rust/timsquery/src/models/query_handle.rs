@@ -13,7 +13,7 @@ use crate::models::target_columns::{
 use crate::traits::{
     DecoyShift,
     KeyLike,
-    QueryGeom,
+    Target,
 };
 use crate::utils::constants::C13_C12_MASS_DIFF;
 
@@ -92,7 +92,7 @@ impl<Lib: Deref<Target = TargetColumns<L>>, L: KeyLike + DecoyShift> Query<Lib, 
     }
 }
 
-impl<Lib: Deref<Target = TargetColumns<L>>, L: KeyLike + DecoyShift> QueryGeom for Query<Lib, L> {
+impl<Lib: Deref<Target = TargetColumns<L>>, L: KeyLike + DecoyShift> Target for Query<Lib, L> {
     type Label = L;
 
     fn source_id(&self) -> Option<crate::models::SourceId<'_>> {
@@ -113,8 +113,8 @@ impl<Lib: Deref<Target = TargetColumns<L>>, L: KeyLike + DecoyShift> QueryGeom f
         self.geom().charge(self.row())
     }
 
-    fn rt_seconds(&self) -> f32 {
-        self.geom().rt_seconds(self.row())
+    fn rt(&self) -> Option<crate::models::RtCoordinate<'_>> {
+        self.geom().rt(self.row())
     }
 
     fn mobility_ook0(&self) -> f32 {
@@ -172,7 +172,7 @@ mod tests {
         TargetColumns,
         TargetColumnsBuilder,
     };
-    use crate::traits::QueryGeom;
+    use crate::traits::Target;
 
     /// Rows come from the arena; there is no constructor from an integer.
     fn first_row<L: KeyLike>(lib: &TargetColumns<L>) -> RowIdx {
@@ -200,7 +200,7 @@ mod tests {
         c.push_row(Row {
             precursor_mz: 654.855,
             charge: 2,
-            rt_seconds: 1.0,
+            rt: Some(crate::models::RtCoordinate::seconds(1.0)),
             mobility: 1.0,
             frags: &[
                 (IonAnnot::try_from("y1").unwrap(), 200.0), // ordinal 1 -> NOT shifted
@@ -293,7 +293,7 @@ mod tests {
         c.push_row(Row {
             precursor_mz: 500.0,
             charge: 2,
-            rt_seconds: 1.0,
+            rt: Some(crate::models::RtCoordinate::seconds(1.0)),
             mobility: 1.0,
             frags: &[(Arc::<str>::from("f"), 300.0)],
 

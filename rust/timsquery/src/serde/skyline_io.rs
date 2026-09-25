@@ -1,5 +1,5 @@
 use super::precursor_extras::PrecursorExtras;
-use crate::Target;
+use crate::OwnedTarget;
 use crate::ion::{
     IonAnnot,
     IonParsingError,
@@ -229,7 +229,7 @@ struct ParsingBuffers {
 
 pub fn read_targets<T: AsRef<Path>>(
     file: T,
-) -> Result<Vec<(Target<IonAnnot>, PrecursorExtras)>, SkylineReadingError> {
+) -> Result<Vec<(OwnedTarget<IonAnnot>, PrecursorExtras)>, SkylineReadingError> {
     let file_handle = std::fs::File::open(file.as_ref())?;
 
     let mut rdr = csv::ReaderBuilder::new()
@@ -282,7 +282,7 @@ fn parse_precursor_group(
     id: u64,
     rows: &[SkylineLibraryRow],
     buffers: &mut ParsingBuffers,
-) -> Result<Option<(Target<IonAnnot>, PrecursorExtras)>, SkylinePrecursorParsingError> {
+) -> Result<Option<(OwnedTarget<IonAnnot>, PrecursorExtras)>, SkylinePrecursorParsingError> {
     if rows.is_empty() {
         error!("Empty precursor group encountered on {id}");
         return Err(SkylinePrecursorParsingError::Other);
@@ -383,10 +383,11 @@ fn parse_precursor_group(
         relative_intensities,
     };
 
-    let eg = Target::builder()
+    let eg = OwnedTarget::builder()
         .id(id)
         .mobility_ook0(0.0)
-        .rt_seconds(0.0)
+        .rt_value(0.0)
+        .rt_axis(crate::models::RtAxis::Absent)
         .fragment_labels(buffers.fragment_labels.as_slice().into())
         .fragment_mzs(fragment_mzs)
         .precursor_labels(tiny_vec![0])

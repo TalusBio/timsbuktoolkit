@@ -171,7 +171,7 @@ impl Default for DerivationParams {
     }
 }
 
-/// A fitted RT calibration plus the tolerance windows measured alongside it.
+/// Independently calibrated dimensions, with an optional RT fit.
 ///
 /// The grid is the source of truth for the curve, the ridge widths and the points
 /// they came from. Taken by `&` on every scoring thread; nothing here refits.
@@ -179,16 +179,14 @@ pub struct CalibrationResult {
     state: CalibratedGrid,
     /// Fallback uniform RT tolerance, used where the grid measured no ridge.
     rt_tolerance_minutes: f32,
-    mz_tolerance_ppm: (f64, f64),
-    mobility_tolerance_pct: (f32, f32),
+    tolerance: Tolerance,
     errors: DimensionErrors,
     derivation: Option<DerivationParams>,
-    fallback: bool,
+    library_rt_axis: timsquery::RtAxis,
 }
 
 impl CalibrationResult {
-    /// Wrap a fitted grid. `Err` when the grid has no curve, which keeps
-    /// [`Self::convert_irt`] infallible.
+    /// Wrap a fitted grid. `Err` when the grid has no curve.
     pub fn new(
         state: CalibratedGrid,
         rt_tolerance_minutes: f32,
@@ -201,19 +199,60 @@ impl CalibrationResult {
         Ok(Self {
             state,
             rt_tolerance_minutes,
-            mz_tolerance_ppm,
-            mobility_tolerance_pct,
+            tolerance: Tolerance {
+                ms: MzTolerance::Ppm(mz_tolerance_ppm),
+                rt: RtTolerance::Unrestricted,
+                mobility: MobilityTolerance::Pct(mobility_tolerance_pct),
+                quad: QuadTolerance::Absolute((0.1, 0.1)),
+            },
             errors: DimensionErrors::default(),
             derivation: None,
-            fallback: false,
+            library_rt_axis: timsquery::RtAxis::Unspecified,
         })
     }
 
-    /// A fallback is an identity RT mapping rather than a measurement of this run.
-    /// It must not be persisted as a calibration: its two identity endpoints are
-    /// non-empty like any real fit, so a reader could not tell the file apart.
-    pub fn is_fallback(&self) -> bool {
-        self.fallback
+    /// Record the coordinate domain used when fitting this calibration.
+    pub fn with_rt_axis(mut self, axis: &timsquery::RtAxis) -> Self {
+        self.library_rt_axis = axis.clone();
+        self
+    }
+
+    pub fn has_rt_calibration(&self) -> bool {
+        self.state.curve().is_some()
+    }
+
+    /// Each axis with no measurements retains its configured extraction window.
+    pub fn from_measurements(
+        mut state: CalibratedGrid,
+        configured: &Tolerance,
+        errors: DimensionErrors,
+        derivation: DerivationParams,
+    ) -> Self {
+        if state.curve().is_none() {
+            state.reset();
+        }
+        let windows = errors.derive_windows(&derivation);
+        let mut tolerance = configured
+            .clone()
+            .with_rt_tolerance(RtTolerance::Unrestricted);
+        if errors.mz_ppm.n > 0 {
+            let mut bounds = windows.mz_ppm;
+            if let MzTolerance::Ppm(broad) = configured.ms {
+                bounds = (bounds.0.min(broad.0), bounds.1.min(broad.1));
+            }
+            tolerance.ms = MzTolerance::Ppm(bounds);
+        }
+        if errors.mobility_pct.n > 0 {
+            tolerance.mobility = MobilityTolerance::Pct(windows.mobility_pct);
+        }
+        Self {
+            state,
+            tolerance,
+            rt_tolerance_minutes: windows.rt_minutes,
+            errors,
+            derivation: Some(derivation),
+            library_rt_axis: timsquery::RtAxis::Unspecified,
+        }
     }
 
     /// The grid this was fit on -- the source for the curve, the ridge widths and
@@ -242,21 +281,24 @@ impl CalibrationResult {
         ridge_half_width_interp(self.state.ridge_widths(), library_rt.0)
     }
 
-    /// The fitted curve. Present for the lifetime of `self` -- [`Self::new`]
-    /// rejects a grid without one.
-    fn curve(&self) -> &RTCalibration {
-        self.state
+    /// Convert indexed RT to calibrated absolute RT (seconds).
+    pub fn convert_irt(&self, irt: LibraryRT<f32>) -> Result<ObservedRTSeconds<f32>, CalibRtError> {
+        match self
+            .state
             .curve()
-            .expect("CalibrationResult::new rejects a grid with no curve")
+            .ok_or(CalibRtError::NoPoints)?
+            .predict(LibraryRT(irt.0 as f64))
+        {
+            Ok(rt) => Ok(ObservedRTSeconds(rt.0 as f32)),
+            // calibrt reports its extrapolated observed value in this variant.
+            Err(CalibRtError::OutOfBounds(seconds)) => Ok(ObservedRTSeconds(seconds as f32)),
+            Err(err) => Err(err),
+        }
     }
 
-    /// Convert indexed RT to calibrated absolute RT (seconds).
-    pub fn convert_irt(&self, irt: LibraryRT<f32>) -> ObservedRTSeconds<f32> {
-        match self.curve().predict(LibraryRT(irt.0 as f64)) {
-            Ok(rt) => ObservedRTSeconds(rt.0 as f32),
-            Err(CalibRtError::OutOfBounds(rt)) => ObservedRTSeconds(rt as f32),
-            Err(_) => ObservedRTSeconds(irt.0),
-        }
+    /// Keep calibrated m/z and mobility windows without imposing an RT constraint.
+    pub fn unrestricted_rt_tolerance(&self) -> Tolerance {
+        self.tolerance.clone()
     }
 
     /// Derived RT tolerance in minutes.
@@ -275,27 +317,27 @@ impl CalibrationResult {
 
     /// Get per-query tolerance. Uses position-dependent ridge width when available,
     /// falls back to uniform `rt_tolerance_minutes` otherwise.
-    /// `rt` is the library RT in seconds (pre-calibration).
+    /// `rt` is a coordinate on the original library axis.
     pub fn get_tolerance(&self, _mz: f64, _mobility: f32, rt: LibraryRT<f32>) -> Tolerance {
         let rt_tol_minutes = match self.ridge_half_width_at(LibraryRT(rt.0 as f64)) {
             Some(half_width) => rt_tolerance_from_ridge(half_width, self.rt_floor_minutes()),
             None => self.rt_tolerance_minutes,
         };
 
-        Tolerance {
-            ms: MzTolerance::Ppm(self.mz_tolerance_ppm),
-            rt: RtTolerance::Minutes((rt_tol_minutes, rt_tol_minutes)),
-            mobility: MobilityTolerance::Pct(self.mobility_tolerance_pct),
-            quad: QuadTolerance::Absolute((0.1, 0.1)),
+        if !self.has_rt_calibration() {
+            return self.unrestricted_rt_tolerance();
         }
+        self.tolerance
+            .clone()
+            .with_rt_tolerance(RtTolerance::Minutes((rt_tol_minutes, rt_tol_minutes)))
     }
 
-    pub fn mz_tolerance(&self) -> (f64, f64) {
-        self.mz_tolerance_ppm
+    pub fn mz_tolerance(&self) -> &MzTolerance {
+        &self.tolerance.ms
     }
 
-    pub fn mobility_tolerance(&self) -> (f32, f32) {
-        self.mobility_tolerance_pct
+    pub fn mobility_tolerance(&self) -> &MobilityTolerance {
+        &self.tolerance.mobility
     }
 
     /// Summary of ridge width measurements for reporting.
@@ -305,18 +347,19 @@ impl CalibrationResult {
 
     /// Tolerance for the secondary spectral query at a detected apex.
     pub fn get_spectral_tolerance(&self) -> Tolerance {
-        Tolerance {
-            ms: MzTolerance::Ppm(self.mz_tolerance_ppm),
-            rt: RtTolerance::Minutes((0.5 / 60.0, 0.5 / 60.0)), // ~0.5 seconds
-            mobility: MobilityTolerance::Pct(self.mobility_tolerance_pct),
-            quad: QuadTolerance::Absolute((0.1, 0.1)),
-        }
+        self.tolerance
+            .clone()
+            .with_rt_tolerance(RtTolerance::Minutes((0.5 / 60.0, 0.5 / 60.0)))
     }
 
-    /// Tight mobility tolerance for isotope pattern matching.
+    /// Tight mobility refinement only when mobility calibration succeeded.
     pub fn get_isotope_tolerance(&self) -> Tolerance {
-        self.get_spectral_tolerance()
-            .with_mobility_tolerance(MobilityTolerance::Pct((3.0, 3.0)))
+        let tolerance = self.get_spectral_tolerance();
+        if self.errors.mobility_pct.n > 0 {
+            tolerance.with_mobility_tolerance(MobilityTolerance::Pct((3.0, 3.0)))
+        } else {
+            tolerance
+        }
     }
 
     /// Write the calibration where a viewer or the dashboard can read it.
@@ -337,37 +380,22 @@ impl CalibrationResult {
             Some(ResidualBlock {
                 errors: self.errors.clone(),
                 derivation: self.derivation.clone().unwrap_or_default(),
-                mz_ppm: [self.mz_tolerance_ppm.0, self.mz_tolerance_ppm.1],
-                mobility_pct: [
-                    self.mobility_tolerance_pct.0 as f64,
-                    self.mobility_tolerance_pct.1 as f64,
-                ],
+                tolerance: self.unrestricted_rt_tolerance(),
             }),
             n_scored,
         )
+        .with_library_rt_axis(self.library_rt_axis.clone())
         .write(path)
     }
 
-    /// Fallback when calibration fails: identity RT mapping, secondary tolerance.
+    /// No measured dimensions: preserve configured windows and search all RT.
     pub fn fallback<I: ScorerQueriable>(pipeline: &Scorer<I>) -> Self {
-        let range = pipeline.index.ms1_cycle_mapping().range_milis();
-        let start = range.0 as f64 / 1000.0;
-        let end = range.1 as f64 / 1000.0;
-        let mut state = CalibratedGrid::new(10, (start, end), (start, end), 10)
-            .expect("the run's own RT range is a valid grid geometry");
-        state
-            .update(
-                [start, end]
-                    .into_iter()
-                    .map(|rt| (LibraryRT(rt), ObservedRTSeconds(rt), CALIBRANT_WEIGHT)),
-            )
-            .expect("the identity endpoints are finite");
-        state.fit();
-
-        let mut out = Self::new(state, 1.0, (10.0, 10.0), (5.0, 5.0))
-            .expect("two identity endpoints always fit a two-point curve");
-        out.fallback = true;
-        out
+        Self::from_measurements(
+            CalibratedGrid::deferred(10, 10).expect("valid default grid geometry"),
+            &pipeline.broad_tolerance,
+            DimensionErrors::default(),
+            DerivationParams::default(),
+        )
     }
 }
 
@@ -380,8 +408,7 @@ pub type SavedCalibration = calibrt::SavedCalibration<ResidualBlock>;
 pub struct ResidualBlock {
     pub errors: DimensionErrors,
     pub derivation: DerivationParams,
-    pub mz_ppm: [f64; 2],
-    pub mobility_pct: [f64; 2],
+    pub tolerance: Tolerance,
 }
 
 /// Linearly interpolate the ridge half-width at a given library RT (seconds).
@@ -410,6 +437,78 @@ pub fn ridge_half_width_interp(widths: &[RidgeMeasurement], library_rt_s: f64) -
 mod tests {
     use super::*;
     use tempfile::TempDir;
+
+    #[test]
+    fn dimensions_calibrate_independently_and_missing_axes_keep_configuration() {
+        let configured = Tolerance {
+            ms: MzTolerance::Absolute((0.01, 0.02)),
+            mobility: MobilityTolerance::Unrestricted,
+            rt: RtTolerance::Minutes((1.0, 2.0)),
+            quad: QuadTolerance::Absolute((0.3, 0.4)),
+        };
+        for (mz, mob) in [(false, false), (true, false), (false, true), (true, true)] {
+            let errors = DimensionErrors {
+                mz_ppm: ErrorStats::from_slice(if mz { &[2.0, 3.0, 4.0] } else { &[] }),
+                mobility_pct: ErrorStats::from_slice(if mob { &[0.2, 0.3, 0.4] } else { &[] }),
+                ..Default::default()
+            };
+            let result = CalibrationResult::from_measurements(
+                CalibratedGrid::deferred(10, 3).unwrap(),
+                &configured,
+                errors,
+                DerivationParams::default(),
+            );
+            assert!(!result.has_rt_calibration());
+            assert!(result.convert_irt(LibraryRT(20.0)).is_err());
+            let primary = result.get_tolerance(500.0, 1.0, LibraryRT(20.0));
+            assert_eq!(primary.rt, RtTolerance::Unrestricted);
+            assert_eq!(primary.quad, configured.quad);
+            if mz {
+                assert!(matches!(primary.ms, MzTolerance::Ppm(_)));
+            } else {
+                assert_eq!(primary.ms, configured.ms);
+            }
+            if mob {
+                assert!(matches!(primary.mobility, MobilityTolerance::Pct(_)));
+            } else {
+                assert_eq!(primary.mobility, configured.mobility);
+            }
+            let secondary = result.get_spectral_tolerance();
+            assert_eq!(secondary.ms, primary.ms);
+            assert_eq!(secondary.mobility, primary.mobility);
+            assert_eq!(secondary.quad, primary.quad);
+            if !mob {
+                assert_eq!(result.get_isotope_tolerance().mobility, configured.mobility);
+            }
+            let dir = TempDir::new().unwrap();
+            let path = dir.path().join("calibration.json");
+            result.save_json([0.0, 600.0], 10, &path).unwrap();
+            let (saved, _) = SavedCalibration::read(&path, None).unwrap();
+            assert!(saved.calibration.points.is_empty());
+            let residuals = saved.residuals.unwrap();
+            assert_eq!(residuals.tolerance.ms, primary.ms);
+            assert_eq!(residuals.tolerance.mobility, primary.mobility);
+            assert_eq!(residuals.errors.mz_ppm.n, if mz { 3 } else { 0 });
+        }
+    }
+
+    #[test]
+    fn measured_mz_window_stays_inside_configured_ppm_window() {
+        let configured = Tolerance {
+            ms: MzTolerance::Ppm((8.0, 15.0)),
+            ..Tolerance::default()
+        };
+        let result = CalibrationResult::from_measurements(
+            CalibratedGrid::deferred(10, 3).unwrap(),
+            &configured,
+            DimensionErrors {
+                mz_ppm: ErrorStats::from_slice(&[-60.0, 0.0, 60.0]),
+                ..Default::default()
+            },
+            DerivationParams::default(),
+        );
+        assert_eq!(*result.mz_tolerance(), configured.ms);
+    }
 
     /// A curve with enough spread that the grid fit is non-degenerate, plus ridge
     /// widths and tolerances distinct from every default, so a field silently
@@ -458,8 +557,25 @@ mod tests {
     /// the curve and the ridge widths. Walks a reader's real path:
     /// `read` -> `from_snapshot` -> `new`.
     #[test]
+    fn unavailable_calibration_never_reinterprets_the_input_as_seconds() {
+        let mut calibration = sample_calibration();
+        calibration.state = CalibratedGrid::deferred(10, 3).unwrap();
+        assert!(matches!(
+            calibration.convert_irt(LibraryRT(-20.0)),
+            Err(CalibRtError::NoPoints)
+        ));
+        assert!(matches!(
+            calibration.convert_irt(LibraryRT(0.0)),
+            Err(CalibRtError::NoPoints)
+        ));
+    }
+
+    #[test]
     fn a_saved_snapshot_refits_to_the_same_calibration() {
-        let original = sample_calibration();
+        let axis = timsquery::RtAxis::NormalizedIndex {
+            scale: Some("test-reference".into()),
+        };
+        let original = sample_calibration().with_rt_axis(&axis);
         let dir = save_fixture(&original);
         let path = dir.path().join("calibration.json");
 
@@ -469,11 +585,16 @@ mod tests {
             "the fixture's RT range is the one it claims: {warning:?}"
         );
 
+        assert_eq!(saved.library_rt_axis, axis);
+
         let residuals = saved
             .residuals
             .expect("a search's calibration carries its residuals");
-        assert_eq!(residuals.mz_ppm, [7.5, 8.5]);
-        assert_eq!(residuals.mobility_pct, [2.5, 3.5]);
+        assert_eq!(residuals.tolerance.ms, MzTolerance::Ppm((7.5, 8.5)));
+        assert_eq!(
+            residuals.tolerance.mobility,
+            MobilityTolerance::Pct((2.5, 3.5))
+        );
         assert_eq!(
             residuals.errors.rt_seconds.n,
             original.errors().rt_seconds.n
@@ -482,16 +603,9 @@ mod tests {
         let refit = CalibratedGrid::from_snapshot(&saved.calibration).unwrap();
         assert_eq!(refit.fit_points(), original.state().fit_points());
 
-        let reloaded = CalibrationResult::new(
-            refit,
-            saved.rt_tolerance_minutes,
-            (residuals.mz_ppm[0], residuals.mz_ppm[1]),
-            (
-                residuals.mobility_pct[0] as f32,
-                residuals.mobility_pct[1] as f32,
-            ),
-        )
-        .unwrap();
+        let reloaded =
+            CalibrationResult::new(refit, saved.rt_tolerance_minutes, (7.5, 8.5), (2.5, 3.5))
+                .unwrap();
 
         // The ridge was refit, not read back, so matching it is the claim that the
         // persisted points and geometry reproduce the grid they came from.
@@ -517,8 +631,14 @@ mod tests {
                 rt.0
             );
             assert_eq!(
-                reloaded.convert_irt(rt).0,
-                original.convert_irt(rt).0,
+                reloaded
+                    .convert_irt(rt)
+                    .map(|v| v.0)
+                    .map_err(|e| format!("{e:?}")),
+                original
+                    .convert_irt(rt)
+                    .map(|v| v.0)
+                    .map_err(|e| format!("{e:?}")),
                 "RT conversion mismatch at library RT {}",
                 rt.0
             );
@@ -601,6 +721,7 @@ mod tests {
             r#"{{
               "version": "{version}",
               "rt_range_seconds": [0.0, 1200.0],
+              "library_rt_axis": {{"kind": "seconds"}},
               "calibration": {{
                 "points": [[0.0, 30.0, 1.0], [100.0, 200.0, 1.0],
                            [200.0, 370.0, 1.0], [300.0, 540.0, 1.0]],
@@ -639,6 +760,9 @@ mod tests {
         let dir = write_foreign("v2");
         let err = SavedCalibration::read(&dir.path().join("calibration.json"), Some([0.0, 1200.0]))
             .unwrap_err();
-        assert!(err.contains("v2") && err.contains("v3"), "{err}");
+        assert!(
+            err.contains("v2") && err.contains(CALIBRATION_FORMAT_VERSION),
+            "{err}"
+        );
     }
 }

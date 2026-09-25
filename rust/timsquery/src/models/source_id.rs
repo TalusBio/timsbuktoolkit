@@ -69,7 +69,7 @@ impl OwnedSourceId {
     }
 
     /// Overwrite in place, reusing the existing `String` capacity when both
-    /// sides are text. `Target::reset_from` runs per query on the scoring hot
+    /// sides are text. `OwnedTarget::reset_from` runs per query on the scoring hot
     /// path, so a fresh allocation there is a per-query cost.
     pub fn set_from(&mut self, src: SourceId<'_>) {
         match (&mut *self, src) {
@@ -102,7 +102,7 @@ impl From<&str> for OwnedSourceId {
 
 impl OwnedSourceId {
     /// The id of a scratch buffer that has not been filled yet (see
-    /// [`crate::Target::empty_like`]).
+    /// [`crate::OwnedTarget::empty_like`]).
     ///
     /// Allocates nothing: an empty `String` owns no buffer until something is
     /// pushed into it, and [`Self::set_from`] then grows it once -- exactly what

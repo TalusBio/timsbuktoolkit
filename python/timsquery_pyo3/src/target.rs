@@ -1,5 +1,5 @@
 use pyo3::prelude::*;
-use timsquery::Target;
+use timsquery::OwnedTarget;
 use timsquery::tinyvec::tiny_vec;
 
 /// A query target consists of one precursor and its fragments.
@@ -11,7 +11,7 @@ use timsquery::tinyvec::tiny_vec;
 #[pyclass(skip_from_py_object)]
 #[derive(Debug, Clone)]
 pub struct PyTarget {
-    pub(crate) inner: Target<usize>,
+    pub(crate) inner: OwnedTarget<usize>,
 }
 
 #[pymethods]
@@ -22,7 +22,7 @@ impl PyTarget {
     ///     id: Numeric source ID for this target.
     ///     precursor_mz: Monoisotopic precursor m/z.
     ///     precursor_charge: Charge state.
-    ///     rt_seconds: Expected retention time in seconds.
+    ///     rt_seconds: Expected retention time on the queried acquisition, in seconds.
     ///     mobility: Expected ion mobility (1/K0).
     ///     fragment_mzs: List of fragment m/z values.
     ///     fragment_labels: List of integer labels (one per fragment, same length as fragment_mzs).
@@ -45,11 +45,11 @@ impl PyTarget {
         };
         let fragment_labels_tv = fragment_labels.into_iter().collect();
 
-        let target = Target::builder()
+        let target = OwnedTarget::builder()
             .id(id)
             .precursor(precursor_mz, precursor_charge)
             .mobility_ook0(mobility)
-            .rt_seconds(rt_seconds)
+            .rt_value(rt_seconds)
             .fragment_mzs(fragment_mzs)
             .fragment_labels(fragment_labels_tv)
             .precursor_labels(precursor_labels_tv)
@@ -75,8 +75,26 @@ impl PyTarget {
     }
 
     #[getter]
-    fn rt_seconds(&self) -> f32 {
-        self.inner.rt_seconds()
+    fn rt_seconds(&self) -> Option<f32> {
+        self.inner
+            .rt()
+            .filter(|rt| *rt.axis == timsquery::RtAxis::Seconds)
+            .map(|rt| rt.value.0)
+    }
+
+    #[getter]
+    fn library_rt(&self) -> Option<f32> {
+        self.inner.rt().map(|rt| rt.value.0)
+    }
+
+    #[getter]
+    fn rt_axis(&self) -> &'static str {
+        match self.inner.rt().map(|rt| rt.axis) {
+            None => "absent",
+            Some(timsquery::RtAxis::Seconds) => "seconds",
+            Some(timsquery::RtAxis::NormalizedIndex { .. }) => "normalized_index",
+            _ => "unspecified",
+        }
     }
 
     #[getter]
@@ -96,11 +114,12 @@ impl PyTarget {
 
     fn __repr__(&self) -> String {
         format!(
-            "Target(id={}, mz={:.4}, charge={}, rt={:.1}s, mob={:.3}, frags={}, precs={})",
+            "Target(id={}, mz={:.4}, charge={}, rt={:?} ({}), mob={:.3}, frags={}, precs={})",
             self.inner.id(),
             self.inner.precursor_mz(),
             self.inner.precursor_charge(),
-            self.inner.rt_seconds(),
+            self.library_rt(),
+            self.rt_axis(),
             self.inner.mobility_ook0(),
             self.inner.fragment_count(),
             self.inner.precursor_count(),

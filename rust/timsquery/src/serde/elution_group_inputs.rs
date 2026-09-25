@@ -2,13 +2,14 @@ use crate::ion::{
     IonAnnot,
     UnknownIonCounter,
 };
+use crate::models::target::legacy_rt_axis;
 use crate::tinyvec::{
     TinyVec,
     tiny_vec,
 };
 use crate::{
     KeyLike,
-    Target,
+    OwnedTarget,
 };
 
 #[derive(Debug)]
@@ -35,6 +36,8 @@ pub struct ElutionGroupInput<T: KeyLike> {
     pub id: u64,
     pub mobility: f32,
     pub rt_seconds: f32,
+    #[serde(default = "legacy_rt_axis")]
+    pub rt_axis: crate::RtAxis,
     #[serde(alias = "precursor_mz")]
     #[serde(alias = "precursor_mono_mz")]
     pub precursor: f64,
@@ -67,6 +70,7 @@ impl<T: KeyLike> ElutionGroupInput<T> {
             id: self.id,
             mobility: self.mobility,
             rt_seconds: self.rt_seconds,
+            rt_axis: self.rt_axis,
             precursor: self.precursor,
             precursor_charge: self.precursor_charge,
             precursor_isotopes: self.precursor_isotopes,
@@ -95,6 +99,7 @@ impl<T: KeyLike> ElutionGroupInput<T> {
             id: self.id,
             mobility: self.mobility,
             rt_seconds: self.rt_seconds,
+            rt_axis: self.rt_axis,
             precursor: self.precursor,
             precursor_charge: self.precursor_charge,
             precursor_isotopes: self.precursor_isotopes,
@@ -104,14 +109,15 @@ impl<T: KeyLike> ElutionGroupInput<T> {
     }
 }
 
-impl<T: KeyLike, U: TryInto<T> + KeyLike> TryFrom<ElutionGroupInput<U>> for Target<T> {
+impl<T: KeyLike, U: TryInto<T> + KeyLike> TryFrom<ElutionGroupInput<U>> for OwnedTarget<T> {
     type Error = ElutionGroupInputError;
 
     fn try_from(val: ElutionGroupInput<U>) -> Result<Self, Self::Error> {
-        let builder = Target::builder()
+        let builder = OwnedTarget::builder()
             .id(val.id)
             .mobility_ook0(val.mobility)
-            .rt_seconds(val.rt_seconds)
+            .rt_value(val.rt_seconds)
+            .rt_axis(val.rt_axis)
             .precursor(val.precursor, val.precursor_charge)
             .precursor_labels(if let Some(isotopes) = val.precursor_isotopes {
                 TinyVec::Heap(isotopes.into_iter().collect())

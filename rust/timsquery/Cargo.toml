@@ -8,6 +8,7 @@ license.workspace = true
 
 # Workspace member deps
 array2d = { path = "../array2d" }
+calibrt = { path = "../calibrt" }
 timscentroid = { path = "../timscentroid" }
 micromzpaf = { path = "../micromzpaf" }
 tims_stage = { path = "../tims_stage" }

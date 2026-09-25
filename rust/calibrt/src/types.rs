@@ -4,13 +4,39 @@ use serde::{
 };
 use std::fmt;
 
+/// Coordinate domain of the library used to fit a calibration.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "kind", rename_all = "snake_case")]
+pub enum RtAxis {
+    #[default]
+    Absent,
+    Seconds,
+    NormalizedIndex {
+        scale: Option<String>,
+    },
+    Unspecified,
+}
+
+impl std::fmt::Display for RtAxis {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Absent => f.write_str("no RT"),
+            Self::Seconds => f.write_str("s"),
+            Self::NormalizedIndex { scale: Some(scale) } => write!(f, "index ({scale})"),
+            Self::NormalizedIndex { scale: None } => f.write_str("index"),
+            Self::Unspecified => f.write_str("unspecified units"),
+        }
+    }
+}
+
 /// Library reference retention time. Unit-agnostic -- could be iRT, minutes,
 /// or arbitrary units depending on the spectral library.
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct LibraryRT<T>(pub T);
 
-/// Observed retention time from raw instrument data, always in seconds.
+/// Retention time on an acquisition axis, always in seconds.
+/// May be a calibrated prediction, an explicit query center, or a measured apex.
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ObservedRTSeconds<T>(pub T);

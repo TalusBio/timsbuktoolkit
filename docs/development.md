@@ -31,6 +31,41 @@ q-value columns (`result_mode=raw` Parquet metadata). It bypasses calibration,
 rescoring and q-value filtering. Supplied decoys do not by themselves validate a
 decoy strategy for a new analyte class.
 
+Library RT is declared once per library: seconds, normalized index, unspecified
+coordinates, or absent. Measured minutes convert to seconds; normalized indices
+retain their values, including zero and negative values. Declared normalized-scale
+metadata is preserved from mzSpecLib headers and prediction provenance; records
+select the actual axis. Mixed RT availability or
+axes are rejected. An RT-free library searches unrestricted on RT, omits RT
+prediction/residual features, and retains decoy competition, rescoring and q-values
+when decoys are available. RT, m/z and mobility calibrate independently. Without
+an RT fit, score-selected apexes still supply m/z and mobility measurements,
+without ridge filtering. RT-free prescoring retains bounded candidates across
+observed RT bands. Mobility calibration requires a searchable run axis; FAIMS and
+absent mobility do not contribute sentinel measurements. An axis without measurements keeps its configured tolerance
+in primary and secondary extraction. A failed RT fit never reinterprets an index
+as seconds; initial extraction searches unrestricted RT. Secondary queries still
+center on detected apex RT and observed mobility.
+
+Results format 5 includes `library_rt_axis` Parquet metadata. Unavailable library
+RT, calibrated RT and RT residuals are NaN; observed apex RT remains seconds.
+Calibration format v4 records the input library axis and effective tolerance
+enums; an empty RT snapshot means no RT fit, while residuals can still contain
+m/z and mobility calibration. Older calibration files
+must be regenerated. Explicit `rt_seconds` JSON/Python inputs remain seconds. JSON `rt_axis` is
+preserved whether optional precursor/fragment labels are supplied or filled in.
+Rust source geometry exposes `LibraryRT<f32>` through `Target` and `OwnedTarget`.
+`ExtractionQuery` borrows that geometry with a separately resolved acquisition
+window. `RtSelection::Centered(ObservedRTSeconds(...))` or `FullRun` resolves
+against the acquisition extent once. Collectors copy that window and reuse their
+geometry/intensity buffers; they retain no source borrow. Index queries accept
+`PeakTolerance` for m/z, mobility and quadrupole only. Isotope extraction shifts
+collector buffers directly, without an owned target or library-axis clone.
+The viewer searches full-run without an RT fit, including libraries measured in
+seconds. Direct-query CLI restricted RT inputs explicitly mean acquisition
+seconds; normalized library indices require calibration first. Python target
+`rt_seconds` likewise specifies an acquisition coordinate.
+
 `run_report.json` records the resolved `scoring_plan` once for the search library,
 plus `calibration_scoring_plan` when a separate calibration library is supplied.
 These are the same plans serialized in Parquet metadata: sequence-operation
@@ -49,7 +84,7 @@ intensities, so those reader routes remain extraction-only.
 Standalone `calib_dash` reads saved `calibration.json`, not a spectral library.
 
 [Analyte module documentation](../rust/timsquery/src/chemistry/analyte.rs) documents chemistry storage, reader mappings,
-library-wide sequence eligibility, and results format version 4.
+library-wide sequence eligibility, and results format version 5.
 
 Precursor isotope envelopes retain the three-bin C/S approximation. Scoring
 finalization includes known modification C/S deltas or an explicitly based

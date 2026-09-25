@@ -62,7 +62,7 @@ fn carafe_target_payload_loads_through_the_public_reader() {
     let row = geom.rows().next().unwrap();
     assert_eq!(geom.precursor_mz(row), 650.32);
     assert_eq!(geom.charge(row), 2);
-    assert_eq!(geom.rt_seconds(row), 1234.5);
+    assert_eq!(geom.library_rt(row).map(|rt| rt.0).unwrap(), 1234.5);
     assert_eq!(geom.mobility(row), 0.95);
 
     // Positionally paired with the m/z values; the `^N` suffix survives.

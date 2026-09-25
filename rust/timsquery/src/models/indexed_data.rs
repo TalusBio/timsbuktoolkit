@@ -7,10 +7,8 @@
 //!
 //! The query pattern follows these steps:
 //!
-//! 1. **Tolerance Application**: The [`Tolerance`] struct defines search windows
-//!    for m/z, retention time, ion mobility, and quadrupole isolation
-//! 2. **Range Calculation**: For each dimension, calculate the query range based
-//!    on the target value and tolerance (e.g., `mz ± ppm` or `rt ± minutes`)
+//! 1. [`PeakTolerance`] defines m/z, mobility, and quadrupole windows.
+//! 2. RT bounds come from the collector's resolved acquisition window.
 //! 3. **Peak Filtering**: Query the indexed data structure for peaks within all ranges
 //! 4. **Aggregation**: Accumulate filtered peaks into the aggregator (sum intensities,
 //!    build profiles, compute statistics, etc.)
@@ -78,7 +76,7 @@ use crate::traits::{
 use crate::{
     KeyLike,
     OptionallyRestricted,
-    Tolerance,
+    PeakTolerance,
 };
 use half::f16;
 use timscentroid::rt_mapping::{
@@ -139,7 +137,7 @@ impl QueryRanges {
     /// Compute query ranges from query data + tolerance.
     fn from_query_data<FH: KeyLike>(
         query: &impl crate::traits::queriable_data::HasQueryData<FH>,
-        tolerance: &Tolerance,
+        tolerance: &PeakTolerance,
         run_mobility: &MobilityKind,
         rt_ms_to_cycle: impl Fn(u32) -> MS1CycleIndex,
     ) -> Self {
@@ -151,13 +149,11 @@ impl QueryRanges {
         } else {
             Unrestricted
         };
-        let rt_range_milliseconds = tolerance.rt_range_as_milis(query.rt_seconds());
-        let ms1_cycle_range = match rt_range_milliseconds {
-            Restricted(x) => Restricted(
-                TupleRange::try_new(rt_ms_to_cycle(x.start()), rt_ms_to_cycle(x.end())).unwrap(),
-            ),
-            Unrestricted => Unrestricted,
-        };
+        let rt = query.rt().range_millis();
+        let ms1_cycle_range = Restricted(
+            TupleRange::try_new(rt_ms_to_cycle(rt.start()), rt_ms_to_cycle(rt.end()))
+                .expect("resolved RT bounds are ordered"),
+        );
         let ms2_cycle_range = ms1_to_ms2_cycle_range(&ms1_cycle_range);
 
         Self {
@@ -166,50 +162,6 @@ impl QueryRanges {
             ms1_cycle_range,
             ms2_cycle_range,
         }
-    }
-
-    /// Compute query ranges with RT intersection (for ChromatogramCollector's
-    /// pre-scoped rt_range_ms window). Returns None if the RT ranges don't
-    /// intersect -- caller early-exits.
-    fn from_query_data_with_rt_intersection<FH: KeyLike>(
-        query: &impl crate::traits::queriable_data::HasQueryData<FH>,
-        tolerance: &Tolerance,
-        run_mobility: &MobilityKind,
-        rt_limits_milis: TupleRange<u32>,
-        rt_ms_to_cycle: impl Fn(u32) -> MS1CycleIndex,
-    ) -> Option<Self> {
-        let prec_mz_limits = query.precursor_mz_limits();
-        let quad_range =
-            tolerance.quad_range_f32((prec_mz_limits.0 as f32, prec_mz_limits.1 as f32));
-        let im_range = if im_axis_filterable(run_mobility, &query.mobility_kind()) {
-            tolerance.mobility_range_f16(query.mobility_ook0())
-        } else {
-            Unrestricted
-        };
-
-        let rt_range_milliseconds = match tolerance
-            .rt_range_as_milis(query.rt_seconds())
-            .map(|x| x.try_intercept(rt_limits_milis))
-        {
-            Restricted(Some(x)) => Restricted(x),
-            Restricted(None) => return None,
-            Unrestricted => Unrestricted,
-        };
-
-        let ms1_cycle_range = match rt_range_milliseconds {
-            Restricted(x) => Restricted(
-                TupleRange::try_new(rt_ms_to_cycle(x.start()), rt_ms_to_cycle(x.end())).unwrap(),
-            ),
-            Unrestricted => Unrestricted,
-        };
-        let ms2_cycle_range = ms1_to_ms2_cycle_range(&ms1_cycle_range);
-
-        Some(Self {
-            quad_range,
-            im_range,
-            ms1_cycle_range,
-            ms2_cycle_range,
-        })
     }
 
     /// Constrain the IM range based on quadrupole isolation geometry.
@@ -236,7 +188,7 @@ impl QueryRanges {
 }
 
 impl<FH: KeyLike> QueriableData<PointIntensityAggregator<FH>> for IndexedTimstofPeaks {
-    fn add_query(&self, aggregator: &mut PointIntensityAggregator<FH>, tolerance: &Tolerance) {
+    fn add_query(&self, aggregator: &mut PointIntensityAggregator<FH>, tolerance: &PeakTolerance) {
         let ranges =
             QueryRanges::from_query_data(aggregator, tolerance, self.mobility_kind(), |rt| {
                 self.rt_ms_to_cycle_index(rt)
@@ -269,16 +221,15 @@ impl<FH: KeyLike> QueriableData<PointIntensityAggregator<FH>> for IndexedTimstof
 }
 
 impl<FH: KeyLike> QueriableData<ChromatogramCollector<FH, f32>> for IndexedTimstofPeaks {
-    fn add_query(&self, aggregator: &mut ChromatogramCollector<FH, f32>, tolerance: &Tolerance) {
-        let Some(ranges) = QueryRanges::from_query_data_with_rt_intersection(
-            aggregator,
-            tolerance,
-            self.mobility_kind(),
-            aggregator.rt_range_milis(),
-            |rt| self.rt_ms_to_cycle_index(rt),
-        ) else {
-            return; // No RT intersection, early exit
-        };
+    fn add_query(
+        &self,
+        aggregator: &mut ChromatogramCollector<FH, f32>,
+        tolerance: &PeakTolerance,
+    ) {
+        let ranges =
+            QueryRanges::from_query_data(aggregator, tolerance, self.mobility_kind(), |rt| {
+                self.rt_ms_to_cycle_index(rt)
+            });
 
         // Locally-accumulated counters: incrementing aggregator fields inside
         // `iter_mut_*` would conflict with the mutable borrow; write back once
@@ -334,7 +285,7 @@ impl<FH: KeyLike> QueriableData<ChromatogramCollector<FH, f32>> for IndexedTimst
 }
 
 impl<FH: KeyLike> QueriableData<SpectralCollector<FH, f32>> for IndexedTimstofPeaks {
-    fn add_query(&self, aggregator: &mut SpectralCollector<FH, f32>, tolerance: &Tolerance) {
+    fn add_query(&self, aggregator: &mut SpectralCollector<FH, f32>, tolerance: &PeakTolerance) {
         let ranges =
             QueryRanges::from_query_data(aggregator, tolerance, self.mobility_kind(), |rt| {
                 self.rt_ms_to_cycle_index(rt)
@@ -375,7 +326,7 @@ impl<FH: KeyLike> QueriableData<SpectralCollector<FH, f32>> for IndexedTimstofPe
 impl<FH: KeyLike, V: PeakAddable<MS1CycleIndex> + PeakAddable<WindowCycleIndex>>
     QueriableData<SpectralCollector<FH, V>> for IndexedTimstofPeaks
 {
-    fn add_query(&self, aggregator: &mut SpectralCollector<FH, V>, tolerance: &Tolerance) {
+    fn add_query(&self, aggregator: &mut SpectralCollector<FH, V>, tolerance: &PeakTolerance) {
         let ranges =
             QueryRanges::from_query_data(aggregator, tolerance, self.mobility_kind(), |rt| {
                 self.rt_ms_to_cycle_index(rt)
@@ -432,7 +383,11 @@ fn ms1_to_ms2_cycle_range(
 }
 
 impl<FH: KeyLike> QueriableData<ChromatogramCollector<FH, f32>> for IndexedPeaksHandle {
-    fn add_query(&self, aggregator: &mut ChromatogramCollector<FH, f32>, tolerance: &Tolerance) {
+    fn add_query(
+        &self,
+        aggregator: &mut ChromatogramCollector<FH, f32>,
+        tolerance: &PeakTolerance,
+    ) {
         match self {
             IndexedPeaksHandle::Eager(eager) => {
                 // Delegate to existing implementation
@@ -440,15 +395,12 @@ impl<FH: KeyLike> QueriableData<ChromatogramCollector<FH, f32>> for IndexedPeaks
             }
             IndexedPeaksHandle::Lazy(lazy) => {
                 // Use QueryRanges to compute common tolerances, then convert to u32 for lazy API
-                let Some(ranges) = QueryRanges::from_query_data_with_rt_intersection(
+                let ranges = QueryRanges::from_query_data(
                     aggregator,
                     tolerance,
                     lazy.mobility_kind(),
-                    aggregator.rt_range_milis(),
                     |rt| lazy.rt_ms_to_cycle_index(rt),
-                ) else {
-                    return; // No RT intersection, early exit
-                };
+                );
 
                 // Convert MS1CycleIndex ranges to u32 for lazy API
                 let cycle_range_u32 = match ranges.ms1_cycle_range {
@@ -519,7 +471,7 @@ impl<FH: KeyLike> QueriableData<ChromatogramCollector<FH, f32>> for IndexedPeaks
 }
 
 impl<FH: KeyLike> QueriableData<SpectralCollector<FH, f32>> for IndexedPeaksHandle {
-    fn add_query(&self, aggregator: &mut SpectralCollector<FH, f32>, tolerance: &Tolerance) {
+    fn add_query(&self, aggregator: &mut SpectralCollector<FH, f32>, tolerance: &PeakTolerance) {
         match self {
             IndexedPeaksHandle::Eager(eager) => eager.add_query(aggregator, tolerance),
             IndexedPeaksHandle::Lazy(lazy) => {
@@ -574,7 +526,7 @@ impl<FH: KeyLike> QueriableData<SpectralCollector<FH, MzMobilityStatsCollector>>
     fn add_query(
         &self,
         aggregator: &mut SpectralCollector<FH, MzMobilityStatsCollector>,
-        tolerance: &Tolerance,
+        tolerance: &PeakTolerance,
     ) {
         match self {
             IndexedPeaksHandle::Eager(eager) => eager.add_query(aggregator, tolerance),
@@ -669,10 +621,10 @@ mod mobility_gate_tests {
 
     #[test]
     fn ctor_unrestricts_im_range_for_non_ook0_run() {
-        use crate::Tolerance;
+        use crate::PeakTolerance;
         use crate::models::aggregators::PointIntensityAggregator;
         use crate::models::indexed_data::QueryRanges;
-        use crate::models::target::Target;
+        use crate::models::target::OwnedTarget;
         use timscentroid::rt_mapping::{
             MS1CycleIndex,
             RTIndex,
@@ -680,18 +632,30 @@ mod mobility_gate_tests {
         use timscentroid::utils::OptionallyRestricted;
         use tinyvec::tiny_vec;
 
-        let eg = Target::<usize>::builder()
+        let eg = OwnedTarget::<usize>::builder()
             .id(1)
             .mobility_ook0(0.8)
-            .rt_seconds(100.0)
+            .rt_value(100.0)
             .precursor(400.0, 1u8)
             .precursor_labels(tiny_vec!(0))
             .fragment_mzs(vec![600.0])
             .fragment_labels(tiny_vec!(0usize))
             .try_build()
             .unwrap();
-        let agg = PointIntensityAggregator::new(&eg);
-        let tol = Tolerance::default(); // mobility = Pct((3,3)) => Restricted for a finite value
+        let agg = PointIntensityAggregator::new(&crate::ExtractionQuery::new(
+            &eg,
+            crate::ResolvedRt::resolve(
+                crate::RtSelection::FullRun,
+                &crate::models::tolerance::RtTolerance::Unrestricted,
+                crate::TupleRange::try_new(
+                    crate::ObservedRTSeconds(0.009),
+                    crate::ObservedRTSeconds(0.020),
+                )
+                .unwrap(),
+            )
+            .unwrap(),
+        ));
+        let tol = PeakTolerance::default(); // mobility = Pct((3,3)) => Restricted for a finite value
 
         // Ook0 run against the default Ook0 library => mobility filter is applied.
         let r = QueryRanges::from_query_data(&agg, &tol, &MobilityKind::Ook0, |_| {
@@ -704,5 +668,57 @@ mod mobility_gate_tests {
             MS1CycleIndex::new(0)
         });
         assert!(matches!(r.im_range, OptionallyRestricted::Unrestricted));
+    }
+    #[test]
+    fn index_uses_resolved_bounds_even_when_source_seconds_differ() {
+        use super::QueryRanges;
+        use crate::models::aggregators::SpectralCollector;
+        use crate::models::tolerance::RtTolerance;
+        use crate::{
+            ExtractionQuery,
+            ObservedRTSeconds,
+            OwnedTarget,
+            PeakTolerance,
+            ResolvedRt,
+            RtSelection,
+            TupleRange,
+        };
+        use timscentroid::rt_mapping::{
+            MS1CycleIndex,
+            RTIndex,
+        };
+        let rt = ResolvedRt::resolve(
+            RtSelection::Centered(ObservedRTSeconds(100.0)),
+            &RtTolerance::Minutes((0.5, 0.5)),
+            TupleRange::try_new(ObservedRTSeconds(0.0), ObservedRTSeconds(200.0)).unwrap(),
+        )
+        .unwrap();
+        let source = OwnedTarget::<usize>::builder()
+            .id(1)
+            .mobility_ook0(1.0)
+            .rt_value(900.0)
+            .precursor(500.0, 2)
+            .precursor_labels(tinyvec::tiny_vec!(0))
+            .fragment_labels(tinyvec::tiny_vec!(0usize))
+            .fragment_mzs(vec![300.0])
+            .try_build()
+            .unwrap();
+        let collector: SpectralCollector<usize, f32> =
+            SpectralCollector::new(&ExtractionQuery::new(&source, rt));
+        let ranges = QueryRanges::from_query_data(
+            &collector,
+            &PeakTolerance::default(),
+            &MobilityKind::Absent,
+            MS1CycleIndex::new,
+        );
+        let timscentroid::utils::OptionallyRestricted::Restricted(bounds) = ranges.ms1_cycle_range
+        else {
+            panic!("resolved RT must constrain index traversal");
+        };
+        assert_eq!(
+            bounds,
+            TupleRange::try_new(MS1CycleIndex::new(70_000), MS1CycleIndex::new(129_999)).unwrap()
+        );
+        assert_eq!(source.rt_seconds(), 900.0);
     }
 }

@@ -129,7 +129,7 @@ impl ChromatogramOutput {
         Ok(ChromatogramOutput {
             id: source_id.to_owned_id(),
             mobility_ook0: collector.mobility_ook0,
-            rt_seconds: collector.rt_seconds,
+            rt_seconds: collector.rt.center().map_or(f32::NAN, |r| r.0),
             precursor_mzs,
             fragment_mzs,
             precursor_intensities,

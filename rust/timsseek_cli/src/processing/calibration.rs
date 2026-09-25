@@ -1,16 +1,10 @@
 use indicatif::ProgressIterator;
 use timsquery::models::FlatIdx;
-use timsquery::models::tolerance::{
-    MobilityTolerance,
-    MzTolerance,
-    QuadTolerance,
-    RtTolerance,
-};
-use timsquery::traits::QueryGeom;
+use timsquery::models::tolerance::RtTolerance;
+use timsquery::traits::Target;
 use timsquery::{
     MzMobilityStatsCollector,
     SpectralCollector,
-    Tolerance,
 };
 use timsseek::data_sources::reference_library::ReferenceLibrary;
 use timsseek::rt_calibration::{
@@ -57,7 +51,7 @@ pub(super) fn build_precursor_fragment_lookup(
     speclib: &ReferenceLibrary,
 ) -> PrecursorFragmentLookup {
     let mut map: PrecursorFragmentLookup = std::collections::HashMap::new();
-    for item in speclib.iter() {
+    for item in speclib.iter().filter(|q| q.library_rt().is_some()) {
         let mz_key = (item.mono_precursor_mz() * 100.0).round() as i64;
         let charge = item.precursor_charge();
         let mut frag_mzs: Vec<i64> = item
@@ -67,7 +61,7 @@ pub(super) fn build_precursor_fragment_lookup(
         frag_mzs.sort_unstable();
         map.entry((mz_key, charge))
             .or_default()
-            .push((item.rt_seconds(), frag_mzs));
+            .push((item.library_rt().map_or(f32::NAN, |r| r.0), frag_mzs));
     }
     info!(
         "Built precursor+fragment lookup with {} unique (mz, charge) buckets from main speclib",
@@ -82,7 +76,11 @@ fn library_rt_for_candidate(
     main_lookup: Option<&PrecursorFragmentLookup>,
 ) -> Option<f64> {
     let Some(lookup) = main_lookup else {
-        return Some(candidate.library_rt.0 as f64);
+        return candidate
+            .library_rt
+            .0
+            .is_finite()
+            .then_some(candidate.library_rt.0 as f64);
     };
     let calib_item = phase1_lib.item_at(candidate.speclib_index);
     let mz_key = (calib_item.mono_precursor_mz() * 100.0).round() as i64;
@@ -95,24 +93,14 @@ fn library_rt_for_candidate(
         .collect();
     calib_frags.sort_unstable();
 
-    let calib_rt = calib_item.rt_seconds();
     bucket
         .iter()
         .filter_map(|(main_rt, main_frags)| {
             let shared = count_shared_fragments(&calib_frags, main_frags);
-            (shared >= MIN_SHARED_FRAGMENTS).then_some((
-                shared,
-                (main_rt - calib_rt).abs(),
-                *main_rt,
-            ))
+            (shared >= MIN_SHARED_FRAGMENTS).then_some((shared, *main_rt))
         })
-        .min_by(|a, b| {
-            b.0.cmp(&a.0).then(
-                a.1.partial_cmp(&b.1)
-                    .expect("NaN RT residual in calibrant matching"),
-            )
-        })
-        .map(|(_, _, rt)| rt as f64)
+        .min_by(|a, b| b.0.cmp(&a.0).then(a.1.total_cmp(&b.1)))
+        .map(|(_, rt)| rt as f64)
 }
 
 /// Fixed so a run and its Phase-1 heap history can be reproduced exactly.
@@ -462,10 +450,12 @@ pub(super) mod calib_dash_hook {
             };
             let flow = d.on_batch(
                 chunk,
-                calibrants.map(|c| calib_dash::CalibrantPoint {
-                    library_rt: c.library_rt.0 as f64,
-                    observed_rt: c.apex_rt.0 as f64,
-                    identity: identity_hash(c.speclib_index),
+                calibrants.filter(|c| c.library_rt.0.is_finite()).map(|c| {
+                    calib_dash::CalibrantPoint {
+                        library_rt: c.library_rt.0 as f64,
+                        observed_rt: c.apex_rt.0 as f64,
+                        identity: identity_hash(c.speclib_index),
+                    }
                 }),
             );
             if matches!(flow, calib_dash::Flow::Abort) {
@@ -486,12 +476,21 @@ pub(super) mod calib_dash_hook {
             let Some(d) = dash.inner.as_mut() else {
                 return;
             };
-            let mobility = calibration.mobility_tolerance();
+            let (
+                timsquery::models::tolerance::MzTolerance::Ppm(mz),
+                timsquery::models::tolerance::MobilityTolerance::Pct(mobility),
+            ) = (calibration.mz_tolerance(), calibration.mobility_tolerance())
+            else {
+                return;
+            };
+            if !calibration.has_rt_calibration() {
+                return;
+            }
             let rt_tolerance_seconds = calibration.rt_tolerance_minutes() as f64 * 60.0;
             d.show_final(
                 calib_dash::FitRecording::from_state(calibration.state()),
                 calib_dash::ToleranceSummary {
-                    mz_ppm: calibration.mz_tolerance(),
+                    mz_ppm: *mz,
                     mobility_pct: (mobility.0 as f64, mobility.1 as f64),
                     rt_seconds: rt_tolerance_seconds,
                     n_calibrants: calibration.errors().rt_seconds.n,
@@ -534,15 +533,18 @@ pub(super) fn check_rt_scale_compatibility(
     main_lib: &ReferenceLibrary,
     calib_lib: &ReferenceLibrary,
 ) {
+    // Matching re-anchors the calibration library onto the main library axis.
+    // Numeric range overlap across unrelated coordinate systems proves nothing.
+    if main_lib.geometry().rt_axis() != calib_lib.geometry().rt_axis()
+        || !matches!(
+            main_lib.geometry().rt_axis(),
+            timsquery::RtAxis::NormalizedIndex { scale: Some(_) }
+        )
+    {
+        return;
+    }
     fn rt_range(lib: &ReferenceLibrary) -> (f32, f32) {
-        let mut min_rt = f32::INFINITY;
-        let mut max_rt = f32::NEG_INFINITY;
-        for q in lib.iter() {
-            let rt = q.rt_seconds();
-            min_rt = min_rt.min(rt);
-            max_rt = max_rt.max(rt);
-        }
-        (min_rt, max_rt)
+        lib.rt_range().unwrap_or((0.0, 0.0))
     }
 
     let (main_min, main_max) = rt_range(main_lib);
@@ -612,13 +614,18 @@ pub(super) fn phase1_prescore<I: ScorerQueriable>(
 
     let mut timings = timsseek::scoring::PrescoreTimings::default();
     let shuffled = speclib.shuffled_flats(PHASE1_SHUFFLE_SEED);
-    let rt_range = speclib.rt_range().unwrap_or((0.0, 0.0));
-    let convergence_rt_range = mapped_rt_range.unwrap_or(rt_range);
+    let rt_range = speclib.rt_range();
+    let convergence_rt_range = if main_lookup.is_some() {
+        mapped_rt_range
+    } else {
+        rt_range
+    };
     let capacity_per_band = capacity_per_rt_band(config);
     let acquisition_rt_range = pipeline.acquisition_rt_range_seconds();
-    let mut heaps = StratifiedCalibrantHeaps::new(capacity_per_band, rt_range);
-    let mut convergence =
-        match Phase1Convergence::new(config, convergence_rt_range, acquisition_rt_range) {
+    let mut heaps =
+        StratifiedCalibrantHeaps::for_library(capacity_per_band, rt_range, acquisition_rt_range);
+    let mut convergence = convergence_rt_range.and_then(|range| {
+        match Phase1Convergence::new(config, range, acquisition_rt_range) {
             Ok(convergence) => Some(convergence),
             Err(error) => {
                 warn!(
@@ -627,7 +634,8 @@ pub(super) fn phase1_prescore<I: ScorerQueriable>(
                 );
                 None
             }
-        };
+        }
+    });
     let mut visited = 0usize;
 
     // Shuffle individual flat indices, not source-order chunks: libraries are
@@ -684,63 +692,6 @@ fn count_shared_fragments(a: &[i64], b: &[i64]) -> usize {
 
 const MIN_SHARED_FRAGMENTS: usize = 5;
 
-/// Every calibrant was found inside the first-pass window, so a derived window
-/// wider than it measures contamination of the per-calibrant offset (a mean
-/// over a 50 ppm query box), not the instrument. On a 21-min HeLa run the
-/// unclamped derivation gave 60 ppm; at 10-15 ppm Phase 3 found 34% more
-/// peptides. Returns the bound when it clamped.
-fn clamp_mz_window_to_first_pass(
-    mz_ppm: &mut (f64, f64),
-    first_pass: &Tolerance,
-) -> Option<(f64, f64)> {
-    let MzTolerance::Ppm((lo, hi)) = first_pass.ms else {
-        return None;
-    };
-    if mz_ppm.0 <= lo && mz_ppm.1 <= hi {
-        return None;
-    }
-    *mz_ppm = (mz_ppm.0.min(lo), mz_ppm.1.min(hi));
-    Some((lo, hi))
-}
-
-#[cfg(test)]
-mod clamp_tests {
-    use super::*;
-
-    fn first_pass(lo: f64, hi: f64) -> Tolerance {
-        Tolerance {
-            ms: MzTolerance::Ppm((lo, hi)),
-            rt: RtTolerance::Unrestricted,
-            mobility: MobilityTolerance::Unrestricted,
-            quad: QuadTolerance::Absolute((0.1, 0.1)),
-        }
-    }
-
-    #[test]
-    fn clamps_each_side_to_the_first_pass_window() {
-        let mut w = (59.1, 61.3);
-        assert_eq!(
-            clamp_mz_window_to_first_pass(&mut w, &first_pass(15.0, 15.0)),
-            Some((15.0, 15.0))
-        );
-        assert_eq!(w, (15.0, 15.0));
-
-        let mut w = (8.0, 20.0);
-        assert!(clamp_mz_window_to_first_pass(&mut w, &first_pass(15.0, 15.0)).is_some());
-        assert_eq!(w, (8.0, 15.0));
-    }
-
-    #[test]
-    fn inside_the_first_pass_window_is_untouched() {
-        let mut w = (8.9, 11.1);
-        assert_eq!(
-            clamp_mz_window_to_first_pass(&mut w, &first_pass(15.0, 15.0)),
-            None
-        );
-        assert_eq!(w, (8.9, 11.1));
-    }
-}
-
 pub(super) fn calibrate_from_phase1<I: ScorerQueriable>(
     candidates: Vec<CalibrantCandidate>,
     phase1_lib: &ReferenceLibrary,
@@ -770,7 +721,7 @@ pub(super) fn calibrate_from_phase1<I: ScorerQueriable>(
         })
         .collect();
 
-    if main_lookup.is_some() {
+    if main_lookup.is_some_and(|lookup| !lookup.is_empty()) {
         let matched = points.len();
         let total = candidates.len();
         let rate = if total > 0 {
@@ -778,12 +729,11 @@ pub(super) fn calibrate_from_phase1<I: ScorerQueriable>(
         } else {
             0.0
         };
-        // Surface a collapsing cross-library match loudly -- otherwise it silently
-        // becomes a ZeroRange grid -> identity fallback -> ~0 IDs, with no hint why.
+        // Cross-library matching determines whether an RT fit can be attempted.
         if matched < 2 || rate < 0.10 {
             warn!(
                 "Calibration: only {}/{} calibrants ({:.1}%) matched the main speclib (>= {} shared fragments). \
-                 Calibration will fail or degrade (likely ZeroRange -> fallback). Common causes: main speclib \
+                 RT fitting may fail; m/z and mobility calibration still run. Common causes: main speclib \
                  entries carry < {} usable fragments (e.g. over-aggressive fragment filtering on load), or the \
                  calib lib and main speclib m/z scales don't align.",
                 matched,
@@ -802,11 +752,17 @@ pub(super) fn calibrate_from_phase1<I: ScorerQueriable>(
 
     // Use CalibrationState for fitting + ridge width measurement
     let mut cal_state = CalibratedGrid::deferred(config.grid_size, config.dp_lookback)?;
-    cal_state.refit(
+    if let Err(error) = cal_state.refit(
         config.grid_size,
         points.iter().map(|p| (p.library, p.observed)),
-    )?;
-    let cal_curve = cal_state.curve().ok_or(CalibRtError::NoPoints)?;
+    ) {
+        info!(
+            ?error,
+            "No RT fit; measuring m/z and mobility without a ridge filter"
+        );
+        cal_state = CalibratedGrid::deferred(config.grid_size, config.dp_lookback)?;
+    }
+    let cal_curve = cal_state.curve();
 
     // Position-dependent RT tolerance comes from the ridge the fit measured.
     let ridge_widths = cal_state.ridge_widths();
@@ -818,15 +774,13 @@ pub(super) fn calibrate_from_phase1<I: ScorerQueriable>(
     }
 
     // === Step B: Measure m/z and mobility errors at calibrant apexes ===
-    let query_tolerance = Tolerance {
-        ms: MzTolerance::Ppm((50.0, 50.0)),
-        rt: RtTolerance::Minutes((
+    let query_tolerance = pipeline
+        .broad_tolerance
+        .clone()
+        .with_rt_tolerance(RtTolerance::Minutes((
             config.calibration_query_rt_window_minutes,
             config.calibration_query_rt_window_minutes,
-        )),
-        mobility: MobilityTolerance::Pct((5.0, 5.0)),
-        quad: QuadTolerance::Absolute((0.1, 0.1)),
-    };
+        )));
 
     let mut mz_errors_ppm: Vec<f32> = Vec::with_capacity(candidates.len());
     let mut mobility_errors_pct: Vec<f32> = Vec::with_capacity(candidates.len());
@@ -836,31 +790,44 @@ pub(super) fn calibrate_from_phase1<I: ScorerQueriable>(
     for (candidate, library_rt_opt) in candidates.iter().zip(library_rt_for_candidate.iter()) {
         let item = phase1_lib.item_at(candidate.speclib_index);
 
-        // Skip calibrants that never matched in the main speclib.
-        let Some(library_rt_s) = *library_rt_opt else {
-            continue;
+        let rt_residual = match (cal_curve, *library_rt_opt) {
+            (Some(curve), Some(library_rt)) => {
+                let predicted = match curve.predict(LibraryRT(library_rt)) {
+                    Ok(rt) => rt.0,
+                    Err(CalibRtError::OutOfBounds(seconds)) => seconds,
+                    Err(_) => continue,
+                };
+                let residual = candidate.apex_rt.0 as f64 - predicted;
+                if ridge_half_width_interp(ridge_widths, library_rt)
+                    .is_some_and(|width| residual.abs() > width)
+                {
+                    n_off_ridge += 1;
+                    continue;
+                }
+                Some(residual as f32)
+            }
+            // A fitted ridge is only applicable to matched RT coordinates.
+            (Some(_), None) if !ridge_widths.is_empty() => continue,
+            _ => None,
         };
-
-        let predicted_rt = match cal_curve.predict(LibraryRT(library_rt_s)) {
-            Ok(o) => o.0,
-            Err(_) => continue,
-        };
-        let rt_residual_signed = candidate.apex_rt.0 as f64 - predicted_rt;
-        let half_width = ridge_half_width_interp(ridge_widths, library_rt_s);
-        let in_ridge = match half_width {
-            Some(hw) => rt_residual_signed.abs() <= hw,
-            None => true,
-        };
-        if !in_ridge {
-            n_off_ridge += 1;
-            continue;
+        if let Some(residual) = rt_residual {
+            rt_residuals_seconds.push(residual);
         }
 
-        // No clone: build collector from the flyweight (QueryGeom) + rt override.
+        // No clone: build collector from the flyweight (Target) + rt override.
         let mut agg: SpectralCollector<IonAnnot, MzMobilityStatsCollector> =
-            SpectralCollector::new(&item);
-        agg.reset_with_overrides(&item, Some(candidate.apex_rt.0), None);
-        pipeline.index.add_query(&mut agg, &query_tolerance);
+            SpectralCollector::new(&timsquery::ExtractionQuery::new(
+                &item,
+                timsquery::ResolvedRt::from_mapping(
+                    timsquery::RtSelection::Centered(candidate.apex_rt),
+                    &query_tolerance.rt,
+                    pipeline.index.ms1_cycle_mapping(),
+                )
+                .expect("calibrant apex inside acquisition"),
+            ));
+        pipeline
+            .index
+            .add_query(&mut agg, &query_tolerance.peak_tolerance());
 
         let expected_mob = item.mobility_ook0() as f64;
         let offsets = MzMobilityOffsets::new(&agg, expected_mob);
@@ -868,17 +835,18 @@ pub(super) fn calibrate_from_phase1<I: ScorerQueriable>(
             continue;
         };
 
-        mz_errors_ppm.push(mz_err_ppm);
+        if mz_err_ppm.is_finite() {
+            mz_errors_ppm.push(mz_err_ppm);
+        }
         // Mobility is NaN for a non-searchable-axis run (mzML/no-IM lib); don't
         // let it poison the MAD-based mobility tolerance (unused there anyway).
-        if mob_err_pct.is_finite() {
+        if pipeline.index.mobility_kind().is_scoreable() && mob_err_pct.is_finite() {
             mobility_errors_pct.push(mob_err_pct);
         }
-        rt_residuals_seconds.push(rt_residual_signed as f32);
     }
 
     info!(
-        "Ridge filter: kept {}/{} calibrants (dropped {} off-ridge)",
+        "m/z measurements: {}/{} candidates (dropped {} off-ridge)",
         mz_errors_ppm.len(),
         candidates.len(),
         n_off_ridge,
@@ -896,42 +864,225 @@ pub(super) fn calibrate_from_phase1<I: ScorerQueriable>(
     derivation.sigma.rt = config.rt_sigma_factor;
     derivation.floors.rt_minutes = config.min_rt_tolerance_minutes;
 
-    let mut windows = errors.derive_windows(&derivation);
-    if let Some((lo, hi)) =
-        clamp_mz_window_to_first_pass(&mut windows.mz_ppm, &pipeline.broad_tolerance)
-    {
-        warn!(
-            "derived m/z window exceeded the first-pass window ({lo:.1}, {hi:.1}) ppm; clamped. \
-             Residual MAD {:.1} ppm is contamination of the box-mean offset, not the instrument.",
-            errors.mz_ppm.mad
-        );
-    }
     info!(
-        "RT residuals: MAD={:.1}s, n={}",
-        errors.rt_seconds.mad, errors.rt_seconds.n
+        "Calibration measurements: m/z={}, mobility={}, RT={}; off-ridge={}",
+        errors.mz_ppm.n, errors.mobility_pct.n, errors.rt_seconds.n, n_off_ridge,
     );
-    info!(
-        "Calibration: RT tol={:.2} min, m/z tol=({:.1}, {:.1}) ppm, mob tol=({:.1}, {:.1}) %",
-        windows.rt_minutes,
-        windows.mz_ppm.0,
-        windows.mz_ppm.1,
-        windows.mobility_pct.0,
-        windows.mobility_pct.1,
-    );
-
-    Ok(CalibrationResult::new(
+    Ok(CalibrationResult::from_measurements(
         cal_state,
-        windows.rt_minutes,
-        windows.mz_ppm,
-        windows.mobility_pct,
-    )?
-    .with_error_stats(errors)
-    .with_derivation(derivation))
+        &pipeline.broad_tolerance,
+        errors,
+        derivation,
+    ))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    struct TestIndex {
+        rt: timscentroid::rt_mapping::CycleToRTMapping<timscentroid::rt_mapping::MS1CycleIndex>,
+        queries: std::sync::Mutex<Vec<(f32, timsquery::PeakTolerance)>>,
+        mobility_kind: timscentroid::MobilityKind,
+    }
+
+    impl timsseek::traits::MappableRTCycles for TestIndex {
+        fn ms1_cycle_mapping(
+            &self,
+        ) -> &timscentroid::rt_mapping::CycleToRTMapping<timscentroid::rt_mapping::MS1CycleIndex>
+        {
+            &self.rt
+        }
+
+        fn mobility_kind(&self) -> &timscentroid::MobilityKind {
+            &self.mobility_kind
+        }
+    }
+    impl timsquery::QueriableData<timsquery::ChromatogramCollector<IonAnnot, f32>> for TestIndex {
+        fn add_query(
+            &self,
+            _: &mut timsquery::ChromatogramCollector<IonAnnot, f32>,
+            _: &timsquery::PeakTolerance,
+        ) {
+        }
+    }
+    impl timsquery::QueriableData<SpectralCollector<IonAnnot, f32>> for TestIndex {
+        fn add_query(
+            &self,
+            _: &mut SpectralCollector<IonAnnot, f32>,
+            _: &timsquery::PeakTolerance,
+        ) {
+        }
+    }
+    impl timsquery::QueriableData<SpectralCollector<IonAnnot, MzMobilityStatsCollector>> for TestIndex {
+        fn add_query(
+            &self,
+            agg: &mut SpectralCollector<IonAnnot, MzMobilityStatsCollector>,
+            tolerance: &timsquery::PeakTolerance,
+        ) {
+            self.queries
+                .lock()
+                .unwrap()
+                .push((agg.rt.center().unwrap().0, tolerance.clone()));
+            for ((_, mz), values) in agg.iter_mut_precursors() {
+                values.add(100.0, mz * (1.0 + 4e-6), 1.01);
+            }
+        }
+    }
+
+    #[test]
+    fn phase2_measures_at_observed_apex_without_library_rt_or_with_failed_rt_fit() {
+        use timsquery::models::tolerance::{
+            MobilityTolerance,
+            MzTolerance,
+        };
+        use timsquery::models::{
+            Row,
+            TargetCapabilities,
+            TargetColumnsBuilder,
+        };
+        for (library_rt, mobility_kind) in [
+            (None, timscentroid::MobilityKind::Ook0),
+            (Some(10.0), timscentroid::MobilityKind::Ook0),
+            (None, timscentroid::MobilityKind::Absent),
+            (
+                Some(10.0),
+                timscentroid::MobilityKind::Unsupported("FAIMS".into()),
+            ),
+        ] {
+            let expected_mobility_count = usize::from(mobility_kind.is_scoreable());
+            let mut builder =
+                TargetColumnsBuilder::with_capabilities(TargetCapabilities::default_diann());
+            let fragments = [(IonAnnot::try_from("y1").unwrap(), 300.0)];
+            builder.push_row(Row {
+                precursor_mz: 500.0,
+                charge: 2,
+                mobility: 1.0,
+                rt: library_rt.map(timsquery::RtCoordinate::seconds),
+                frags: &fragments,
+                ..Default::default()
+            });
+            let lib = ReferenceLibrary::try_from(timsquery::serde::TargetTable::Mzpaf {
+                geom: builder
+                    .seal(timsquery::models::capabilities::DecoyPolicy::Never)
+                    .unwrap(),
+                frag_intens: Some(vec![1.0]),
+            })
+            .unwrap();
+            let pipeline = Scorer {
+                index: TestIndex {
+                    rt: timscentroid::rt_mapping::CycleToRTMapping::new(vec![0, 30_000, 60_000]),
+                    queries: Default::default(),
+                    mobility_kind,
+                },
+                broad_tolerance: timsquery::Tolerance {
+                    ms: MzTolerance::Ppm((20.0, 25.0)),
+                    mobility: MobilityTolerance::Pct((6.0, 7.0)),
+                    ..Default::default()
+                },
+                fragmented_range: timsquery::utils::TupleRange::try_new(100.0, 1000.0).unwrap(),
+            };
+            let candidate = || CalibrantCandidate {
+                score: 20.0,
+                apex_rt: timsseek::rt_calibration::ObservedRTSeconds(30.0),
+                library_rt: LibraryRT(library_rt.unwrap_or(f32::NAN)),
+                speclib_index: lib.geometry().flats().next().unwrap(),
+            };
+            let config = CalibrationConfig::default();
+            let calibration =
+                calibrate_from_phase1(vec![candidate()], &lib, None, &pipeline, &config).unwrap();
+            assert!(!calibration.has_rt_calibration());
+            assert_eq!(calibration.errors().mz_ppm.n, 1);
+            assert_eq!(calibration.errors().mobility_pct.n, expected_mobility_count);
+            assert_eq!(calibration.errors().rt_seconds.n, 0);
+            assert!((calibration.errors().mz_ppm.mean - 4.0).abs() < 0.01);
+            if expected_mobility_count > 0 {
+                assert!((calibration.errors().mobility_pct.mean - 1.0).abs() < 0.01);
+            } else {
+                assert_eq!(
+                    calibration.mobility_tolerance(),
+                    &pipeline.broad_tolerance.mobility
+                );
+            }
+            assert_eq!(
+                calibration.unrestricted_rt_tolerance().rt,
+                RtTolerance::Unrestricted
+            );
+            let queries = pipeline.index.queries.lock().unwrap();
+            assert_eq!(queries.len(), 1);
+            assert_eq!(queries[0].0, 30.0);
+            assert_eq!(queries[0].1.ms, pipeline.broad_tolerance.ms);
+            drop(queries);
+            // Empty main-library lookup must not suppress auxiliary-library mass calibration.
+            let calibration = calibrate_from_phase1(
+                vec![candidate()],
+                &lib,
+                Some(&Default::default()),
+                &pipeline,
+                &config,
+            )
+            .unwrap();
+            assert_eq!(calibration.errors().mz_ppm.n, 1);
+            assert!(!calibration.has_rt_calibration());
+            // Prescore actually visits RT-free rows rather than returning early.
+            if library_rt.is_none() {
+                let (_, timings, _) = phase1_prescore(&lib, &pipeline, 10, &config, None, None);
+                assert_eq!(timings.n_passed_filter, 1);
+            }
+        }
+    }
+
+    #[test]
+    fn calibration_matches_fragments_without_subtracting_unrelated_rt_axes() {
+        use timsquery::models::{
+            Row,
+            TargetCapabilities,
+            TargetColumnsBuilder,
+        };
+        let mut builder =
+            TargetColumnsBuilder::with_capabilities(TargetCapabilities::default_diann());
+        let frags: Vec<_> = (1..=MIN_SHARED_FRAGMENTS)
+            .map(|i| {
+                (
+                    IonAnnot::try_from(format!("y{i}").as_str()).unwrap(),
+                    300.0 + i as f64,
+                )
+            })
+            .collect();
+        builder.push_row(Row {
+            precursor_mz: 500.0,
+            charge: 2,
+            frags: &frags,
+            rt: Some(timsquery::RtCoordinate::seconds(9000.0)),
+            ..Default::default()
+        });
+        let calibration = ReferenceLibrary::try_from(timsquery::serde::TargetTable::Mzpaf {
+            geom: builder
+                .seal(timsquery::models::capabilities::DecoyPolicy::Never)
+                .unwrap(),
+            frag_intens: Some(vec![1.0; frags.len()]),
+        })
+        .unwrap();
+        let fingerprint: Vec<_> = frags
+            .iter()
+            .map(|(_, mz)| (mz * 100.0).round() as i64)
+            .collect();
+        let mut lookup = PrecursorFragmentLookup::new();
+        lookup.insert(
+            (50000, 2),
+            vec![(0.0, fingerprint.clone()), (-20.0, fingerprint)],
+        );
+        let candidate = CalibrantCandidate {
+            score: 1.0,
+            apex_rt: timsseek::rt_calibration::ObservedRTSeconds(120.0),
+            library_rt: LibraryRT(9000.0),
+            speclib_index: calibration.geometry().flats().next().unwrap(),
+        };
+        assert_eq!(
+            library_rt_for_candidate(&candidate, &calibration, Some(&lookup)),
+            Some(-20.0)
+        );
+    }
 
     fn curve_summary(visited: usize, value: f32) -> CurveSummary {
         CurveSummary {

@@ -1,10 +1,14 @@
+use crate::{
+    ExtractionQuery,
+    ResolvedRt,
+};
 use serde::Serialize;
 use serde::ser::SerializeStruct;
 use timscentroid::indexing::IndexedPeak;
 use timscentroid::rt_mapping::RTIndex;
 use tinyvec::TinyVec;
 
-use crate::traits::QueryGeom;
+use crate::traits::Target;
 use crate::traits::queriable_data::{
     HasQueryData,
     PeakAddable,
@@ -34,7 +38,7 @@ const SPEC_INLINE_CAP: usize = 13;
 pub struct SpectralCollector<T: KeyLike, V: Default + ValueLike> {
     // Query scalars carried from eg at construction / reset.
     pub mobility_ook0: f32,
-    pub rt_seconds: f32,
+    pub rt: ResolvedRt,
     pub precursor_mono_mz: f64,
     pub precursor_charge: u8,
     /// Cached from `Target::precursor_mz_limits()` -- skips
@@ -50,10 +54,10 @@ pub struct SpectralCollector<T: KeyLike, V: Default + ValueLike> {
 }
 
 impl<T: KeyLike, V: ValueLike + Default> SpectralCollector<T, V> {
-    pub fn new(eg: &impl QueryGeom<Label = T>) -> Self {
+    pub fn new(query: &ExtractionQuery<'_, impl Target<Label = T>>) -> Self {
         let mut out = Self {
             mobility_ook0: 0.0,
-            rt_seconds: 0.0,
+            rt: query.rt(),
             precursor_mono_mz: 0.0,
             precursor_charge: 0,
             precursor_mz_limits: (0.0, 0.0),
@@ -64,24 +68,14 @@ impl<T: KeyLike, V: ValueLike + Default> SpectralCollector<T, V> {
             precursors: Vec::new(),
             fragments: Vec::new(),
         };
-        out.reset_with_overrides(eg, None, None);
+        out.reset_with(query);
         out
     }
 
-    pub fn reset_with(&mut self, eg: &impl QueryGeom<Label = T>) {
-        self.reset_with_overrides(eg, None, None);
-    }
-
-    /// Reset with optional rt/mobility overrides -- replaces
-    /// `item.query.clone().with_rt_seconds(r).with_mobility(m)` at callers.
-    pub fn reset_with_overrides(
-        &mut self,
-        eg: &impl QueryGeom<Label = T>,
-        rt_override: Option<f32>,
-        mobility_override: Option<f32>,
-    ) {
-        self.mobility_ook0 = mobility_override.unwrap_or_else(|| eg.mobility_ook0());
-        self.rt_seconds = rt_override.unwrap_or_else(|| eg.rt_seconds());
+    pub fn reset_with(&mut self, query: &ExtractionQuery<'_, impl Target<Label = T>>) {
+        let eg = query.source();
+        self.mobility_ook0 = query.mobility_center();
+        self.rt = query.rt();
         self.precursor_mono_mz = eg.mono_precursor_mz();
         self.precursor_charge = eg.precursor_charge();
         self.precursor_mz_limits = eg.precursor_mz_limits();
@@ -149,8 +143,8 @@ impl<T: KeyLike, V: Default + ValueLike> HasQueryData<T> for SpectralCollector<T
         self.mobility_ook0
     }
 
-    fn rt_seconds(&self) -> f32 {
-        self.rt_seconds
+    fn rt(&self) -> ResolvedRt {
+        self.rt
     }
 
     fn iter_precursors(&self) -> impl Iterator<Item = (i8, f64)> + '_ {

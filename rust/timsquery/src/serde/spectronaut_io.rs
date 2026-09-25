@@ -1,5 +1,5 @@
 use super::precursor_extras::PrecursorExtras;
-use crate::Target;
+use crate::OwnedTarget;
 use crate::ion::{
     IonAnnot,
     IonParsingError,
@@ -203,7 +203,7 @@ struct ParsingBuffers {
 
 pub fn read_targets<T: AsRef<Path>>(
     file: T,
-) -> Result<Vec<(Target<IonAnnot>, PrecursorExtras)>, SpectronautReadingError> {
+) -> Result<Vec<(OwnedTarget<IonAnnot>, PrecursorExtras)>, SpectronautReadingError> {
     let file_handle = std::fs::File::open(file.as_ref())?;
 
     let mut rdr = csv::ReaderBuilder::new()
@@ -253,7 +253,7 @@ fn parse_precursor_group(
     id: u64,
     rows: &[SpectronautLibraryRow],
     buffers: &mut ParsingBuffers,
-) -> Result<Option<(Target<IonAnnot>, PrecursorExtras)>, SpectronautPrecursorParsingError> {
+) -> Result<Option<(OwnedTarget<IonAnnot>, PrecursorExtras)>, SpectronautPrecursorParsingError> {
     if rows.is_empty() {
         error!("Empty precursor group encountered on {id}");
         return Err(SpectronautPrecursorParsingError::Other);
@@ -277,7 +277,7 @@ fn parse_precursor_group(
 
     // iRT values are in a similar scale to DIA-NN's Tr_recalibrated (loosely minutes)
     // Convert to seconds
-    let rt_seconds = first_row.irt as f32 * 60.0;
+    let rt_seconds = first_row.irt as f32;
     let precursor_mz = first_row.precursor_mz;
     let precursor_charge: u8 =
         first_row
@@ -359,10 +359,11 @@ fn parse_precursor_group(
         relative_intensities,
     };
 
-    let eg = Target::builder()
+    let eg = OwnedTarget::builder()
         .id(id)
         .mobility_ook0(mobility)
-        .rt_seconds(rt_seconds)
+        .rt_value(rt_seconds)
+        .rt_axis(crate::models::RtAxis::NormalizedIndex { scale: None })
         .fragment_labels(buffers.fragment_labels.as_slice().into())
         .fragment_mzs(fragment_mzs)
         .precursor_labels(tiny_vec![0]) // Single monoisotopic precursor
@@ -456,17 +457,23 @@ mod tests {
             .join("sample_lib.tsv");
 
         let mut elution_groups = read_targets(file_path).expect("Failed to read library");
-        elution_groups.sort_by(|a, b| a.0.rt_seconds().partial_cmp(&b.0.rt_seconds()).unwrap());
+        elution_groups.sort_by(|a, b| {
+            a.0.rt()
+                .unwrap()
+                .value
+                .0
+                .total_cmp(&b.0.rt().unwrap().value.0)
+        });
 
-        // First precursor (KTVTAMDVVYALKR) has iRT=44.467922 -> rt_seconds ~ 2668
-        // Second precursor (MRECISIHVGQAGVQIGNACWELYCLEHGIQPDGQMPSDK) has iRT=83.00864 -> rt_seconds ~ 4980
+        // First precursor (KTVTAMDVVYALKR) has iRT=44.467922
+        // Second precursor (MRECISIHVGQAGVQIGNACWELYCLEHGIQPDGQMPSDK) has iRT=83.00864
 
         let first_eg = &elution_groups[0].0;
         let second_eg = &elution_groups[1].0;
 
-        // Check that the first elution group has the expected RT (approximately 44.467922 * 60)
+        // Check that the first elution group has the expected normalized RT (44.467922)
         assert!(
-            (first_eg.rt_seconds() - 44.467922 * 60.0).abs() < 0.01,
+            (first_eg.rt().unwrap().value.0 - 44.467922).abs() < 0.01,
             "First elution group RT mismatch"
         );
 
@@ -480,7 +487,7 @@ mod tests {
 
         // Check second precursor RT
         assert!(
-            (second_eg.rt_seconds() - 83.00864 * 60.0).abs() < 0.01,
+            (second_eg.rt().unwrap().value.0 - 83.00864).abs() < 0.01,
             "Second elution group RT mismatch"
         );
     }

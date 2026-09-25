@@ -2,7 +2,7 @@
 source: rust/calib_dash/src/ui.rs
 expression: out
 ---
-    ┌ Fit -- observed RT (s) ↑ vs library RT (s) → ──────────────────────────────────────────── b0 ┐
+    ┌ Fit -- observed RT (s) ↑ vs library RT coordinate → ───────────────────────────────────── b0 ┐
     │ Showing: path -- O chosen, X greedy tail                                                     │
     │                                                                                              │
     │                                                                                        ▄▄▄▄▄▄│

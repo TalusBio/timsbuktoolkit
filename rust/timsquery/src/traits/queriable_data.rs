@@ -5,10 +5,10 @@ use crate::models::aggregators::{
     PointIntensityAggregator,
     SpectralCollector,
 };
-use crate::models::target::Target;
+
 use crate::{
     KeyLike,
-    Tolerance,
+    PeakTolerance,
 };
 use rayon::prelude::*;
 use std::ops::AddAssign;
@@ -20,8 +20,7 @@ use timscentroid::rt_mapping::RTIndex;
 /// Exposes exactly what `QueryRanges::from_query_data` and per-aggregator
 /// `add_query` impls read -- scalars for range building + iterators for
 /// precursor and fragment m/z windows. A fully immutable view, implemented
-/// by `Target` as well as by aggregators that carry their own
-/// query scalars.
+/// by collectors with an explicitly resolved acquisition RT window.
 pub trait HasQueryData<FH: KeyLike> {
     fn precursor_mz_limits(&self) -> (f64, f64);
     fn mobility_ook0(&self) -> f32;
@@ -31,38 +30,13 @@ pub trait HasQueryData<FH: KeyLike> {
     fn mobility_kind(&self) -> timscentroid::MobilityKind {
         timscentroid::MobilityKind::Ook0
     }
-    fn rt_seconds(&self) -> f32;
+    fn rt(&self) -> crate::ResolvedRt;
     fn iter_precursors(&self) -> impl Iterator<Item = (i8, f64)> + '_;
     /// Borrowed label + copied mz. Named `iter_fragments` (not `_refs`)
     /// since the mz is Copy -- the `_refs` name would mislead readers.
     fn iter_fragments<'a>(&'a self) -> impl Iterator<Item = (&'a FH, f64)> + 'a
     where
         FH: 'a;
-}
-
-impl<FH: KeyLike> HasQueryData<FH> for Target<FH> {
-    fn precursor_mz_limits(&self) -> (f64, f64) {
-        self.precursor_mz_limits()
-    }
-
-    fn mobility_ook0(&self) -> f32 {
-        Target::mobility_ook0(self)
-    }
-
-    fn rt_seconds(&self) -> f32 {
-        Target::rt_seconds(self)
-    }
-
-    fn iter_precursors(&self) -> impl Iterator<Item = (i8, f64)> + '_ {
-        Target::iter_precursors(self)
-    }
-
-    fn iter_fragments<'a>(&'a self) -> impl Iterator<Item = (&'a FH, f64)> + 'a
-    where
-        FH: 'a,
-    {
-        self.iter_fragments_refs().map(|(k, mz)| (k, *mz))
-    }
 }
 
 /// Trait indicating that indexed data can be queried with a specific aggregator type.
@@ -79,27 +53,29 @@ impl<FH: KeyLike> HasQueryData<FH> for Target<FH> {
 ///
 /// The typical usage flow:
 ///
-/// 1. Create an aggregator with an `ElutionGroup` defining target m/z values
-/// 2. Create a `Tolerance` defining search windows (m/z, RT, mobility, quad)
-/// 3. Call `add_query()` to extract and accumulate matching peaks
-/// 4. Repeat for multiple queries or use `par_add_query_multi()` for batch queries
+/// 1. Resolve acquisition RT and borrow source geometry in an `ExtractionQuery`.
+/// 2. Construct or reset the collector from that query.
+/// 3. Call `add_query` with peak-domain tolerances.
 ///
 /// # Example
 ///
-/// ```ignore
-/// use timsquery::{IndexedTimstofPeaks, ChromatogramCollector, ElutionGroup, Tolerance, QueriableData};
-/// use std::sync::Arc;
+/// ```no_run
+/// use timsquery::{ChromatogramCollector, DataProcessingError, ExtractionQuery,
+///     OwnedTarget, QueriableData, ResolvedRt, RtSelection, Tolerance};
+/// use timscentroid::IndexedTimstofPeaks;
 ///
-/// let peaks: IndexedTimstofPeaks = unimplemented!();
-/// let elution_group = Arc::new(ElutionGroup::default());
-/// let ref_rt = Arc::new(vec![0u32; 100]);
-/// let mut aggregator = ChromatogramCollector::new(elution_group, ref_rt)?;
-/// let tolerance = Tolerance::default();
-///
-/// // Query peaks and accumulate into chromatogram
-/// peaks.add_query(&mut aggregator, &tolerance);
-///
-/// // The aggregator is modified in place with results
+/// fn extract(index: &IndexedTimstofPeaks, source: &OwnedTarget<usize>)
+///     -> Result<(), DataProcessingError>
+/// {
+///     let settings = Tolerance::default();
+///     let mapping = index.ms1_cycle_mapping();
+///     let rt = ResolvedRt::from_mapping(RtSelection::FullRun, &settings.rt, mapping)?;
+///     let query = ExtractionQuery::new(source, rt);
+///     let mut collector: ChromatogramCollector<usize, f32> =
+///         ChromatogramCollector::new(&query, mapping)?;
+///     index.add_query(&mut collector, &settings.peak_tolerance());
+///     Ok(())
+/// }
 /// ```
 ///
 /// # Implementation Notes
@@ -125,8 +101,8 @@ where
     /// # Arguments
     ///
     /// - `queriable_aggregator`: Mutable aggregator to accumulate results into
-    /// - `tolerance`: Defines search windows for m/z, RT, mobility, and quadrupole
-    fn add_query(&self, queriable_aggregator: &mut QA, tolerance: &Tolerance);
+    /// - `tolerance`: Defines search windows for m/z, mobility, and quadrupole
+    fn add_query(&self, queriable_aggregator: &mut QA, tolerance: &PeakTolerance);
 
     /// Execute multiple queries in parallel, one per aggregator.
     ///
@@ -134,7 +110,7 @@ where
     /// Rayon. Both parameters accept any `IntoParallelIterator`, so you can pass:
     ///
     /// - `&mut [QA]` for aggregators (the common case)
-    /// - `&[Tolerance]` or `&Vec<Tolerance>` for per-query tolerances
+    /// - `&[PeakTolerance]` or `&Vec<PeakTolerance>` for per-query tolerances
     /// - `rayon::iter::repeatn(&tol, n)` for a single shared tolerance
     ///
     /// # Arguments
@@ -146,7 +122,7 @@ where
         QA: 'a,
         A: IntoParallelIterator<Item = &'a mut QA>,
         A::Iter: IndexedParallelIterator,
-        T: IntoParallelIterator<Item = &'a Tolerance>,
+        T: IntoParallelIterator<Item = &'a PeakTolerance>,
         T::Iter: IndexedParallelIterator,
     {
         queriable_aggregators

@@ -1,18 +1,30 @@
-use crate::KeyLike;
-use crate::models::target::Target;
-use crate::traits::QueryGeom;
+use crate::models::target::OwnedTarget;
+use crate::traits::Target;
 use crate::traits::queriable_data::HasQueryData;
+use crate::{
+    ExtractionQuery,
+    KeyLike,
+    ResolvedRt,
+};
 use serde::Serialize;
 use std::sync::Arc;
 use tinyvec::TinyVec;
 
 const POINT_INLINE_CAP: usize = 13;
 
+fn serialize_rt_center<S: serde::Serializer>(
+    rt: &ResolvedRt,
+    serializer: S,
+) -> Result<S::Ok, S::Error> {
+    rt.center().map_or(f32::NAN, |r| r.0).serialize(serializer)
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct PointIntensityAggregator<T: KeyLike> {
     pub id: crate::models::OwnedSourceId,
     pub mobility_ook0: f32,
-    pub rt_seconds: f32,
+    #[serde(rename = "rt_seconds", serialize_with = "serialize_rt_center")]
+    pub rt: ResolvedRt,
     pub precursor_mono_mz: f64,
     pub precursor_charge: u8,
     pub precursor_mz_limits: (f64, f64),
@@ -24,11 +36,8 @@ pub struct PointIntensityAggregator<T: KeyLike> {
 }
 
 impl<T: KeyLike> PointIntensityAggregator<T> {
-    pub fn new_with_elution_group(elution_group: Arc<Target<T>>) -> Self {
-        Self::new(elution_group.as_ref())
-    }
-
-    pub fn new(eg: &impl QueryGeom<Label = T>) -> Self {
+    pub fn new(query: &ExtractionQuery<'_, impl Target<Label = T>>) -> Self {
+        let eg = query.source();
         let mut precursor_labels = TinyVec::new();
         let mut precursor_mzs = TinyVec::new();
         for (lbl, mz) in eg.iter_precursors() {
@@ -43,8 +52,8 @@ impl<T: KeyLike> PointIntensityAggregator<T> {
         }
         Self {
             id: eg.output_id().to_owned_id(),
-            mobility_ook0: eg.mobility_ook0(),
-            rt_seconds: eg.rt_seconds(),
+            mobility_ook0: query.mobility_center(),
+            rt: query.rt(),
             precursor_mono_mz: eg.mono_precursor_mz(),
             precursor_charge: eg.precursor_charge(),
             precursor_mz_limits: eg.precursor_mz_limits(),
@@ -66,8 +75,8 @@ impl<T: KeyLike> HasQueryData<T> for PointIntensityAggregator<T> {
         self.mobility_ook0
     }
 
-    fn rt_seconds(&self) -> f32 {
-        self.rt_seconds
+    fn rt(&self) -> ResolvedRt {
+        self.rt
     }
 
     fn iter_precursors(&self) -> impl Iterator<Item = (i8, f64)> + '_ {
@@ -89,12 +98,12 @@ impl<T: KeyLike> HasQueryData<T> for PointIntensityAggregator<T> {
 
 #[derive(Debug, Clone)]
 pub struct RawPeakVectorAggregator<T: KeyLike> {
-    pub query: Arc<Target<T>>,
+    pub query: Arc<OwnedTarget<T>>,
     pub peaks: RawPeakVectorArrays,
 }
 
 impl<T: KeyLike> RawPeakVectorAggregator<T> {
-    pub fn new_with_elution_group(elution_group: Arc<Target<T>>) -> Self {
+    pub fn new_with_elution_group(elution_group: Arc<OwnedTarget<T>>) -> Self {
         Self {
             query: elution_group,
             peaks: RawPeakVectorArrays::new(),

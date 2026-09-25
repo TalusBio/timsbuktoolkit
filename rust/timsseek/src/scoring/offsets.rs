@@ -156,8 +156,12 @@ impl MzMobilityOffsets {
         // (mzML against a no-IM library) has all-NaN mobility errors, but its m/z
         // errors are perfectly good and MUST still calibrate. Gate each on its
         // own weight; return NaN mobility rather than dropping the whole calibrant.
-        if w_mz > 0.0 {
-            let mz_avg = (mz / w_mz) as f32;
+        if w_mz > 0.0 || w_mob > 0.0 {
+            let mz_avg = if w_mz > 0.0 {
+                (mz / w_mz) as f32
+            } else {
+                f32::NAN
+            };
             let mob_avg = if w_mob > 0.0 {
                 (mob / w_mob) as f32
             } else {
@@ -278,6 +282,20 @@ mod tests {
             mob.is_nan(),
             "mobility must stay NaN, not fabricated: {mob}"
         );
+    }
+
+    #[test]
+    fn weighted_ms1_calibrates_mobility_when_mz_absent() {
+        let mut ms1 = TopNArray::new();
+        ms1.push(ion(10.0, f32::NAN, 2.0));
+        let offsets = MzMobilityOffsets {
+            ms1,
+            ms2: TopNArray::new(),
+            ref_mobility: 1.0,
+        };
+        let (mz, mob) = offsets.weighted_ms1().unwrap();
+        assert!(mz.is_nan());
+        assert_eq!(mob, 2.0);
     }
 
     #[test]
