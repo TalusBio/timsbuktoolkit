@@ -61,7 +61,7 @@ pub(super) fn build_precursor_fragment_lookup(
         frag_mzs.sort_unstable();
         map.entry((mz_key, charge))
             .or_default()
-            .push((item.library_rt().unwrap_or(f32::NAN), frag_mzs));
+            .push((item.library_rt().map_or(f32::NAN, |r| r.0), frag_mzs));
     }
     info!(
         "Built precursor+fragment lookup with {} unique (mz, charge) buckets from main speclib",
@@ -816,9 +816,18 @@ pub(super) fn calibrate_from_phase1<I: ScorerQueriable>(
 
         // No clone: build collector from the flyweight (Target) + rt override.
         let mut agg: SpectralCollector<IonAnnot, MzMobilityStatsCollector> =
-            SpectralCollector::new(&item);
-        agg.reset_with_overrides(&item, Some(candidate.apex_rt.0), None);
-        pipeline.index.add_query(&mut agg, &query_tolerance);
+            SpectralCollector::new(&timsquery::ExtractionQuery::new(
+                &item,
+                timsquery::ResolvedRt::from_mapping(
+                    timsquery::RtSelection::Centered(candidate.apex_rt),
+                    &query_tolerance.rt,
+                    pipeline.index.ms1_cycle_mapping(),
+                )
+                .expect("calibrant apex inside acquisition"),
+            ));
+        pipeline
+            .index
+            .add_query(&mut agg, &query_tolerance.peak_tolerance());
 
         let expected_mob = item.mobility_ook0() as f64;
         let offsets = MzMobilityOffsets::new(&agg, expected_mob);
@@ -873,7 +882,7 @@ mod tests {
 
     struct TestIndex {
         rt: timscentroid::rt_mapping::CycleToRTMapping<timscentroid::rt_mapping::MS1CycleIndex>,
-        queries: std::sync::Mutex<Vec<(f32, timsquery::Tolerance)>>,
+        queries: std::sync::Mutex<Vec<(f32, timsquery::PeakTolerance)>>,
         mobility_kind: timscentroid::MobilityKind,
     }
 
@@ -893,23 +902,28 @@ mod tests {
         fn add_query(
             &self,
             _: &mut timsquery::ChromatogramCollector<IonAnnot, f32>,
-            _: &timsquery::Tolerance,
+            _: &timsquery::PeakTolerance,
         ) {
         }
     }
     impl timsquery::QueriableData<SpectralCollector<IonAnnot, f32>> for TestIndex {
-        fn add_query(&self, _: &mut SpectralCollector<IonAnnot, f32>, _: &timsquery::Tolerance) {}
+        fn add_query(
+            &self,
+            _: &mut SpectralCollector<IonAnnot, f32>,
+            _: &timsquery::PeakTolerance,
+        ) {
+        }
     }
     impl timsquery::QueriableData<SpectralCollector<IonAnnot, MzMobilityStatsCollector>> for TestIndex {
         fn add_query(
             &self,
             agg: &mut SpectralCollector<IonAnnot, MzMobilityStatsCollector>,
-            tolerance: &timsquery::Tolerance,
+            tolerance: &timsquery::PeakTolerance,
         ) {
             self.queries
                 .lock()
                 .unwrap()
-                .push((agg.rt_seconds, tolerance.clone()));
+                .push((agg.rt.center().unwrap().0, tolerance.clone()));
             for ((_, mz), values) in agg.iter_mut_precursors() {
                 values.add(100.0, mz * (1.0 + 4e-6), 1.01);
             }

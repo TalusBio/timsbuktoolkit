@@ -1,18 +1,15 @@
-use timsquery::OwnedTarget;
+use timsquery::SpectralCollector;
 use timsquery::utils::constants::C13_C12_MASS_DIFF;
 
 use crate::IonAnnot;
 
-/// Buffer-override variant of `isotope_offset_fragments`: reset `dst` from `src`
-/// (reusing Vec/TinyVec capacity), then apply an isotope-spacing m/z shift and label
-/// rewrite to every fragment in place. Zero alloc after warm-up.
-pub fn apply_isotope_offset_fragments_into(
-    dst: &mut OwnedTarget<IonAnnot>,
-    src: &impl timsquery::traits::Target<Label = IonAnnot>,
-    offset: i8,
-) {
-    dst.reset_from(src);
-    for (k, v) in dst.iter_fragments_refs_mut() {
+/// Shift fragment labels and m/z in the collector's reusable buffers.
+pub fn shift_fragment_isotopes(dst: &mut SpectralCollector<IonAnnot, f32>, offset: i8) {
+    for (k, v) in dst
+        .fragment_labels
+        .iter_mut()
+        .zip(dst.fragment_mzs.iter_mut())
+    {
         // The error names the representable range, so a library carrying an
         // isotope offset too close to the ceiling says what the limit is rather
         // than asserting the situation is impossible.

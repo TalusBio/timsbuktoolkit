@@ -135,26 +135,14 @@ impl Tolerance {
     /// assert!(range.start() < range.end());
     /// ```
     pub fn mz_range(&self, mz: f64) -> TupleRange<f64> {
-        match self.ms {
-            MzTolerance::Absolute((low, high)) => (mz - low, mz + high)
-                .try_into()
-                .expect(Self::MZ_RANGE_INVARIANT),
-            MzTolerance::Ppm((low, high)) => {
-                let low = mz * low / 1e6;
-                let high = mz * high / 1e6;
-                (mz - low, mz + high)
-                    .try_into()
-                    .expect(Self::MZ_RANGE_INVARIANT)
-            }
-        }
+        self.peak_tolerance().mz_range(mz)
     }
 
     /// Calculate m/z tolerance range (convenience method, returns f32).
     ///
     /// Same as [`mz_range`](Self::mz_range) but accepts and returns `f32`.
     pub fn mz_range_f32(&self, mz: f32) -> TupleRange<f32> {
-        let tmp = self.mz_range(mz as f64);
-        (tmp.start() as f32, tmp.end() as f32).try_into().unwrap()
+        self.peak_tolerance().mz_range_f32(mz)
     }
 
     // ============================================================================
@@ -272,17 +260,7 @@ impl Tolerance {
     /// - `MobilityTolerance::Pct((low, high))`: Percentage of mobility value
     /// - `MobilityTolerance::Unrestricted`: No mobility bounds
     pub fn mobility_range(&self, mobility: f32) -> OptionallyRestricted<TupleRange<f32>> {
-        match self.mobility {
-            MobilityTolerance::Absolute((low, high)) => {
-                Restricted((mobility - low, mobility + high).try_into().unwrap())
-            }
-            MobilityTolerance::Pct((low, high)) => {
-                let low = mobility * (low / 100.0);
-                let high = mobility * (high / 100.0);
-                Restricted((mobility - low, mobility + high).try_into().unwrap())
-            }
-            MobilityTolerance::Unrestricted => Unrestricted,
-        }
+        self.peak_tolerance().mobility_range(mobility)
     }
 
     /// Calculate ion mobility tolerance range (convenience method, returns f16).
@@ -290,15 +268,7 @@ impl Tolerance {
     /// Same as [`mobility_range`](Self::mobility_range) but returns half-precision floats.
     /// Useful for memory-efficient storage of mobility ranges.
     pub fn mobility_range_f16(&self, mobility: f32) -> OptionallyRestricted<TupleRange<f16>> {
-        let tmp = self.mobility_range(mobility);
-        match tmp {
-            Restricted(x) => Restricted(
-                (f16::from_f32(x.start()), f16::from_f32(x.end()))
-                    .try_into()
-                    .unwrap(),
-            ),
-            Unrestricted => Unrestricted,
-        }
+        self.peak_tolerance().mobility_range_f16(mobility)
     }
 
     // ============================================================================
@@ -312,8 +282,7 @@ impl Tolerance {
     ///
     /// Accepts precursor m/z range as `(f32, f32)`, delegates to [`quad_range`](Self::quad_range).
     pub fn quad_range_f32(&self, precursor_mz_range: (f32, f32)) -> TupleRange<f32> {
-        let tmp = self.quad_range((precursor_mz_range.0 as f64, precursor_mz_range.1 as f64));
-        (tmp.start() as f32, tmp.end() as f32).try_into().unwrap()
+        self.peak_tolerance().quad_range_f32(precursor_mz_range)
     }
 
     /// Calculate quadrupole isolation range (primary method, returns f64).
@@ -338,20 +307,7 @@ impl Tolerance {
     /// This method expands that window by the tolerance to account for
     /// quad isolation inaccuracy.
     pub fn quad_range(&self, precursor_mz_range: (f64, f64)) -> TupleRange<f64> {
-        match self.quad {
-            QuadTolerance::Absolute((low, high)) => {
-                let mz_low = precursor_mz_range.0.min(precursor_mz_range.1) - (low as f64);
-                let mz_high = precursor_mz_range.1.max(precursor_mz_range.0) + (high as f64);
-                assert!(mz_low <= mz_high);
-                assert!(
-                    mz_low > 0.0,
-                    "Precursor mz is 0 or less, inputs: self: {:?}, precursor_mz_range: {:?}",
-                    self,
-                    precursor_mz_range,
-                );
-                (mz_low, mz_high).try_into().unwrap()
-            }
-        }
+        self.peak_tolerance().quad_range(precursor_mz_range)
     }
 
     // ============================================================================
@@ -428,6 +384,97 @@ impl Tolerance {
         Self {
             mobility: wider,
             ..self
+        }
+    }
+}
+
+/// Peak-domain tolerances. RT is already resolved on the extraction query.
+#[derive(Debug, Clone, PartialEq)]
+pub struct PeakTolerance {
+    pub ms: MzTolerance,
+    pub mobility: MobilityTolerance,
+    pub quad: QuadTolerance,
+}
+impl Tolerance {
+    pub fn peak_tolerance(&self) -> PeakTolerance {
+        PeakTolerance {
+            ms: self.ms.clone(),
+            mobility: self.mobility.clone(),
+            quad: self.quad.clone(),
+        }
+    }
+}
+impl Default for PeakTolerance {
+    fn default() -> Self {
+        Tolerance::default().peak_tolerance()
+    }
+}
+impl PeakTolerance {
+    pub fn mz_range(&self, mz: f64) -> TupleRange<f64> {
+        match self.ms {
+            MzTolerance::Absolute((low, high)) => (mz - low, mz + high)
+                .try_into()
+                .expect(Tolerance::MZ_RANGE_INVARIANT),
+            MzTolerance::Ppm((low, high)) => {
+                let low = mz * low / 1e6;
+                let high = mz * high / 1e6;
+                (mz - low, mz + high)
+                    .try_into()
+                    .expect(Tolerance::MZ_RANGE_INVARIANT)
+            }
+        }
+    }
+
+    pub fn mz_range_f32(&self, mz: f32) -> TupleRange<f32> {
+        let tmp = self.mz_range(mz as f64);
+        (tmp.start() as f32, tmp.end() as f32).try_into().unwrap()
+    }
+
+    pub fn mobility_range(&self, mobility: f32) -> OptionallyRestricted<TupleRange<f32>> {
+        match self.mobility {
+            MobilityTolerance::Absolute((low, high)) => {
+                Restricted((mobility - low, mobility + high).try_into().unwrap())
+            }
+            MobilityTolerance::Pct((low, high)) => {
+                let low = mobility * (low / 100.0);
+                let high = mobility * (high / 100.0);
+                Restricted((mobility - low, mobility + high).try_into().unwrap())
+            }
+            MobilityTolerance::Unrestricted => Unrestricted,
+        }
+    }
+
+    pub fn mobility_range_f16(&self, mobility: f32) -> OptionallyRestricted<TupleRange<f16>> {
+        let tmp = self.mobility_range(mobility);
+        match tmp {
+            Restricted(x) => Restricted(
+                (f16::from_f32(x.start()), f16::from_f32(x.end()))
+                    .try_into()
+                    .unwrap(),
+            ),
+            Unrestricted => Unrestricted,
+        }
+    }
+
+    pub fn quad_range_f32(&self, precursor_mz_range: (f32, f32)) -> TupleRange<f32> {
+        let tmp = self.quad_range((precursor_mz_range.0 as f64, precursor_mz_range.1 as f64));
+        (tmp.start() as f32, tmp.end() as f32).try_into().unwrap()
+    }
+
+    pub fn quad_range(&self, precursor_mz_range: (f64, f64)) -> TupleRange<f64> {
+        match self.quad {
+            QuadTolerance::Absolute((low, high)) => {
+                let mz_low = precursor_mz_range.0.min(precursor_mz_range.1) - (low as f64);
+                let mz_high = precursor_mz_range.1.max(precursor_mz_range.0) + (high as f64);
+                assert!(mz_low <= mz_high);
+                assert!(
+                    mz_low > 0.0,
+                    "Precursor mz is 0 or less, inputs: self: {:?}, precursor_mz_range: {:?}",
+                    self,
+                    precursor_mz_range,
+                );
+                (mz_low, mz_high).try_into().unwrap()
+            }
         }
     }
 }

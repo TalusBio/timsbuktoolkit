@@ -341,13 +341,21 @@ pub fn build(params: &SimParams) -> SimData {
 
     let chromatograms = ChromatogramCollector::<String, f32> {
         mobility_ook0: 1.0,
-        rt_seconds: (map((realized_apex as usize).min(n - 1)) as f32) / 1000.0,
+        rt: timsquery::ResolvedRt::resolve(
+            timsquery::RtSelection::Centered(timsquery::ObservedRTSeconds(
+                (map((realized_apex as usize).min(n - 1)) as f32) / 1000.0,
+            )),
+            &timsquery::models::tolerance::RtTolerance::Unrestricted,
+            rt_range_ms
+                .map_elems(|ms| timsquery::ObservedRTSeconds(ms as f32 / 1000.0))
+                .unwrap(),
+        )
+        .unwrap(),
         precursor_mono_mz: dummy_mz,
         precursor_charge: 2,
         precursor_mz_limits: (dummy_mz - 1.0, dummy_mz + 1.0),
         precursors,
         fragments,
-        rt_range_ms,
         n_precursor_peaks_added: n_prec_peaks,
         n_fragment_peaks_added: n_frag_peaks,
         n_quad_windows_matched: 1,

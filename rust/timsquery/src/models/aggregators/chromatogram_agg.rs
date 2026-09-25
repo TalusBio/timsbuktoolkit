@@ -1,3 +1,7 @@
+use crate::{
+    ExtractionQuery,
+    ResolvedRt,
+};
 use serde::Serialize;
 
 use crate::errors::DataProcessingError;
@@ -27,7 +31,7 @@ use timscentroid::utils::TupleRange;
 pub struct ChromatogramCollector<T: KeyLike, V: ArrayElement + ValueLike> {
     // Query scalars carried from the eg at reset time.
     pub mobility_ook0: f32,
-    pub rt_seconds: f32,
+    pub rt: ResolvedRt,
     pub precursor_mono_mz: f64,
     pub precursor_charge: u8,
     /// Cached from `Target::precursor_mz_limits()` at reset
@@ -38,7 +42,6 @@ pub struct ChromatogramCollector<T: KeyLike, V: ArrayElement + ValueLike> {
     // labels/mzs are NOT duplicated on the collector.
     pub precursors: MzMajorIntensityArray<i8, V>,
     pub fragments: MzMajorIntensityArray<T, V>,
-    pub rt_range_ms: TupleRange<u32>,
 
     /// MS1 peaks written into any precursor chromatogram cell during the
     /// most recent `add_query`. Informational only -- downstream fast-path
@@ -63,10 +66,11 @@ pub struct ChromatogramCollector<T: KeyLike, V: ArrayElement + ValueLike> {
 
 impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
     pub fn new(
-        eg: &impl Target<Label = T>,
-        rt_range_ms: TupleRange<u32>,
+        query: &ExtractionQuery<'_, impl Target<Label = T>>,
         ref_rt_ms: &CycleToRTMapping<MS1CycleIndex>,
     ) -> Result<Self, DataProcessingError> {
+        let eg = query.source();
+        let rt_range_ms = query.rt().range_millis();
         let start = ref_rt_ms.ms_to_closest_index(rt_range_ms.start());
         let end = ref_rt_ms.ms_to_closest_index(rt_range_ms.end());
         let num_cycles = end.index() - start.index() + 1;
@@ -89,14 +93,13 @@ impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
         let fragments =
             MzMajorIntensityArray::try_new_empty(fragment_order, num_cycles, start.index())?;
         Ok(Self {
-            mobility_ook0: eg.mobility_ook0(),
-            rt_seconds: eg.observed_rt_seconds().unwrap_or(f32::NAN),
+            mobility_ook0: query.mobility_center(),
+            rt: query.rt(),
             precursor_mono_mz: eg.mono_precursor_mz(),
             precursor_charge: eg.precursor_charge(),
             precursor_mz_limits: eg.precursor_mz_limits(),
             precursors,
             fragments,
-            rt_range_ms,
             n_precursor_peaks_added: 0,
             n_fragment_peaks_added: 0,
             n_quad_windows_matched: 0,
@@ -105,24 +108,11 @@ impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
 
     pub fn try_reset_with(
         &mut self,
-        eg: &impl Target<Label = T>,
-        rt_range_ms: TupleRange<u32>,
+        query: &ExtractionQuery<'_, impl Target<Label = T>>,
         ref_rt_ms: &CycleToRTMapping<MS1CycleIndex>,
     ) -> Result<(), DataProcessingError> {
-        self.try_reset_with_overrides(eg, None, None, rt_range_ms, ref_rt_ms)
-    }
-
-    /// Like `try_reset_with` but lets callers override `rt_seconds` / `mobility_ook0`
-    /// without rebuilding the source eg -- replaces the `eg.clone().with_rt_seconds(..)`
-    /// and `eg.clone().with_mobility(..)` clone-then-mutate pattern.
-    pub fn try_reset_with_overrides(
-        &mut self,
-        eg: &impl Target<Label = T>,
-        rt_override: Option<f32>,
-        mobility_override: Option<f32>,
-        rt_range_ms: TupleRange<u32>,
-        ref_rt_ms: &CycleToRTMapping<MS1CycleIndex>,
-    ) -> Result<(), DataProcessingError> {
+        let eg = query.source();
+        let rt_range_ms = query.rt().range_millis();
         let start = ref_rt_ms.ms_to_closest_index(rt_range_ms.start());
         let end = ref_rt_ms.ms_to_closest_index(rt_range_ms.end());
         let num_cycles = end.index() - start.index() + 1;
@@ -134,13 +124,11 @@ impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
             return Err(DataProcessingError::ExpectedNonEmptyData);
         }
 
-        self.mobility_ook0 = mobility_override.unwrap_or_else(|| eg.mobility_ook0());
-        self.rt_seconds =
-            rt_override.unwrap_or_else(|| eg.observed_rt_seconds().unwrap_or(f32::NAN));
+        self.mobility_ook0 = query.mobility_center();
+        self.rt = query.rt();
         self.precursor_mono_mz = eg.mono_precursor_mz();
         self.precursor_charge = eg.precursor_charge();
         self.precursor_mz_limits = eg.precursor_mz_limits();
-        self.rt_range_ms = rt_range_ms;
         self.n_precursor_peaks_added = 0;
         self.n_fragment_peaks_added = 0;
         self.n_quad_windows_matched = 0;
@@ -165,7 +153,7 @@ impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
     }
 
     pub fn rt_range_milis(&self) -> TupleRange<u32> {
-        self.rt_range_ms
+        self.rt.range_millis()
     }
 
     /// Filter ions using a predicate closure.
@@ -225,8 +213,8 @@ impl<T: KeyLike, V: ArrayElement + ValueLike> HasQueryData<T> for ChromatogramCo
         self.mobility_ook0
     }
 
-    fn rt_seconds(&self) -> f32 {
-        self.rt_seconds
+    fn rt(&self) -> ResolvedRt {
+        self.rt
     }
 
     fn iter_precursors(&self) -> impl Iterator<Item = (i8, f64)> + '_ {
@@ -252,7 +240,7 @@ mod tests {
         let eg = OwnedTarget::builder()
             .id(1)
             .mobility_ook0(0.8)
-            .rt_seconds(100.0)
+            .rt_value(100.0)
             .precursor(400.0, 1u8)
             .precursor_labels(tiny_vec!(0))
             .fragment_mzs(vec![600.0, 700.0, 800.0])
@@ -262,8 +250,19 @@ mod tests {
 
         let rt_ms = CycleToRTMapping::new(vec![10, 20]);
         let mut collector = ChromatogramCollector::<usize, f32>::new(
-            &eg,
-            TupleRange::try_new(9, 20).unwrap(),
+            &crate::ExtractionQuery::new(
+                &eg,
+                crate::ResolvedRt::resolve(
+                    crate::RtSelection::FullRun,
+                    &crate::models::tolerance::RtTolerance::Unrestricted,
+                    TupleRange::try_new(
+                        crate::ObservedRTSeconds(0.009),
+                        crate::ObservedRTSeconds(0.020),
+                    )
+                    .unwrap(),
+                )
+                .unwrap(),
+            ),
             &rt_ms,
         )
         .unwrap();

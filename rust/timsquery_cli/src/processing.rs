@@ -71,7 +71,7 @@ impl SpectrumOutput {
         SpectrumOutput {
             id: source_id.to_owned_id(),
             mobility_ook0: agg.mobility_ook0,
-            rt_seconds: agg.rt_seconds,
+            rt_seconds: agg.rt.center().map_or(f32::NAN, |r| r.0),
             precursor_mz: agg.precursor_mono_mz,
             fragment_mzs,
             precursor_intensities,
@@ -98,15 +98,29 @@ impl<T: KeyLike + Display> AggregatorContainer<T> {
     where
         T: DecoyShift,
     {
-        if !matches!(
-            tolerance.rt,
-            timsquery::models::tolerance::RtTolerance::Unrestricted
-        ) && queries
+        // Direct-query CLI inputs express acquisition seconds. Library indices
+        // require calibration in timsseek before they can constrain this axis.
+        let queries = queries
             .iter()
-            .any(|q| q.rt().is_some() && q.observed_rt_seconds().is_none())
-        {
-            return Err(CliError::DataProcessing("RT-restricted queries require observed seconds; calibrate library indices first or use unrestricted RT".into()));
-        }
+            .map(|q| {
+                let selection = match (&tolerance.rt, q.rt()) {
+                    (_, Some(rt)) if *rt.axis == timsquery::RtAxis::Seconds => {
+                        timsquery::RtSelection::Centered(timsquery::ObservedRTSeconds(rt.value.0))
+                    }
+                    (timsquery::models::tolerance::RtTolerance::Unrestricted, _) | (_, None) => {
+                        timsquery::RtSelection::FullRun
+                    }
+                    _ => {
+                        return Err(CliError::DataProcessing(
+                            "Direct queries require acquisition seconds or unrestricted RT".into(),
+                        ));
+                    }
+                };
+                let rt = timsquery::ResolvedRt::from_mapping(selection, &tolerance.rt, ref_rts)
+                    .map_err(|e| CliError::DataProcessing(format!("{e:?}")))?;
+                Ok(timsquery::ExtractionQuery::new(q, rt))
+            })
+            .collect::<Result<Vec<_>, CliError>>()?;
         Ok(match aggregator {
             PossibleAggregator::PointIntensity => AggregatorContainer::Point(
                 queries.iter().map(PointIntensityAggregator::new).collect(),
@@ -115,19 +129,7 @@ impl<T: KeyLike + Display> AggregatorContainer<T> {
                 let collectors = queries
                     .iter()
                     .map(|q| {
-                        let rt_range = match if let Some(rt) = q.observed_rt_seconds() {
-                            tolerance.rt_range_as_milis(rt)
-                        } else {
-                            timsquery::OptionallyRestricted::Unrestricted
-                        } {
-                            timsquery::OptionallyRestricted::Unrestricted => {
-                                let range = ref_rts.range_milis();
-                                timsquery::TupleRange::try_new(range.0, range.1)
-                                    .expect("Reference RTs should be sorted and valid")
-                            }
-                            timsquery::OptionallyRestricted::Restricted(r) => r,
-                        };
-                        ChromatogramCollector::new(q, rt_range, ref_rts)
+                        ChromatogramCollector::new(q, ref_rts)
                             .map_err(|e| CliError::DataProcessing(format!("{:?}", e)))
                     })
                     .collect::<Result<Vec<_>, _>>()?;
@@ -140,6 +142,7 @@ impl<T: KeyLike + Display> AggregatorContainer<T> {
     }
 
     pub fn add_query(&mut self, index: &IndexedTimstofPeaks, tolerance: &Tolerance) {
+        let tolerance = &tolerance.peak_tolerance();
         match self {
             AggregatorContainer::Point(aggregators) => {
                 let n = aggregators.len();
@@ -233,7 +236,6 @@ impl<T: KeyLike + Display> AggregatorContainer<T> {
 mod tests {
     use super::*;
     use crate::cli::SerializationFormat;
-    use timsquery::TupleRange;
     use timsquery::serde::TargetTable;
 
     #[test]
@@ -269,8 +271,13 @@ mod tests {
             };
             let queries: Vec<_> = geom.flats().map(|f| geom.item_at(f)).collect();
             let cycles = CycleToRTMapping::new(vec![10, 20]);
-            let mut spectra =
-                AggregatorContainer::Spectrum(queries.iter().map(SpectralCollector::new).collect());
+            let mut spectra = AggregatorContainer::new(
+                &queries,
+                PossibleAggregator::Spectrum,
+                &cycles,
+                &Tolerance::default(),
+            )
+            .unwrap();
             let mut bytes = Vec::new();
             let mut ser = JsonStreamSerializer::new(&mut bytes, SerializationFormat::Json);
             assert!(
@@ -283,6 +290,11 @@ mod tests {
                 .unwrap();
             ser.finish().unwrap();
             let output: Vec<serde_json::Value> = serde_json::from_slice(&bytes).unwrap();
+            assert!(
+                output
+                    .iter()
+                    .all(|row| { (row["rt_seconds"].as_f64().unwrap() - 0.01).abs() < 1e-6 })
+            );
             assert_eq!(
                 output.iter().map(|r| r["id"].clone()).collect::<Vec<_>>(),
                 *ids.as_array().unwrap()
@@ -292,9 +304,23 @@ mod tests {
                 .iter()
                 .enumerate()
                 .map(|(i, q)| {
-                    let mut agg =
-                        ChromatogramCollector::new(q, TupleRange::try_new(9, 20).unwrap(), &cycles)
-                            .unwrap();
+                    let mut agg = ChromatogramCollector::new(
+                        &timsquery::ExtractionQuery::new(
+                            q,
+                            timsquery::ResolvedRt::resolve(
+                                timsquery::RtSelection::FullRun,
+                                &timsquery::models::tolerance::RtTolerance::Unrestricted,
+                                timsquery::TupleRange::try_new(
+                                    timsquery::ObservedRTSeconds(0.009),
+                                    timsquery::ObservedRTSeconds(0.020),
+                                )
+                                .unwrap(),
+                            )
+                            .unwrap(),
+                        ),
+                        &cycles,
+                    )
+                    .unwrap();
                     // The middle query produces no signal and must be skipped.
                     if i != 1 {
                         agg.precursors

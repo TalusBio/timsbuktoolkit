@@ -536,12 +536,14 @@ impl ViewerApp {
                     .filter(|_| &self.calibration.library_rt_axis == rt.axis)
                     .and_then(|cs| cs.curve());
                 match curve {
-                    Some(curve) => match curve.predict(LibraryRT(rt.value as f64)) {
-                        Ok(rt) => Some(rt.0 as f32),
-                        Err(calibrt::CalibRtError::OutOfBounds(seconds)) => Some(seconds as f32),
+                    Some(curve) => match curve.predict(LibraryRT(rt.value.0 as f64)) {
+                        Ok(rt) => Some(timsquery::ObservedRTSeconds(rt.0 as f32)),
+                        Err(calibrt::CalibRtError::OutOfBounds(seconds)) => {
+                            Some(timsquery::ObservedRTSeconds(seconds as f32))
+                        }
                         Err(_) => None,
                     },
-                    None => matches!(rt.axis, timsquery::RtAxis::Seconds).then_some(rt.value),
+                    None => None,
                 }
             });
             let expected_intensities_owned = expected_intensities.clone();
@@ -598,11 +600,11 @@ impl ViewerApp {
     /// Compute chromatogram in background thread
     fn compute_chromatogram_background(
         elution_group: timsquery::models::target::OwnedTarget<IonAnnot>,
-        observed_rt: Option<f32>,
+        observed_rt: Option<timsquery::ObservedRTSeconds<f32>>,
         expected_intensities: timsseek::ExpectedIntensities<IonAnnot>,
         selected_idx: usize,
         index: Arc<IndexedPeaksHandle>,
-        mut tolerance: Tolerance,
+        tolerance: Tolerance,
         smoothing: SmoothingMethod,
         cancel_token: CancellationToken,
     ) -> ChromatogramComputeResult {
@@ -612,28 +614,19 @@ impl ViewerApp {
             return Err("Computation cancelled".to_string());
         }
 
-        // Build collector
-        let mut collector = if let Some(rt) = observed_rt {
-            ComputedState::build_collector(
-                &index,
-                &timsquery::AtObservedRt::new(&elution_group, rt),
-            )
-        } else {
-            if elution_group.rt().is_some()
-                && !matches!(
-                    tolerance.rt,
-                    timsquery::models::tolerance::RtTolerance::Unrestricted
-                )
-            {
-                return Err(
-                    "Library RT is not observed seconds; calibrate or remove the RT restriction"
-                        .into(),
-                );
-            }
-            tolerance.rt = timsquery::models::tolerance::RtTolerance::Unrestricted;
-            ComputedState::build_collector(&index, &elution_group)
-        }
-        .map_err(|e| format!("Failed to build collector: {:?}", e))?;
+        let selection = observed_rt.map_or(
+            timsquery::RtSelection::FullRun,
+            timsquery::RtSelection::Centered,
+        );
+        let rt = timsquery::ResolvedRt::from_mapping(
+            selection,
+            &tolerance.rt,
+            index.ms1_cycle_mapping(),
+        )
+        .map_err(|e| format!("Invalid extraction RT: {e:?}"))?;
+        let query = timsquery::ExtractionQuery::new(&elution_group, rt);
+        let mut collector = ComputedState::build_collector(&index, &query)
+            .map_err(|e| format!("Failed to build collector: {e:?}"))?;
 
         // Check if cancelled after building collector
         if cancel_token.is_cancelled() {
@@ -713,7 +706,7 @@ impl ViewerApp {
                             .as_ref()
                             .filter(|_| &self.calibration.library_rt_axis == rt.axis)
                             .and_then(|cs| cs.curve())
-                            .and_then(|curve| match curve.predict(LibraryRT(rt.value as f64)) {
+                            .and_then(|curve| match curve.predict(LibraryRT(rt.value.0 as f64)) {
                                 Ok(y) => Some(y.0),
                                 Err(calibrt::CalibRtError::OutOfBounds(y)) => Some(y),
                                 Err(_) => None,
@@ -722,7 +715,7 @@ impl ViewerApp {
                         if matches!(rt.axis, timsquery::RtAxis::Seconds) {
                             self.computed.insert_reference_line(
                                 "Library RT".into(),
-                                rt.value as f64,
+                                rt.value.0 as f64,
                                 Color32::BLUE,
                             );
                         }
@@ -1743,7 +1736,7 @@ impl<'a> TabViewer for AppTabViewer<'a> {
                 let selected_library_rt = self.ui.selected_index.and_then(|idx| {
                     let eg_data = self.data.elution_groups.as_ref()?;
                     let (eg, _) = eg_data.get_elem(idx).ok()?;
-                    eg.rt().map(|rt| rt.value as f64)
+                    eg.rt().map(|rt| rt.value.0 as f64)
                 });
                 self.calibration.render_panel(
                     ui,

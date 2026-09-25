@@ -631,7 +631,7 @@ mod tests {
                             assert_eq!(geom.rt_axis(), expected);
                             let row = geom.rows().next().unwrap();
                             assert_eq!(
-                                geom.library_rt(row),
+                                geom.library_rt(row).map(|rt| rt.0),
                                 (expected != &crate::RtAxis::Absent).then_some(20.0)
                             );
                         }

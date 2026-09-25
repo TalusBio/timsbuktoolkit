@@ -531,10 +531,18 @@ impl ViewerCalibrationState {
                             return (scorer, local_heap);
                         };
                         let extraction = match build_extraction(
-                            &elution_group,
+                            &timsquery::ExtractionQuery::new(
+                                &elution_group,
+                                timsquery::ResolvedRt::from_mapping(
+                                    timsquery::RtSelection::FullRun,
+                                    &tolerance.rt,
+                                    index.ms1_cycle_mapping(),
+                                )
+                                .expect("valid acquisition range"),
+                            ),
                             expected_intensities,
                             index.as_ref(),
-                            &tolerance,
+                            &tolerance.peak_tolerance(),
                             Some(TOP_N_FRAGMENTS),
                         ) {
                             Ok(ext) => ext,
@@ -561,7 +569,7 @@ impl ViewerCalibrationState {
                                 score: apex.score,
                                 apex_rt: ObservedRTSeconds(apex.retention_time_ms as f32 / 1000.0),
                                 speclib_index: elution_groups.flat(eg_idx),
-                                library_rt: LibraryRT(library_rt),
+                                library_rt,
                             });
                         }
                         (scorer, local_heap)

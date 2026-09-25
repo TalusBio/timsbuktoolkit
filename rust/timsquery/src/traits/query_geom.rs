@@ -1,9 +1,8 @@
 use crate::models::target::OwnedTarget;
 use crate::traits::KeyLike;
 
-/// Read-only geometry contract shared by the materialized `Target`
-/// and the columnar flyweight `Query<L>`. Method names mirror the aggregator
-/// collectors' existing calls so they relax to `&impl Target` unchanged.
+/// Source-library geometry shared by owned targets and columnar queries.
+/// RT stays in the library domain, even when its unit is seconds.
 pub trait Target {
     type Label: KeyLike;
 
@@ -20,13 +19,8 @@ pub trait Target {
     fn mono_precursor_mz(&self) -> f64;
     fn precursor_charge(&self) -> u8;
     fn rt(&self) -> Option<crate::models::RtCoordinate<'_>>;
-    fn library_rt(&self) -> Option<f32> {
+    fn library_rt(&self) -> Option<calibrt::LibraryRT<f32>> {
         self.rt().map(|r| r.value)
-    }
-    fn observed_rt_seconds(&self) -> Option<f32> {
-        self.rt()
-            .filter(|r| *r.axis == crate::models::RtAxis::Seconds)
-            .map(|r| r.value)
     }
     fn mobility_ook0(&self) -> f32;
     fn precursor_mz_limits(&self) -> (f64, f64);
@@ -102,7 +96,7 @@ mod tests {
         let eg: OwnedTarget<crate::IonAnnot> = OwnedTarget::builder()
             .id(7)
             .mobility_ook0(0.75)
-            .rt_seconds(1.0)
+            .rt_value(1.0)
             .fragment_labels([crate::IonAnnot::try_from("y3").unwrap()].as_slice().into())
             .fragment_mzs(vec![100.0])
             .precursor_labels(tinyvec::tiny_vec!(0))
@@ -123,7 +117,7 @@ mod tests {
         let src: OwnedTarget<crate::IonAnnot> = OwnedTarget::builder()
             .id(3)
             .mobility_ook0(0.5)
-            .rt_seconds(2.0)
+            .rt_value(2.0)
             .fragment_labels([crate::IonAnnot::try_from("y2").unwrap()].as_slice().into())
             .fragment_mzs(vec![250.0])
             .precursor_labels(tinyvec::tiny_vec!(0))

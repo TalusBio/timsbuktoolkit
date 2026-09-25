@@ -45,7 +45,6 @@ use timsquery::traits::queriable_data::{
     PeakAddable,
     QueriableData,
 };
-use timsquery::utils::TupleRange;
 use timsseek::IonAnnot;
 use timsseek::data_sources::reference_library::ReferenceLibrary;
 use timsseek::models::LoadPolicy;
@@ -121,8 +120,12 @@ fn main() {
     // Cycle-mapping range -- use the index's full range so no RT filtering
     // prunes peaks away; isolates per-peak iteration cost.
     let cycle_mapping = index.ms1_cycle_mapping();
-    let (min_rt, max_rt) = cycle_mapping.range_milis();
-    let rt_range = TupleRange::try_new(min_rt, max_rt).expect("rt range valid");
+    let rt = timsquery::ResolvedRt::from_mapping(
+        timsquery::RtSelection::FullRun,
+        &tolerance.rt,
+        cycle_mapping,
+    )
+    .unwrap();
 
     let items: Vec<_> = speclib.iter().take(n).collect();
     eprintln!("Benching {} items × {} iters each", items.len(), iters);
@@ -133,8 +136,10 @@ fn main() {
         let mut total_peaks = 0u64;
         for _ in 0..iters {
             for item in &items {
-                let mut agg = SpectralCollector::<IonAnnot, NoOpSink>::new(item);
-                index.add_query(&mut agg, &tolerance);
+                let mut agg = SpectralCollector::<IonAnnot, NoOpSink>::new(
+                    &timsquery::ExtractionQuery::new(item, rt),
+                );
+                index.add_query(&mut agg, &tolerance.peak_tolerance());
                 for (_, s) in agg.iter_precursors() {
                     total_peaks += s.0 as u64;
                 }
@@ -160,8 +165,10 @@ fn main() {
         let mut total_intensity = 0.0f64;
         for _ in 0..iters {
             for item in &items {
-                let mut agg = PointIntensityAggregator::<IonAnnot>::new(item);
-                index.add_query(&mut agg, &tolerance);
+                let mut agg = PointIntensityAggregator::<IonAnnot>::new(
+                    &timsquery::ExtractionQuery::new(item, rt),
+                );
+                index.add_query(&mut agg, &tolerance.peak_tolerance());
                 total_intensity += agg.intensity;
             }
         }
@@ -181,12 +188,13 @@ fn main() {
         let mut total_frag_peaks = 0u64;
         for _ in 0..iters {
             for item in &items {
-                let Ok(mut agg) =
-                    ChromatogramCollector::<IonAnnot, f32>::new(item, rt_range, cycle_mapping)
-                else {
+                let Ok(mut agg) = ChromatogramCollector::<IonAnnot, f32>::new(
+                    &timsquery::ExtractionQuery::new(item, rt),
+                    cycle_mapping,
+                ) else {
                     continue;
                 };
-                index.add_query(&mut agg, &tolerance);
+                index.add_query(&mut agg, &tolerance.peak_tolerance());
                 total_frag_peaks += agg.n_fragment_peaks_added;
             }
         }

@@ -1,6 +1,7 @@
 pub mod aggregators;
 pub mod base;
 pub mod capabilities;
+pub mod extraction_query;
 pub mod indexed_data;
 mod lazy;
 pub mod query_handle;

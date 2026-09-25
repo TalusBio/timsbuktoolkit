@@ -20,7 +20,8 @@ pub struct OwnedTarget<T: KeyLike> {
     id: crate::models::OwnedSourceId,
     #[serde(alias = "mobility")]
     mobility_ook0: f32,
-    rt_seconds: f32,
+    #[serde(rename = "rt_seconds")]
+    rt_value: f32,
     #[serde(default = "legacy_rt_axis")]
     #[builder(default = crate::models::RtAxis::Seconds)]
     rt_axis: crate::models::RtAxis,
@@ -95,7 +96,7 @@ impl<T: KeyLike + Default> OwnedTarget<T> {
         Self {
             id: crate::models::OwnedSourceId::placeholder(),
             mobility_ook0: 0.0,
-            rt_seconds: 0.0,
+            rt_value: 0.0,
             rt_axis: crate::models::RtAxis::Absent,
             precursor_mono_mz: 0.0,
             precursor_charge: 0,
@@ -121,15 +122,16 @@ impl<T: KeyLike> OwnedTarget<T> {
 
     pub fn rt(&self) -> Option<crate::models::RtCoordinate<'_>> {
         (self.rt_axis != crate::models::RtAxis::Absent).then_some(crate::models::RtCoordinate {
-            value: self.rt_seconds,
+            value: calibrt::LibraryRT(self.rt_value),
             axis: &self.rt_axis,
         })
     }
 
-    /// Observed-time center; unavailable for absent or uncalibrated library axes.
+    /// Source coordinate in seconds, when its declared unit is seconds.
+    /// This does not establish that it belongs to the current acquisition.
     pub fn rt_seconds(&self) -> f32 {
         if self.rt_axis == crate::models::RtAxis::Seconds {
-            self.rt_seconds
+            self.rt_value
         } else {
             f32::NAN
         }
@@ -150,21 +152,17 @@ impl<T: KeyLike> OwnedTarget<T> {
 
     // NOTE: I am thinking about removing this and leave the rest as a trait
     pub fn set_rt_seconds(&mut self, rt_seconds: f32) {
-        self.rt_seconds = rt_seconds;
+        self.rt_value = rt_seconds;
         self.rt_axis = crate::models::RtAxis::Seconds;
     }
 
-    /// In-place copy reusing Vec/TinyVec capacity. The `clear()` + `push`
-    /// pattern preserves the destination's heap buffer capacity across
-    /// resets -- after warm-up, zero alloc. Used by the isotope-offset
-    /// scratch in timsseek. `G` is any `Target` (e.g. the columnar
-    /// flyweight), not necessarily `Self` -- the body reads `src` only
-    /// through trait methods.
+    /// Materialize borrowed source geometry, reusing fragment buffers.
+    /// Owned metadata, including the library RT axis, is cloned here.
     pub fn reset_from<G: crate::traits::Target<Label = T>>(&mut self, src: &G) {
         self.id.set_from(src.output_id());
         self.mobility_ook0 = src.mobility_ook0();
         let rt = src.rt();
-        self.rt_seconds = rt.map_or(0.0, |r| r.value);
+        self.rt_value = rt.map_or(0.0, |r| r.value.0);
         self.rt_axis = rt.map_or(crate::models::RtAxis::Absent, |r| r.axis.clone());
         self.precursor_mono_mz = src.mono_precursor_mz();
         self.precursor_charge = src.precursor_charge();
@@ -246,7 +244,7 @@ impl<T: KeyLike> OwnedTarget<T> {
         OwnedTarget {
             id: self.id.clone(),
             mobility_ook0: self.mobility_ook0,
-            rt_seconds: self.rt_seconds,
+            rt_value: self.rt_value,
             rt_axis: self.rt_axis.clone(),
             precursor_mono_mz: self.precursor_mono_mz,
             precursor_charge: self.precursor_charge,

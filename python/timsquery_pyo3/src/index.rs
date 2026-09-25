@@ -7,7 +7,6 @@ use timsquery::traits::queriable_data::QueriableData;
 use timsquery::{
     ChromatogramCollector,
     MzMobilityStatsCollector,
-    OptionallyRestricted,
     SpectralCollector,
     Tolerance,
 };
@@ -21,28 +20,20 @@ use crate::spectrum::{
 use crate::target::PyTarget;
 use crate::tolerance::PyTolerance;
 
-/// Compute the RT range in milliseconds for a chromatogram query.
-///
-/// If the tolerance is restricted, returns the tolerance-derived range.
-/// If unrestricted, falls back to the full acquisition RT range from the
-/// cycle mapping (giving a chromatogram spanning the entire run).
-pub(crate) fn rt_range_ms_for_chromatogram(
+/// Python target `rt_seconds` is an explicit acquisition coordinate.
+pub(crate) fn resolve_query_rt(
     tol: &Tolerance,
     rt_seconds: f32,
     handle: &IndexedPeaksHandle,
-) -> PyResult<timsquery::TupleRange<u32>> {
-    match tol.rt_range_as_milis(rt_seconds) {
-        OptionallyRestricted::Restricted(range) => Ok(range),
-        OptionallyRestricted::Unrestricted => {
-            let (start, end) = handle.ms1_cycle_mapping().range_milis();
-            timsquery::TupleRange::try_new(start, end).map_err(|e| {
-                PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                    "Empty RT range in index: {:?}",
-                    e
-                ))
-            })
-        }
-    }
+) -> PyResult<timsquery::ResolvedRt> {
+    timsquery::ResolvedRt::from_mapping(
+        timsquery::RtSelection::Centered(timsquery::ObservedRTSeconds(rt_seconds)),
+        &tol.rt,
+        handle.ms1_cycle_mapping(),
+    )
+    .map_err(|e| {
+        PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("Invalid query RT: {e:?}"))
+    })
 }
 
 /// Resolved tolerances: either one shared or one per query.
@@ -133,15 +124,18 @@ impl PyTimsIndex {
         target: &PyTarget,
         tolerance: &PyTolerance,
     ) -> PyResult<PyChromatogramResult> {
-        let target = target.inner.clone();
+        let target = &target.inner;
         let tol = &tolerance.inner;
-        let rt_range_ms = rt_range_ms_for_chromatogram(tol, target.rt_seconds(), &self.handle)?;
+        let resolved_rt = resolve_query_rt(tol, target.rt_seconds(), &self.handle)?;
         let ref_rt = self.handle.ms1_cycle_mapping();
 
-        let mut collector = ChromatogramCollector::<usize, f32>::new(&target, rt_range_ms, ref_rt)
-            .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{:?}", e)))?;
+        let mut collector = ChromatogramCollector::<usize, f32>::new(
+            &timsquery::ExtractionQuery::new(target, resolved_rt),
+            ref_rt,
+        )
+        .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{:?}", e)))?;
 
-        self.handle.add_query(&mut collector, tol);
+        self.handle.add_query(&mut collector, &tol.peak_tolerance());
 
         Ok(PyChromatogramResult::new(collector, target.id()))
     }
@@ -161,18 +155,22 @@ impl PyTimsIndex {
         target: &PyTarget,
         tolerance: &PyTolerance,
     ) -> PyResult<()> {
-        let target = target.inner.clone();
+        let target = &target.inner;
         let tol = &tolerance.inner;
-        let rt_range_ms = rt_range_ms_for_chromatogram(tol, target.rt_seconds(), &self.handle)?;
+        let resolved_rt = resolve_query_rt(tol, target.rt_seconds(), &self.handle)?;
         let ref_rt = self.handle.ms1_cycle_mapping();
 
         result
             .collector
-            .try_reset_with(&target, rt_range_ms, ref_rt)
+            .try_reset_with(
+                &timsquery::ExtractionQuery::new(target, resolved_rt),
+                ref_rt,
+            )
             .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{:?}", e)))?;
 
         result.source_id.set_from(target.id());
-        self.handle.add_query(&mut result.collector, tol);
+        self.handle
+            .add_query(&mut result.collector, &tol.peak_tolerance());
 
         Ok(())
     }
@@ -189,10 +187,13 @@ impl PyTimsIndex {
         target: &PyTarget,
         tolerance: &PyTolerance,
     ) -> PyResult<PySpectralResult> {
-        let target = target.inner.clone();
+        let target = &target.inner;
         let tol = &tolerance.inner;
-        let mut collector = SpectralCollector::<usize, f32>::new(&target);
-        self.handle.add_query(&mut collector, tol);
+        let mut collector = SpectralCollector::<usize, f32>::new(&timsquery::ExtractionQuery::new(
+            target,
+            resolve_query_rt(tol, target.rt_seconds(), &self.handle)?,
+        ));
+        self.handle.add_query(&mut collector, &tol.peak_tolerance());
         Ok(PySpectralResult::new(collector, target.id()))
     }
 
@@ -209,10 +210,15 @@ impl PyTimsIndex {
         target: &PyTarget,
         tolerance: &PyTolerance,
     ) -> PyResult<PyMzMobilityResult> {
-        let target = target.inner.clone();
+        let target = &target.inner;
         let tol = &tolerance.inner;
-        let mut collector = SpectralCollector::<usize, MzMobilityStatsCollector>::new(&target);
-        self.handle.add_query(&mut collector, tol);
+        let mut collector = SpectralCollector::<usize, MzMobilityStatsCollector>::new(
+            &timsquery::ExtractionQuery::new(
+                target,
+                resolve_query_rt(tol, target.rt_seconds(), &self.handle)?,
+            ),
+        );
+        self.handle.add_query(&mut collector, &tol.peak_tolerance());
         Ok(PyMzMobilityResult::new(collector, target.id()))
     }
 
@@ -239,13 +245,14 @@ impl PyTimsIndex {
             .iter()
             .enumerate()
             .map(|(i, target)| {
-                let inner = target.inner.clone();
+                let inner = &target.inner;
                 let tol = tolerances.get(i);
-                let rt_range_ms =
-                    rt_range_ms_for_chromatogram(tol, inner.rt_seconds(), &self.handle)?;
-                ChromatogramCollector::<usize, f32>::new(&inner, rt_range_ms, ref_rt).map_err(|e| {
-                    PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{:?}", e))
-                })
+                let resolved_rt = resolve_query_rt(tol, inner.rt_seconds(), &self.handle)?;
+                ChromatogramCollector::<usize, f32>::new(
+                    &timsquery::ExtractionQuery::new(inner, resolved_rt),
+                    ref_rt,
+                )
+                .map_err(|e| PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{:?}", e)))
             })
             .collect::<PyResult<Vec<_>>>()?;
 
@@ -253,10 +260,19 @@ impl PyTimsIndex {
         let handle = &*self.handle;
         py.detach(|| match &tolerances {
             ResolvedTolerances::Single(tol) => {
-                handle.par_add_query_multi(&mut collectors[..], rayon::iter::repeat_n(tol, n));
+                handle.par_add_query_multi(
+                    &mut collectors[..],
+                    rayon::iter::repeat_n(&tol.peak_tolerance(), n),
+                );
             }
             ResolvedTolerances::PerQuery(tols) => {
-                handle.par_add_query_multi(&mut collectors[..], &tols[..]);
+                handle.par_add_query_multi(
+                    &mut collectors[..],
+                    &tols
+                        .iter()
+                        .map(Tolerance::peak_tolerance)
+                        .collect::<Vec<_>>()[..],
+                );
             }
         });
 

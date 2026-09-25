@@ -509,7 +509,7 @@ fn parse_precursor_group(
             &first_row.modified_peptide,
         )?)
         .mobility_ook0(mobility)
-        .rt_seconds(rt_seconds)
+        .rt_value(rt_seconds)
         .fragment_labels(buffers.fragment_labels.as_slice().into())
         .fragment_mzs(fragment_mzs)
         .precursor_labels(tiny_vec![0]) // Single monoisotopic precursor
@@ -847,7 +847,7 @@ fn parse_precursor_group_from_parquet(
             &columns.modified_sequences[first_idx],
         )?)
         .mobility_ook0(mobility)
-        .rt_seconds(rt_seconds)
+        .rt_value(rt_seconds)
         .fragment_labels(buffers.fragment_labels.as_slice().into())
         .fragment_mzs(fragment_mzs)
         .precursor_labels(tiny_vec![0])

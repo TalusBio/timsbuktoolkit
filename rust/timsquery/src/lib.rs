@@ -73,8 +73,18 @@ pub use crate::serde::index_serde::{
 };
 
 pub use crate::models::retention_time::{
-    AtObservedRt,
     RtAxis,
     RtCoordinate,
 };
 pub use crate::traits::Target;
+
+pub use calibrt::{
+    LibraryRT,
+    ObservedRTSeconds,
+};
+pub use models::extraction_query::{
+    ExtractionQuery,
+    ResolvedRt,
+    RtSelection,
+};
+pub use models::tolerance::PeakTolerance;

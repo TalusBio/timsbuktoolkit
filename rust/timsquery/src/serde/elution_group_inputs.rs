@@ -116,7 +116,7 @@ impl<T: KeyLike, U: TryInto<T> + KeyLike> TryFrom<ElutionGroupInput<U>> for Owne
         let builder = OwnedTarget::builder()
             .id(val.id)
             .mobility_ook0(val.mobility)
-            .rt_seconds(val.rt_seconds)
+            .rt_value(val.rt_seconds)
             .rt_axis(val.rt_axis)
             .precursor(val.precursor, val.precursor_charge)
             .precursor_labels(if let Some(isotopes) = val.precursor_isotopes {

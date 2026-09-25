@@ -59,7 +59,8 @@ pub struct QueryIndexArgs {
     #[arg(short, long)]
     pub tolerance_settings_path: PathBuf,
 
-    /// The path to the json file with the elution groups.
+    /// Query geometry file. With restricted RT tolerance, supplied seconds must
+    /// be coordinates on the queried acquisition; this command does not calibrate RT.
     #[arg(short, long)]
     pub elution_groups_path: PathBuf,
 

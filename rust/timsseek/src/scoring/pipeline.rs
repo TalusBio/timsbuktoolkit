@@ -48,9 +48,11 @@ use timsquery::traits::Target;
 use timsquery::utils::TupleRange;
 use timsquery::{
     ChromatogramCollector,
+    ExtractionQuery,
     KeyLike,
     MzMobilityStatsCollector,
-    OwnedTarget,
+    ResolvedRt,
+    RtSelection,
     SpectralCollector,
     Tolerance,
 };
@@ -96,13 +98,11 @@ use tracing::warn;
 /// Per-rayon-worker scoring state. Holds a `TraceScorer` plus reusable scratch:
 /// - `Extraction` slot (ChromatogramCollector reset-and-reused, not reallocated)
 /// - `inner_collector` / `isotope_collector` reused across Phase 3 secondary queries
-/// - `isotope_query` holds geometry with a neutron offset, initialized lazily.
 pub struct ScoringWorker {
     pub scorer: TraceScorer,
     pub extraction: Option<Extraction<IonAnnot>>,
     pub inner_collector: Option<SpectralCollector<IonAnnot, MzMobilityStatsCollector>>,
     pub isotope_collector: Option<SpectralCollector<IonAnnot, f32>>,
-    pub isotope_query: Option<timsquery::OwnedTarget<IonAnnot>>,
 }
 
 impl ScoringWorker {
@@ -112,7 +112,6 @@ impl ScoringWorker {
             extraction: None,
             inner_collector: None,
             isotope_collector: None,
-            isotope_query: None,
         }
     }
 }
@@ -597,48 +596,34 @@ impl<I: ScorerQueriable> Scorer<I> {
         isotope_tol: &Tolerance,
         worker: &mut ScoringWorker,
     ) {
-        let new_rt_seconds = apex.retention_time_ms as f32 / 1000.0;
-
-        // **Pass 1**: query at apex RT to determine observed mobility.
+        let apex_rt = RtSelection::Centered(calibrt::ObservedRTSeconds(
+            apex.retention_time_ms as f32 / 1000.0,
+        ));
+        let resolve = |tolerance: &Tolerance| {
+            ResolvedRt::from_mapping(apex_rt, &tolerance.rt, self.index.ms1_cycle_mapping())
+                .expect("detected apex lies inside acquisition")
+        };
+        let spectral_query = ExtractionQuery::new(query, resolve(spectral_tol));
         let inner = worker
             .inner_collector
-            .get_or_insert_with(|| SpectralCollector::new(query));
-        inner.reset_with_overrides(query, Some(new_rt_seconds), None);
-        self.index.add_query(inner, spectral_tol);
-
+            .get_or_insert_with(|| SpectralCollector::new(&spectral_query));
+        inner.reset_with(&spectral_query);
+        self.index.add_query(inner, &spectral_tol.peak_tolerance());
         let mobility = Self::get_mobility(inner);
-
-        // **Pass 2**: same collector, now with mobility override.
-        let inner = worker.inner_collector.as_mut().expect("init above");
-        inner.reset_with_overrides(query, Some(new_rt_seconds), Some(mobility as f32));
-
-        self.index.add_query(inner, isotope_tol);
+        let isotope_query =
+            ExtractionQuery::new(query, resolve(isotope_tol)).with_mobility(mobility as f32);
+        inner.reset_with(&isotope_query);
+        self.index.add_query(inner, &isotope_tol.peak_tolerance());
         if !query.scoring_plan().fragment_isotopes().enabled {
-            // Workers may be reused with another library. Never consume a stale
-            // isotope collector when this library disables the operation.
             worker.isotope_collector = None;
             return;
         }
-
-        // Isotope query holds `query` with +1 neutron offset applied
-        // (buffer-override -- reuses Vec capacity after warm-up).
-        let isotope_query = worker
-            .isotope_query
-            .get_or_insert_with(OwnedTarget::empty_like);
-        crate::utils::elution_group_ops::apply_isotope_offset_fragments_into(
-            isotope_query,
-            query,
-            1i8,
-        );
-
         let isotope = worker
             .isotope_collector
-            .get_or_insert_with(|| SpectralCollector::new(isotope_query));
-        isotope.reset_with_overrides(isotope_query, Some(new_rt_seconds), Some(mobility as f32));
-
-        // Both queries share the same isotope_tol per existing logic.
-        let isotope = worker.isotope_collector.as_mut().expect("init above");
-        self.index.add_query(isotope, isotope_tol);
+            .get_or_insert_with(|| SpectralCollector::new(&isotope_query));
+        isotope.reset_with(&isotope_query);
+        crate::utils::elution_group_ops::shift_fragment_isotopes(isotope, 1);
+        self.index.add_query(isotope, &isotope_tol.peak_tolerance());
     }
 
     #[cfg_attr(
@@ -698,7 +683,7 @@ impl<I: ScorerQueriable> Scorer<I> {
             original_rt
                 .map(|rt| {
                     calibration
-                        .convert_irt(LibraryRT(rt))
+                        .convert_irt(rt)
                         .map_err(|_| SkipReason::RetentionTimeOutOfBounds)
                 })
                 .transpose()?
@@ -707,23 +692,39 @@ impl<I: ScorerQueriable> Scorer<I> {
             let tolerance = calibration.get_tolerance(
                 query.mono_precursor_mz(),
                 query.mobility_ook0(),
-                LibraryRT(original_rt),
+                original_rt,
             );
-            let observed_query = timsquery::AtObservedRt::new(query, observed_rt.0);
+            let observed_query = ExtractionQuery::new(
+                query,
+                ResolvedRt::from_mapping(
+                    RtSelection::Centered(observed_rt),
+                    &tolerance.rt,
+                    self.index.ms1_cycle_mapping(),
+                )
+                .map_err(|_| SkipReason::RetentionTimeOutOfBounds)?,
+            );
             super::extraction::build_extraction_into(
                 &mut worker.extraction,
                 &observed_query,
                 &self.index,
-                &tolerance,
+                &tolerance.peak_tolerance(),
                 Some(TOP_N_FRAGMENTS),
             )?;
         } else {
             let tolerance = calibration.unrestricted_rt_tolerance();
             super::extraction::build_extraction_into(
                 &mut worker.extraction,
-                query,
+                &ExtractionQuery::new(
+                    query,
+                    ResolvedRt::from_mapping(
+                        RtSelection::FullRun,
+                        &self.broad_tolerance.rt,
+                        self.index.ms1_cycle_mapping(),
+                    )
+                    .map_err(|_| SkipReason::RetentionTimeOutOfBounds)?,
+                ),
                 &self.index,
-                &tolerance,
+                &tolerance.peak_tolerance(),
                 Some(TOP_N_FRAGMENTS),
             )?;
         }
@@ -733,7 +734,7 @@ impl<I: ScorerQueriable> Scorer<I> {
             charge: query.precursor_charge(),
             handles: identity.handles,
             source_id: identity.source_id,
-            library_rt: original_rt.unwrap_or(f32::NAN),
+            library_rt: original_rt.map_or(f32::NAN, |r| r.0),
             calibrated_rt_seconds: calibrated_rt.map_or(f32::NAN, |r| r.0),
             ref_mobility_ook0: query.mobility_ook0(),
             ref_precursor_mz: query.mono_precursor_mz(),
@@ -769,9 +770,17 @@ impl<I: ScorerQueriable> Scorer<I> {
                         );
                         super::extraction::build_extraction_into(
                             &mut worker.extraction,
-                            query,
+                            &ExtractionQuery::new(
+                                query,
+                                ResolvedRt::from_mapping(
+                                    RtSelection::FullRun,
+                                    &self.broad_tolerance.rt,
+                                    self.index.ms1_cycle_mapping(),
+                                )
+                                .map_err(|_| SkipReason::RetentionTimeOutOfBounds)?,
+                            ),
                             &self.index,
-                            &tolerance,
+                            &tolerance.peak_tolerance(),
                             Some(TOP_N_FRAGMENTS),
                         )?;
                         Ok(super::apex_finding::CandidateMetadata {
@@ -779,7 +788,7 @@ impl<I: ScorerQueriable> Scorer<I> {
                             charge: query.precursor_charge(),
                             handles: identity.handles,
                             source_id: identity.source_id,
-                            library_rt: query.library_rt().unwrap_or(f32::NAN),
+                            library_rt: query.library_rt().map_or(f32::NAN, |r| r.0),
                             calibrated_rt_seconds: f32::NAN,
                             ref_mobility_ook0: query.mobility_ook0(),
                             ref_precursor_mz: query.mono_precursor_mz(),
@@ -972,9 +981,17 @@ impl<I: ScorerQueriable> Scorer<I> {
             tracing::span!(tracing::Level::TRACE, "prescore::extraction").in_scope(|| {
                 super::extraction::build_extraction_into(
                     &mut worker.extraction,
-                    query,
+                    &ExtractionQuery::new(
+                        query,
+                        ResolvedRt::from_mapping(
+                            RtSelection::FullRun,
+                            &self.broad_tolerance.rt,
+                            self.index.ms1_cycle_mapping(),
+                        )
+                        .map_err(|_| SkipReason::RetentionTimeOutOfBounds)?,
+                    ),
                     &self.index,
-                    &self.broad_tolerance,
+                    &self.broad_tolerance.peak_tolerance(),
                     Some(TOP_N_FRAGMENTS),
                 )
             })
@@ -1069,7 +1086,7 @@ impl<I: ScorerQueriable> Scorer<I> {
                             score: loc.score,
                             apex_rt: ObservedRTSeconds(loc.retention_time_ms as f32 / 1000.0),
                             speclib_index: flat,
-                            library_rt: LibraryRT(q.library_rt().unwrap_or(f32::NAN)),
+                            library_rt: q.library_rt().unwrap_or(LibraryRT(f32::NAN)),
                         };
                         if let Err(reason) = heap.push(cand) {
                             t.skips.bump(reason);

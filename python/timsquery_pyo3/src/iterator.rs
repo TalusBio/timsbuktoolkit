@@ -9,7 +9,7 @@ use timsquery::{
     Tolerance,
 };
 
-use crate::index::rt_range_ms_for_chromatogram;
+use crate::index::resolve_query_rt;
 use crate::numpy_utils::array2d_to_numpy;
 use crate::target::PyTarget;
 use crate::tolerance::PyTolerance;
@@ -34,7 +34,7 @@ pub struct PyChromatogramArrays {
     #[pyo3(get)]
     fragment_labels: Vec<(usize, f64)>,
     #[pyo3(get)]
-    rt_range_ms: (u32, u32),
+    resolved_rt: (u32, u32),
     #[pyo3(get)]
     num_cycles: usize,
 }
@@ -92,7 +92,7 @@ fn extract_arrays(
             .iter()
             .map(|(k, mz)| (*k, *mz))
             .collect(),
-        rt_range_ms: (rt.start(), rt.end()),
+        resolved_rt: (rt.start(), rt.end()),
         num_cycles: collector.num_cycles(),
     })
 }
@@ -104,7 +104,7 @@ pub struct PyChromatogramIterator {
     tol_source: ToleranceSource,
     target_source: Py<PyAny>,
     pool: Vec<ChromatogramCollector<usize, f32>>,
-    chunk_tolerances: Vec<Tolerance>,
+    chunk_tolerances: Vec<timsquery::PeakTolerance>,
     buffer: VecDeque<PyChromatogramArrays>,
     chunk_size: usize,
     exhausted: bool,
@@ -140,7 +140,7 @@ impl PyChromatogramIterator {
             match next_result {
                 Ok(obj) => {
                     let target_ref: PyRef<'_, PyTarget> = obj.extract(py)?;
-                    let target = target_ref.inner.clone();
+                    let target = &target_ref.inner;
 
                     let tol = match &self.tol_source {
                         ToleranceSource::Single(t) => t.clone(),
@@ -159,27 +159,29 @@ impl PyChromatogramIterator {
                         }
                     };
 
-                    let rt_range_ms =
-                        rt_range_ms_for_chromatogram(&tol, target.rt_seconds(), &self.handle)?;
+                    let resolved_rt = resolve_query_rt(&tol, target.rt_seconds(), &self.handle)?;
 
                     if i < self.pool.len() {
                         self.pool[i]
-                            .try_reset_with(&target, rt_range_ms, ref_rt)
+                            .try_reset_with(
+                                &timsquery::ExtractionQuery::new(target, resolved_rt),
+                                ref_rt,
+                            )
                             .map_err(|e| {
                                 PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{e:?}"))
                             })?;
                     } else {
-                        let collector =
-                            ChromatogramCollector::<usize, f32>::new(&target, rt_range_ms, ref_rt)
-                                .map_err(|e| {
-                                    PyErr::new::<pyo3::exceptions::PyValueError, _>(format!(
-                                        "{e:?}"
-                                    ))
-                                })?;
+                        let collector = ChromatogramCollector::<usize, f32>::new(
+                            &timsquery::ExtractionQuery::new(target, resolved_rt),
+                            ref_rt,
+                        )
+                        .map_err(|e| {
+                            PyErr::new::<pyo3::exceptions::PyValueError, _>(format!("{e:?}"))
+                        })?;
                         self.pool.push(collector);
                     }
                     source_ids.push(target.id().to_owned_id());
-                    self.chunk_tolerances.push(tol);
+                    self.chunk_tolerances.push(tol.peak_tolerance());
                     n_this_chunk += 1;
                 }
                 Err(err) if err.is_instance_of::<pyo3::exceptions::PyStopIteration>(py) => {

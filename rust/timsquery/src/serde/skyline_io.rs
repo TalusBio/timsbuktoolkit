@@ -386,7 +386,7 @@ fn parse_precursor_group(
     let eg = OwnedTarget::builder()
         .id(id)
         .mobility_ook0(0.0)
-        .rt_seconds(0.0)
+        .rt_value(0.0)
         .rt_axis(crate::models::RtAxis::Absent)
         .fragment_labels(buffers.fragment_labels.as_slice().into())
         .fragment_mzs(fragment_mzs)

@@ -855,7 +855,7 @@ fn map_entry(
         // Library iRT is dimensionless here; keep it raw (no minute->second
         // scaling) -- Phase 1 RT tolerance is unrestricted.
         rt: Some(crate::models::RtCoordinate {
-            value: pep.i_rt(),
+            value: calibrt::LibraryRT(pep.i_rt()),
             axis: &crate::models::RtAxis::NormalizedIndex { scale: None },
         }),
         mobility: pep.i_im(),
@@ -1027,7 +1027,7 @@ mod tests {
         }
         let axis = crate::RtAxis::NormalizedIndex { scale: None };
         let index = Some(crate::RtCoordinate {
-            value: -20.0,
+            value: crate::LibraryRT(-20.0),
             axis: &axis,
         });
         let mut merged = shard(index);

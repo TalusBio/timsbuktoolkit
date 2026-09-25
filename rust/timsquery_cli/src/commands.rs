@@ -506,9 +506,34 @@ mod tests {
         // The read -> item_at -> collector path builds without error for every row.
         for flat in geom.flats() {
             let q = geom.item_at(flat);
-            let point = PointIntensityAggregator::new(&q);
+            let point = PointIntensityAggregator::new(&timsquery::ExtractionQuery::new(
+                &q,
+                timsquery::ResolvedRt::resolve(
+                    timsquery::RtSelection::FullRun,
+                    &timsquery::models::tolerance::RtTolerance::Unrestricted,
+                    timsquery::TupleRange::try_new(
+                        timsquery::ObservedRTSeconds(0.009),
+                        timsquery::ObservedRTSeconds(0.020),
+                    )
+                    .unwrap(),
+                )
+                .unwrap(),
+            ));
             assert_eq!(point.fragment_mzs.len(), q.fragment_count());
-            let _spectrum: SpectralCollector<_, f32> = SpectralCollector::new(&q);
+            let _spectrum: SpectralCollector<_, f32> =
+                SpectralCollector::new(&timsquery::ExtractionQuery::new(
+                    &q,
+                    timsquery::ResolvedRt::resolve(
+                        timsquery::RtSelection::FullRun,
+                        &timsquery::models::tolerance::RtTolerance::Unrestricted,
+                        timsquery::TupleRange::try_new(
+                            timsquery::ObservedRTSeconds(0.009),
+                            timsquery::ObservedRTSeconds(0.020),
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap(),
+                ));
         }
     }
 }

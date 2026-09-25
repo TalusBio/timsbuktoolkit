@@ -8188,6 +8188,7 @@ dependencies = [
  "array2d",
  "arrow 59.2.0",
  "bon",
+ "calibrt",
  "csv",
  "flate2",
  "half",

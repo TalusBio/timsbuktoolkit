@@ -10,7 +10,8 @@ use std::fmt;
 #[serde(transparent)]
 pub struct LibraryRT<T>(pub T);
 
-/// Observed retention time from raw instrument data, always in seconds.
+/// Retention time on an acquisition axis, always in seconds.
+/// May be a calibrated prediction, an explicit query center, or a measured apex.
 #[derive(Debug, Clone, Copy, PartialEq, PartialOrd, Serialize, Deserialize)]
 #[serde(transparent)]
 pub struct ObservedRTSeconds<T>(pub T);

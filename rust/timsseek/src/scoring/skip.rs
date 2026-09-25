@@ -52,6 +52,7 @@ pub enum SkipReason {
 /// Map the timsquery-level error into a `SkipReason` sub-bucket.
 fn classify_tq_error(err: &TQDataProcessingError) -> SkipReason {
     match err {
+        TQDataProcessingError::InvalidRtQuery => SkipReason::RetentionTimeOutOfBounds,
         TQDataProcessingError::ExpectedNonEmptyData => SkipReason::ApexEmptyData,
         TQDataProcessingError::InsufficientData { .. } => SkipReason::ApexInsufficientData,
         TQDataProcessingError::UnexpectedInfiniteError(_)

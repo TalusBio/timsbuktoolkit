@@ -22,7 +22,7 @@ impl PyTarget {
     ///     id: Numeric source ID for this target.
     ///     precursor_mz: Monoisotopic precursor m/z.
     ///     precursor_charge: Charge state.
-    ///     rt_seconds: Expected retention time in seconds.
+    ///     rt_seconds: Expected retention time on the queried acquisition, in seconds.
     ///     mobility: Expected ion mobility (1/K0).
     ///     fragment_mzs: List of fragment m/z values.
     ///     fragment_labels: List of integer labels (one per fragment, same length as fragment_mzs).
@@ -49,7 +49,7 @@ impl PyTarget {
             .id(id)
             .precursor(precursor_mz, precursor_charge)
             .mobility_ook0(mobility)
-            .rt_seconds(rt_seconds)
+            .rt_value(rt_seconds)
             .fragment_mzs(fragment_mzs)
             .fragment_labels(fragment_labels_tv)
             .precursor_labels(precursor_labels_tv)
@@ -76,12 +76,15 @@ impl PyTarget {
 
     #[getter]
     fn rt_seconds(&self) -> Option<f32> {
-        timsquery::Target::observed_rt_seconds(&self.inner)
+        self.inner
+            .rt()
+            .filter(|rt| *rt.axis == timsquery::RtAxis::Seconds)
+            .map(|rt| rt.value.0)
     }
 
     #[getter]
     fn library_rt(&self) -> Option<f32> {
-        self.inner.rt().map(|rt| rt.value)
+        self.inner.rt().map(|rt| rt.value.0)
     }
 
     #[getter]

@@ -105,7 +105,7 @@ impl ReferenceLibrary {
     /// Finite library-RT extent across every scored variant.
     pub fn rt_range(&self) -> Option<(f32, f32)> {
         self.iter()
-            .filter_map(|q| q.library_rt())
+            .filter_map(|q| q.library_rt().map(|r| r.0))
             .filter(|rt| rt.is_finite())
             .fold(None, |range, rt| {
                 Some(match range {
@@ -890,7 +890,7 @@ mod tests {
         let lib = tiny_ref_lib();
         let expected = lib
             .iter()
-            .filter_map(|q| q.library_rt())
+            .filter_map(|q| q.library_rt().map(|r| r.0))
             .fold((f32::INFINITY, f32::NEG_INFINITY), |(lo, hi), rt| {
                 (lo.min(rt), hi.max(rt))
             });
@@ -1141,8 +1141,8 @@ mod load_tests {
             // Verify other properties are preserved
             for decoy in [&plus, &minus] {
                 assert_eq!(
-                    decoy.library_rt(),
-                    target.library_rt(),
+                    decoy.library_rt().map(|rt| rt.0),
+                    target.library_rt().map(|rt| rt.0),
                     "RT should be preserved"
                 );
                 assert_eq!(
@@ -1641,17 +1641,5 @@ mod load_tests {
             frag_intens: None,
         };
         assert!(ReferenceLibrary::try_from(arena).is_err());
-    }
-}
-
-impl<T: timsquery::Target + ExpectedIntensity + ?Sized> ExpectedIntensity
-    for timsquery::AtObservedRt<'_, T>
-{
-    fn iter_expected_fragments(&self) -> impl Iterator<Item = (IonAnnot, f32)> {
-        self.inner().iter_expected_fragments()
-    }
-
-    fn expected_precursor_envelope(&self) -> SmallVec<[(i8, f32); 3]> {
-        self.inner().expected_precursor_envelope()
     }
 }

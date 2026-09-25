@@ -702,7 +702,10 @@ fn record_rt<'axis>(
             selected = Some(next);
         }
         if selected.is_some() {
-            return Ok(selected.map(|(value, axis)| RtCoordinate { value, axis }));
+            return Ok(selected.map(|(value, axis)| RtCoordinate {
+                value: calibrt::LibraryRT(value),
+                axis,
+            }));
         }
     }
     Ok(None)
@@ -1103,7 +1106,9 @@ mod tests {
         .unwrap();
         assert_eq!(geom.rt_axis(), &RtAxis::Seconds);
         assert_eq!(
-            geom.rows().map(|r| geom.library_rt(r)).collect::<Vec<_>>(),
+            geom.rows()
+                .map(|r| geom.library_rt(r).map(|rt| rt.0))
+                .collect::<Vec<_>>(),
             vec![Some(120.0), Some(120.0), Some(0.0)]
         );
     }
@@ -1119,11 +1124,17 @@ mod tests {
                 scale: Some("reference anchors".into())
             }
         );
-        assert!(geom.rows().all(|r| geom.library_rt(r) == Some(-20.0)));
+        assert!(
+            geom.rows()
+                .all(|r| geom.library_rt(r).map(|rt| rt.0) == Some(-20.0))
+        );
         let measured = "[1]MS:1000894|retention time=2\n[1]UO:0000000|unit=UO:0000031|minute\nMS:1000896|normalized retention time=-20\n";
         let geom = rt_library(header, &[measured]).unwrap();
         assert_eq!(geom.rt_axis(), &RtAxis::Seconds);
-        assert_eq!(geom.library_rt(geom.rows().next().unwrap()), Some(120.0));
+        assert_eq!(
+            geom.library_rt(geom.rows().next().unwrap()).map(|rt| rt.0),
+            Some(120.0)
+        );
         assert_eq!(
             rt_library(header, &["", ""]).unwrap().rt_axis(),
             &RtAxis::Absent
@@ -1140,7 +1151,9 @@ mod tests {
         ]).unwrap();
         assert_eq!(geom.rt_axis(), &RtAxis::NormalizedIndex { scale: None });
         assert_eq!(
-            geom.rows().map(|r| geom.library_rt(r)).collect::<Vec<_>>(),
+            geom.rows()
+                .map(|r| geom.library_rt(r).map(|rt| rt.0))
+                .collect::<Vec<_>>(),
             vec![Some(-12.0), Some(0.0)]
         );
     }
@@ -1149,11 +1162,18 @@ mod tests {
     fn absent_and_unspecified_rt_are_distinct_and_mixtures_are_rejected() {
         let absent = rt_library("", &["", ""]).unwrap();
         assert_eq!(absent.rt_axis(), &RtAxis::Absent);
-        assert!(absent.rows().all(|r| absent.library_rt(r).is_none()));
+        assert!(
+            absent
+                .rows()
+                .all(|r| absent.library_rt(r).map(|rt| rt.0).is_none())
+        );
         let present = "MS:1000894|retention time=0\n";
         let geom = rt_library("", &[present]).unwrap();
         assert_eq!(geom.rt_axis(), &RtAxis::Unspecified);
-        assert_eq!(geom.library_rt(geom.rows().next().unwrap()), Some(0.0));
+        assert_eq!(
+            geom.library_rt(geom.rows().next().unwrap()).map(|rt| rt.0),
+            Some(0.0)
+        );
         for rows in [
             [present, ""],
             ["", present],
@@ -1168,7 +1188,10 @@ mod tests {
     fn inherited_grouped_rt_keeps_its_unit() {
         let geom = rt_library("<AttributeSet Spectrum=all>\n[1]MS:1000894|retention time=2\n[1]UO:0000000|unit=UO:0000031|minute\n", &["", ""]).unwrap();
         assert_eq!(geom.rt_axis(), &RtAxis::Seconds);
-        assert!(geom.rows().all(|r| geom.library_rt(r) == Some(120.0)));
+        assert!(
+            geom.rows()
+                .all(|r| geom.library_rt(r).map(|rt| rt.0) == Some(120.0))
+        );
     }
 
     fn fixture(name: &str) -> PathBuf {
@@ -1526,7 +1549,11 @@ mod tests {
         let first = diann.rows().next().unwrap();
         assert!((diann.precursor_mz(first) - 778.412_96).abs() < 1e-4);
         assert_eq!(diann.charge(first), 2);
-        assert_eq!(diann.library_rt(first), None, "DIA-NN declares no RT");
+        assert_eq!(
+            diann.library_rt(first).map(|rt| rt.0),
+            None,
+            "DIA-NN declares no RT"
+        );
         assert_eq!(diann.output_id(first).to_string(), "AAAAAAAAAAAAAAAASAGGK2");
 
         // Spectronaut writes `MS:1003208|experimental precursor monoisotopic
@@ -1541,7 +1568,7 @@ mod tests {
             "ion mobility drift time, the spelling both exports use"
         );
         assert!(
-            spectronaut.library_rt(first).unwrap() > 0.0,
+            spectronaut.library_rt(first).map(|rt| rt.0).unwrap() > 0.0,
             "Spectronaut declares RT"
         );
     }
@@ -1585,7 +1612,10 @@ mod tests {
             );
             assert_eq!(plain.precursor_mz(a), gzipped.precursor_mz(b));
             assert_eq!(plain.charge(a), gzipped.charge(b));
-            assert_eq!(plain.library_rt(a), gzipped.library_rt(b));
+            assert_eq!(
+                plain.library_rt(a).map(|rt| rt.0),
+                gzipped.library_rt(b).map(|rt| rt.0)
+            );
             assert_eq!(plain.mobility(a), gzipped.mobility(b));
             assert_eq!(plain.frag_mzs(a), gzipped.frag_mzs(b));
             assert_eq!(plain.frag_labels(a), gzipped.frag_labels(b));
@@ -1823,7 +1853,7 @@ mod tests {
             geom.rt_axis(),
             &crate::RtAxis::NormalizedIndex { scale: Some("linear interpolation anchored at TFAHTESHISK = 0 and SILDYVSLVEK = 100 (PROCAL standards, PROSPECT convention)".into()) }
         );
-        assert!((geom.library_rt(first).unwrap() - 1.559414).abs() < 1e-5);
+        assert!((geom.library_rt(first).map(|rt| rt.0).unwrap() - 1.559414).abs() < 1e-5);
     }
 
     /// A third-party library carries no `msspeculator:` attributes and no
@@ -1853,7 +1883,10 @@ mod tests {
     #[test]
     fn every_declared_retention_time_survives_the_load() {
         let geom = arena("target_decoy_attribute_set.mzspeclib.txt");
-        let rts: Vec<f32> = geom.rows().map(|r| geom.library_rt(r).unwrap()).collect();
+        let rts: Vec<f32> = geom
+            .rows()
+            .map(|r| geom.library_rt(r).map(|rt| rt.0).unwrap())
+            .collect();
 
         // Read straight off the fixture, target and decoy of each pair sharing
         // one value.

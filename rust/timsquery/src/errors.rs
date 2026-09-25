@@ -86,6 +86,7 @@ impl Display for UnsupportedDataError {
 
 #[derive(Debug)]
 pub enum DataProcessingError {
+    InvalidRtQuery,
     ExpectedVectorLength { real: usize, expected: usize },
     ExpectedNonEmptyData,
     InsufficientData { real: usize, expected: usize },

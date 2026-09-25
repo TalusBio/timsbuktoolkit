@@ -54,8 +54,17 @@ enums; an empty RT snapshot means no RT fit, while residuals can still contain
 m/z and mobility calibration. Older calibration files
 must be regenerated. Explicit `rt_seconds` JSON/Python inputs remain seconds. JSON `rt_axis` is
 preserved whether optional precursor/fragment labels are supplied or filled in.
-Rust callers use the `Target` geometry trait, `OwnedTarget` for owned data, and
-`AtObservedRt` to borrow library geometry at an observed extraction time.
+Rust source geometry exposes `LibraryRT<f32>` through `Target` and `OwnedTarget`.
+`ExtractionQuery` borrows that geometry with a separately resolved acquisition
+window. `RtSelection::Centered(ObservedRTSeconds(...))` or `FullRun` resolves
+against the acquisition extent once. Collectors copy that window and reuse their
+geometry/intensity buffers; they retain no source borrow. Index queries accept
+`PeakTolerance` for m/z, mobility and quadrupole only. Isotope extraction shifts
+collector buffers directly, without an owned target or library-axis clone.
+The viewer searches full-run without an RT fit, including libraries measured in
+seconds. Direct-query CLI restricted RT inputs explicitly mean acquisition
+seconds; normalized library indices require calibration first. Python target
+`rt_seconds` likewise specifies an acquisition coordinate.
 
 `run_report.json` records the resolved `scoring_plan` once for the search library,
 plus `calibration_scoring_plan` when a separate calibration library is supplied.

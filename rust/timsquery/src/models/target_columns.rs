@@ -349,10 +349,10 @@ impl<L: KeyLike> TargetColumns<L> {
         } else if &self.rt_axis != axis {
             self.rt_error = Some("mixed RT availability or incompatible axes; every retained entry must have RT on one axis, or none may have RT".into());
         }
-        if rt.is_some_and(|r| !r.value.is_finite() || *r.axis == crate::models::RtAxis::Absent) {
+        if rt.is_some_and(|r| !r.value.0.is_finite() || *r.axis == crate::models::RtAxis::Absent) {
             self.rt_error = Some("present RT must be finite and have a non-absent axis".into());
         }
-        self.rt_values.push(rt.map_or(0.0, |r| r.value));
+        self.rt_values.push(rt.map_or(0.0, |r| r.value.0));
         self.mobility.push(mobility);
         self.pending_ids.push(id);
         self.pending_groups.push(decoy_group);
@@ -530,12 +530,12 @@ impl<L: KeyLike> TargetColumns<L> {
 
     pub fn rt(&self, tgt: RowIdx) -> Option<crate::models::RtCoordinate<'_>> {
         (self.rt_axis != crate::models::RtAxis::Absent).then(|| crate::models::RtCoordinate {
-            value: self.rt_values[tgt.get()],
+            value: calibrt::LibraryRT(self.rt_values[tgt.get()]),
             axis: &self.rt_axis,
         })
     }
 
-    pub fn library_rt(&self, tgt: RowIdx) -> Option<f32> {
+    pub fn library_rt(&self, tgt: RowIdx) -> Option<calibrt::LibraryRT<f32>> {
         self.rt(tgt).map(|r| r.value)
     }
 

@@ -341,7 +341,7 @@ fn build_arena(
             precursor_mz: row.precursor_mz,
             charge: row.charge,
             rt: Some(timsquery::RtCoordinate {
-                value: row.rt_value,
+                value: timsquery::LibraryRT(row.rt_value),
                 axis: if matches!(row.rt_axis, timsquery::RtAxis::NormalizedIndex { .. }) {
                     normalized_axis
                 } else {
@@ -526,7 +526,7 @@ mod tests {
                     geom.decoy_group(tgt),
                     geom.charge(tgt),
                     geom.precursor_mz(tgt),
-                    geom.library_rt(tgt).unwrap(),
+                    geom.library_rt(tgt).map(|rt| rt.0).unwrap(),
                     geom.analyte(tgt)
                         .peptide
                         .known()
@@ -739,8 +739,10 @@ mod tests {
                 assert_eq!(sunk.rt_axis(), &expected);
                 assert_eq!(from_file.rt_axis(), &expected);
                 assert_eq!(
-                    sunk.library_rt(sunk.rows().next().unwrap()),
-                    from_file.library_rt(from_file.rows().next().unwrap())
+                    sunk.library_rt(sunk.rows().next().unwrap()).map(|rt| rt.0),
+                    from_file
+                        .library_rt(from_file.rows().next().unwrap())
+                        .map(|rt| rt.0)
                 );
             }
         }
@@ -752,7 +754,16 @@ mod tests {
         let lib = build(&[fixture.row(2, false, None, peaks(2))], DecoyPolicy::Never);
 
         let tgt = lib.library.geometry().rows().next().unwrap();
-        assert!((lib.library.geometry().library_rt(tgt).unwrap() - 1.559414).abs() < 1e-3);
+        assert!(
+            (lib.library
+                .geometry()
+                .library_rt(tgt)
+                .map(|rt| rt.0)
+                .unwrap()
+                - 1.559414)
+                .abs()
+                < 1e-3
+        );
     }
 
     #[test]
@@ -769,7 +780,16 @@ mod tests {
         let lib = build(&[contextual], DecoyPolicy::Never);
 
         let tgt = lib.library.geometry().rows().next().unwrap();
-        assert!((lib.library.geometry().library_rt(tgt).unwrap() - 1890.0).abs() < 1e-3);
+        assert!(
+            (lib.library
+                .geometry()
+                .library_rt(tgt)
+                .map(|rt| rt.0)
+                .unwrap()
+                - 1890.0)
+                .abs()
+                < 1e-3
+        );
     }
 
     #[test]
@@ -972,11 +992,13 @@ mod tests {
                 "precursor m/z of {id}",
             );
             assert!(
-                (sunk.library_rt(row).unwrap() - from_file.library_rt(mirror).unwrap()).abs()
+                (sunk.library_rt(row).map(|rt| rt.0).unwrap()
+                    - from_file.library_rt(mirror).map(|rt| rt.0).unwrap())
+                .abs()
                     < 1e-3,
                 "retention of {id}: {} against {}",
-                sunk.library_rt(row).unwrap(),
-                from_file.library_rt(mirror).unwrap(),
+                sunk.library_rt(row).map(|rt| rt.0).unwrap(),
+                from_file.library_rt(mirror).map(|rt| rt.0).unwrap(),
             );
             assert!(
                 (sunk.mobility(row) - from_file.mobility(mirror)).abs() < 1e-6,

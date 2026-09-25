@@ -270,16 +270,10 @@ impl ComputedState {
 
     pub(crate) fn build_collector(
         index: &IndexedPeaksHandle,
-        elution_group: &impl timsquery::Target<Label = IonAnnot>,
+        elution_group: &timsquery::ExtractionQuery<'_, impl timsquery::Target<Label = IonAnnot>>,
     ) -> Result<ChromatogramCollector<IonAnnot, f32>, ViewerError> {
-        let max_range = index.ms1_cycle_mapping().range_milis();
-        let collector = ChromatogramCollector::new(
-            elution_group,
-            TupleRange::try_new(max_range.0, max_range.1)
-                .expect("Reference RTs should be sorted and valid"),
-            index.ms1_cycle_mapping(),
-        )
-        .map_err(|e| ViewerError::General(format!("Failed to create collector: {:?}", e)))?;
+        let collector = ChromatogramCollector::new(elution_group, index.ms1_cycle_mapping())
+            .map_err(|e| ViewerError::General(format!("Failed to create collector: {:?}", e)))?;
         Ok(collector)
     }
 
@@ -291,7 +285,7 @@ impl ComputedState {
         tolerance: &Tolerance,
         smoothing: &SmoothingMethod,
     ) -> Result<ChromatogramOutput, ViewerError> {
-        index.add_query(collector, tolerance);
+        index.add_query(collector, &tolerance.peak_tolerance());
 
         let mut output =
             ChromatogramOutput::try_new(collector, index.ms1_cycle_mapping(), elution_group.id())
@@ -338,7 +332,7 @@ impl ComputedState {
                     tracing::warn!(
                         "collector id={} rt={} mob={} prec_mz={}",
                         source_id,
-                        context.chromatograms.rt_seconds,
+                        context.chromatograms.rt.center().map_or(f32::NAN, |r| r.0),
                         context.chromatograms.mobility_ook0,
                         context.chromatograms.precursor_mono_mz,
                     );
@@ -568,10 +562,16 @@ impl ComputedState {
             .with_rt_tolerance(RtTolerance::Minutes((5.0 / 60.0, 5.0 / 60.0)))
             .with_wider_mobility(2.0);
 
+        let Ok(rt) = timsquery::ResolvedRt::from_mapping(
+            timsquery::RtSelection::Centered(timsquery::ObservedRTSeconds(rt_override)),
+            &wide_tolerance.rt,
+            index.ms1_cycle_mapping(),
+        ) else {
+            return false;
+        };
         let mut collector: SpectralCollector<IonAnnot, MzMobilityStatsCollector> =
-            SpectralCollector::new(&eg);
-        collector.reset_with_overrides(&eg, Some(rt_override), None);
-        index.add_query(&mut collector, &wide_tolerance);
+            SpectralCollector::new(&timsquery::ExtractionQuery::new(&eg, rt));
+        index.add_query(&mut collector, &wide_tolerance.peak_tolerance());
 
         // Compute 1x and 2x mobility ranges for overlays
         let mob_1x = tolerance.mobility_range(ook0);

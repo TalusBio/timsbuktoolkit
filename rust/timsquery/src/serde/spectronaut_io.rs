@@ -362,7 +362,7 @@ fn parse_precursor_group(
     let eg = OwnedTarget::builder()
         .id(id)
         .mobility_ook0(mobility)
-        .rt_seconds(rt_seconds)
+        .rt_value(rt_seconds)
         .rt_axis(crate::models::RtAxis::NormalizedIndex { scale: None })
         .fragment_labels(buffers.fragment_labels.as_slice().into())
         .fragment_mzs(fragment_mzs)
@@ -457,7 +457,13 @@ mod tests {
             .join("sample_lib.tsv");
 
         let mut elution_groups = read_targets(file_path).expect("Failed to read library");
-        elution_groups.sort_by(|a, b| a.0.rt().unwrap().value.total_cmp(&b.0.rt().unwrap().value));
+        elution_groups.sort_by(|a, b| {
+            a.0.rt()
+                .unwrap()
+                .value
+                .0
+                .total_cmp(&b.0.rt().unwrap().value.0)
+        });
 
         // First precursor (KTVTAMDVVYALKR) has iRT=44.467922
         // Second precursor (MRECISIHVGQAGVQIGNACWELYCLEHGIQPDGQMPSDK) has iRT=83.00864
@@ -467,7 +473,7 @@ mod tests {
 
         // Check that the first elution group has the expected normalized RT (44.467922)
         assert!(
-            (first_eg.rt().unwrap().value - 44.467922).abs() < 0.01,
+            (first_eg.rt().unwrap().value.0 - 44.467922).abs() < 0.01,
             "First elution group RT mismatch"
         );
 
@@ -481,7 +487,7 @@ mod tests {
 
         // Check second precursor RT
         assert!(
-            (second_eg.rt().unwrap().value - 83.00864).abs() < 0.01,
+            (second_eg.rt().unwrap().value.0 - 83.00864).abs() < 0.01,
             "Second elution group RT mismatch"
         );
     }
