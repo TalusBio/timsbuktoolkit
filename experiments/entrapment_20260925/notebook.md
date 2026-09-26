@@ -36,3 +36,15 @@ The competition bypass was temporary and is not in this branch.
 For each new trial: make one change, run the fixed experiment, append its
 metrics and observation here. Commit improvements to the primary metric;
 restore unsuccessful code edits while preserving this log.
+
+Run a model/config trial with:
+
+```sh
+uv run --group interactive python -m experiments.entrapment_20260925.run_trial \
+  --name e3_lda \
+  --rescore-model lda \
+  --raw /Users/sebastianpaez/data/astral_data/Ast_20240130_Bo_AI_30_2mz_HeLa01.mzML
+```
+
+This writes search and FDP files under `shitshit/hela_entrapment/trials/<name>`
+and a small metric JSON under this directory's `results/`.
