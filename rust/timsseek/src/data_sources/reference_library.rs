@@ -298,7 +298,7 @@ impl<'a> ExpectedIntensity for RefQuery<'a> {
     fn expected_precursor_envelope(&self) -> SmallVec<[(i8, f32); 3]> {
         let tgt = self.geom.row();
         let IsotopeStrategy::FromComposition { n_isotopes } = self.lib.geom.capabilities().isotopes;
-        let env = self.lib.plan.isotopes().envelope(tgt);
+        let env = self.lib.plan.isotopes().envelope(tgt, &self.lib.geom);
         (0..n_isotopes as usize)
             .map(|i| (i as i8, env[i]))
             .collect()

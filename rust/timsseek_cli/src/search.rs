@@ -424,12 +424,23 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
 
     let config = load_config(args.config.as_deref())?;
     let (mut config, validated) = resolve_run_inputs(args, config)?;
+    // Record effective prediction defaults before the first log and config_used
+    // write, including on a run that fails before prediction completes.
+    let resolved_prediction = match &validated.library {
+        LibrarySource::Fasta(fasta) | LibrarySource::Build { fasta, .. } => Some(
+            build_library::resolve_search_prediction(fasta.clone(), config.library.as_ref()),
+        ),
+        LibrarySource::File(_) => None,
+    };
+    if let Some(prediction) = &resolved_prediction {
+        config.library = Some(prediction.as_library_config());
+    }
 
     // Held in `search()`'s scope so the instrumentation flush guard drops after
     // all work completes.
     let _tracing = init_tracing(args, &validated);
 
-    info!("Parsed configuration: {:#?}", config.clone());
+    info!("Resolved configuration: {config:#?}");
     alloc_track::snap!("start");
 
     validate_inputs(&validated)?;
@@ -501,12 +512,17 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
             }
             (loaded.library, loaded.tempdir, None)
         }
-        LibrarySource::Fasta(fasta) => {
-            let prediction =
-                build_library::resolve_search_prediction(fasta.clone(), config.library.as_ref());
+        LibrarySource::Fasta(_) => {
+            let prediction = resolved_prediction
+                .as_ref()
+                .expect("FASTA source has resolved prediction settings");
             let predicted =
-                build_library::predict_in_memory(&prediction, config.analysis.decoy_strategy)?;
-            (predicted.library, None, Some(predicted.provenance))
+                build_library::predict_in_memory(prediction, config.analysis.decoy_strategy)?;
+            (
+                predicted.library,
+                None,
+                Some(predicted.provenance.to_json()),
+            )
         }
         // Written and then read back rather than kept in the arena, so the
         // library the next run opens is the one this run searched.
