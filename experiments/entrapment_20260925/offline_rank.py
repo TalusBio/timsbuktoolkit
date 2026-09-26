@@ -89,6 +89,11 @@ def main():
     parser.add_argument("--results", type=Path, required=True)
     parser.add_argument("--pairs", type=Path, required=True)
     parser.add_argument("--alpha", type=float, nargs="+", required=True)
+    parser.add_argument(
+        "--secondary-results",
+        type=Path,
+        help="Blend a second rescorer's discriminant score, matched by library ID",
+    )
     args = parser.parse_args()
 
     labels, pairing = load_pairs(args.pairs)
@@ -96,6 +101,7 @@ def main():
         args.results,
         columns=[
             "sequence",
+            "library_id",
             "precursor_charge",
             "is_target",
             "discriminant_score",
@@ -105,8 +111,34 @@ def main():
     )
     is_target = frame["is_target"].to_numpy()
     mlp = frame["discriminant_score"].to_numpy()
-    main = frame["main_score"].to_numpy()
-    main_log = np.log1p(main)
+    if args.secondary_results is None:
+        blend = np.log1p(frame["main_score"].to_numpy())
+    else:
+        other = pl.read_parquet(
+            args.secondary_results,
+            columns=["library_id", "is_target", "discriminant_score"],
+        )
+        if (
+            other.height != frame.height
+            or other["library_id"].n_unique() != other.height
+        ):
+            raise ValueError(
+                "secondary results do not contain exactly the same candidates"
+            )
+        matched = frame.select("library_id", "is_target").join(
+            other,
+            on="library_id",
+            how="left",
+            suffix="_other",
+            validate="1:1",
+            maintain_order="left",
+        )
+        if (
+            matched["discriminant_score"].null_count()
+            or not (matched["is_target"] == matched["is_target_other"]).all()
+        ):
+            raise ValueError("secondary results disagree on candidate identities")
+        blend = matched["discriminant_score"].to_numpy()
     target_rows = np.flatnonzero(is_target)
     peptides = [stripped_sequence(seq) for seq in frame["sequence"][target_rows]]
     if any(peptide not in labels for peptide in peptides):
@@ -117,7 +149,7 @@ def main():
     })
 
     for alpha in args.alpha:
-        scores = (mlp + np.float32(alpha) * main_log).astype(np.float32)
+        scores = (mlp + np.float32(alpha) * blend).astype(np.float32)
         q_values = assign_qvalues(scores, is_target)
         if alpha == 0:
             stored = frame["qvalue"].to_numpy()

@@ -26,6 +26,7 @@ follow-up branches can re-implement retained ideas cleanly.
 | E4 | E1 with GBM rescoring | 30,035 | 31,384 | 1.15% | Reject (−977 vs E1) |
 | E5 | E1 with hybrid LDA→GBM rescoring | 21,187 | 22,946 | 1.29% | Reject (−9,825 vs E1) |
 | E6 | E1 MLP score − 0.10 × ln(1 + main score) | 31,810 | 33,059 | 1.17% | Keep (+798 vs E1) |
+| E7 | E6 score + 0.40 × held-out GBM score | 32,864 | 34,816 | 1.28% | Keep (+1,054 vs E6) |
 
 E1 reused the earlier full search in `shitshit/hela_entrapment/search_no_group`.
 It scored the same 1,753,338 candidates with identical raw scores as the
@@ -49,6 +50,15 @@ the best weight through the full engine. The offline code reproduced all
 weight −0.10. The full run matched that count. Neighboring weights −0.095 and
 −0.105 yielded 31,769 and 31,795 IDs offline. This is a one-file exploratory
 weight and should be re-estimated on independent data before production use.
+
+E7 joined saved E6 and E4 candidate scores by unique library ID. The cached
+scan reached 32,864 IDs at GBM weight 0.40, with nearby weights 0.35 and 0.45
+yielding 32,645 and 32,817. The dual-model full run exactly reproduced 32,864.
+It uses the same shuffled candidates and fold assignment for both models.
+The reported q≤1% cutoff still exceeds 1% paired FDP (1.28%), so the empirical
+cutoff is required for this exploratory result. Adding a further ±0.025 to
+±0.15 main-score weight did not improve E7. A saved hybrid-score blend also
+failed to improve it.
 
 Run an offline score scan with:
 

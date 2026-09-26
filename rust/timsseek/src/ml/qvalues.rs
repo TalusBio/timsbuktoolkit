@@ -574,8 +574,39 @@ fn rescore_mlp_with(
     mut data: Vec<CompetedCandidate>,
     config: MlpConfig,
     library: &ReferenceLibrary,
+    gbm_weight: Option<f32>,
 ) -> RescoreResult {
     canonicalize_and_shuffle(&mut data);
+
+    // Exploration E7: fit a GBM on the same shuffled candidates and folds as
+    // the MLP, then retain its held-out scores for the final rank blend.
+    let gbm_scores = if gbm_weight.is_some() {
+        let gbm_names = all_feature_name_set(library);
+        let gbm_features = build_all_matrix(library, competed_rows(&data));
+        let gbm_responses: Vec<f64> = data.iter().map(|c| c.get_y()).collect();
+        let gbm_precomputed =
+            PrecomputedFeatures::from_row_major(gbm_features, all_ncols(library), gbm_responses);
+        let mut gbm = CrossValidatedScorer::<CompetedCandidate, GbmFoldModel>::new_from_shuffled_with_precomputed(
+            N_RESCORE_FOLDS,
+            data.clone(),
+            GBMConfig::default(),
+            gbm_precomputed,
+            gbm_names,
+        );
+        gbm.fit().map_err(|e| RescoreError::Model {
+            model: "GBM blend",
+            reason: e.to_string(),
+        })?;
+        ensure_tree_splits("GBM blend", &gbm.feature_stats())?;
+        let gbm_scored = gbm.score();
+        assert!(data.iter().zip(&gbm_scored).all(|(left, right)| {
+            left.scoring.identity.source_id == right.scoring.identity.source_id
+                && left.scoring.identity.precursor_charge == right.scoring.identity.precursor_charge
+        }));
+        gbm_scored.iter().map(|c| c.discriminant_score).collect()
+    } else {
+        vec![0.0; data.len()]
+    };
 
     // Fold assignment remains positional after this shuffle. Feature values are
     // streamed one row at a time into the MLP's two reusable batch buffers;
@@ -605,8 +636,11 @@ fn rescore_mlp_with(
     let mut scored = scorer.score();
     // Exploration E6: counterweight the MLP score with the raw evidence score.
     // The weight is selected on the single HeLa entrapment run in the notebook.
-    for candidate in &mut scored {
+    for (candidate, gbm_score) in scored.iter_mut().zip(gbm_scores) {
         candidate.discriminant_score -= 0.1 * candidate.scoring.primary.main_score.ln_1p();
+        if let Some(weight) = gbm_weight {
+            candidate.discriminant_score += weight * gbm_score;
+        }
     }
     Ok(finalize(scored, stats))
 }
@@ -619,7 +653,7 @@ fn rescore_mlp_with(
 ///
 /// Runtime and sensitivity comparisons are not constant across candidate counts.
 pub fn rescore_mlp(data: Vec<CompetedCandidate>, library: &ReferenceLibrary) -> RescoreResult {
-    rescore_mlp_with(data, MlpConfig::default(), library)
+    rescore_mlp_with(data, MlpConfig::default(), library, Some(0.4))
 }
 
 // ---------------------------------------------------------------------------
@@ -1660,7 +1694,8 @@ mod feature_tests {
         let n = 90;
 
         for seed in [7u64, 13, 42, 1234] {
-            let run = || rescore_mlp_with(synthetic_competed(n), mlp_test_cfg(seed), library());
+            let run =
+                || rescore_mlp_with(synthetic_competed(n), mlp_test_cfg(seed), library(), None);
             let (out_a, stats_a) = run().unwrap();
             let (out_b, _) = run().unwrap();
 
@@ -1706,10 +1741,24 @@ mod feature_tests {
     }
 
     #[test]
+    fn mlp_gbm_blend_scores_all_candidates() {
+        let (out, _) = rescore_mlp_with(
+            synthetic_competed(360),
+            mlp_test_cfg(7),
+            library(),
+            Some(0.4),
+        )
+        .unwrap();
+        assert_eq!(out.len(), 360);
+        assert!(out.iter().all(|r| r.discriminant_score.is_finite()));
+    }
+
+    #[test]
     fn mlp_streamed_rows_are_aligned_with_the_shuffled_data() {
         for seed in [7u64, 13, 42, 1234] {
             let (out, _) =
-                rescore_mlp_with(synthetic_competed(120), mlp_test_cfg(seed), library()).unwrap();
+                rescore_mlp_with(synthetic_competed(120), mlp_test_cfg(seed), library(), None)
+                    .unwrap();
             let scores: Vec<f64> = out.iter().map(|r| r.discriminant_score as f64).collect();
             let is_target: Vec<bool> = out.iter().map(|r| r.scoring.identity.is_target).collect();
             let auc = pair_auc(&scores, &is_target);
@@ -1908,8 +1957,13 @@ mod feature_tests {
 
     #[test]
     fn standalone_mlp_rejects_an_untrainable_frame() {
-        let error = rescore_mlp_with(indistinguishable_competed(24), mlp_test_cfg(7), library())
-            .unwrap_err();
+        let error = rescore_mlp_with(
+            indistinguishable_competed(24),
+            mlp_test_cfg(7),
+            library(),
+            None,
+        )
+        .unwrap_err();
         assert!(matches!(error, RescoreError::Model { model: "MLP", .. }));
     }
 
