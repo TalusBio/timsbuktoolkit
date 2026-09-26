@@ -29,6 +29,7 @@ follow-up branches can re-implement retained ideas cleanly.
 | E7 | E6 score + 0.40 × held-out GBM score | 32,864 | 34,816 | 1.28% | Keep (+1,054 vs E6) |
 | E8 | E7 score − 1.10 × held-out LDA score | 33,214 | 34,854 | 1.26% | Keep (+350 vs E7) |
 | E9 | Cached direct-field additions to E8 | 33,257* | — | — | Reject (only +43 offline) |
+| E10 | Widen MLP hidden layers from 32/16 to 64/32 | 31,330 | 34,030 | 1.25% | Roll back (−1,884 vs E8) |
 
 E1 reused the earlier full search in `shitshit/hela_entrapment/search_no_group`.
 It scored the same 1,753,338 candidates with identical raw scores as the
@@ -75,6 +76,9 @@ intensity. Most best weights were zero. Adding 0.15× standardized scored
 fragment count reached 33,257 IDs (*offline only*), a 43-ID gain that did not
 justify another full search or a dataset-wide normalization step. No engine
 change was retained.
+
+E10 widened only the MLP while keeping E8's fixed score weights. The full run
+lost 1,884 IDs at empirical 1% paired FDP, so the width change was reverted.
 
 Run an offline score scan with:
 
