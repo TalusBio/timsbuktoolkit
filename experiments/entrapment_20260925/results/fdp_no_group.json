@@ -1,0 +1,18 @@
+{
+  "fdp_limit": 0.01,
+  "reported_q": 0.01,
+  "n_rows": 786201,
+  "best_at_empirical_fdp": {
+    "q_value": 0.0075569162145257,
+    "paired_fdp": 0.009962839569451563,
+    "n_targets": 31012,
+    "n_entrapments": 204
+  },
+  "at_reported_q": {
+    "q_value": 0.009991022758185863,
+    "paired_fdp": 0.012923882986464852,
+    "n_targets": 34070,
+    "n_entrapments": 285
+  },
+  "report": "shitshit/hela_entrapment/fdp_no_group/entrapment_fdp.tsv"
+}
