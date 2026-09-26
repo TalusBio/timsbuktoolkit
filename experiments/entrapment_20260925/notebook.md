@@ -32,6 +32,7 @@ follow-up branches can re-implement retained ideas cleanly.
 | E10 | Widen MLP hidden layers from 32/16 to 64/32 | 31,330 | 34,030 | 1.25% | Roll back (−1,884 vs E8) |
 | E11 | Narrow MLP hidden layers from 32/16 to 16/8 | 32,012 | 34,279 | 1.24% | Roll back (−1,202 vs E8) |
 | E12 | E8 score + 0.50 × E11 score | 33,445 | 35,316 | 1.30% | Keep (+231 vs E8) |
+| E13 | Change both MLP seeds by xor with 0x9E3779B97F4A7C15 | 32,314 | 35,401 | 1.37% | Roll back (−1,131 vs E12) |
 
 E1 reused the earlier full search in `shitshit/hela_entrapment/search_no_group`.
 It scored the same 1,753,338 candidates with identical raw scores as the
@@ -91,6 +92,11 @@ GBM/LDA/main-score blend to each before summing. Its full run matched the
 cached 33,445 exactly. Nearby narrow-score weights 0.4 and 0.6 gave 33,361
 and 33,404 IDs offline. The extra MLP fit increases rescore time; the
 single-run target gain is small and remains exploratory.
+
+E13 changed only the two MLP seeds. The full run lost 1,131 IDs and was
+reverted. Blending its saved score back into E12 at weights 0.02–0.2 yielded
+at most 33,594 IDs (+149 at weight 0.1); this did not justify two more MLP
+fits per run, so the seed ensemble was not retained.
 
 Run an offline score scan with:
 
