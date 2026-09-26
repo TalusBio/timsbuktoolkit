@@ -25,6 +25,7 @@ follow-up branches can re-implement retained ideas cleanly.
 | E3 | E1 with LDA rescoring | 20,086 | 21,375 | 1.18% | Reject (−10,926 vs E1) |
 | E4 | E1 with GBM rescoring | 30,035 | 31,384 | 1.15% | Reject (−977 vs E1) |
 | E5 | E1 with hybrid LDA→GBM rescoring | 21,187 | 22,946 | 1.29% | Reject (−9,825 vs E1) |
+| E6 | E1 MLP score − 0.10 × ln(1 + main score) | 31,810 | 33,059 | 1.17% | Keep (+798 vs E1) |
 
 E1 reused the earlier full search in `shitshit/hela_entrapment/search_no_group`.
 It scored the same 1,753,338 candidates with identical raw scores as the
@@ -41,6 +42,22 @@ yield, despite a slightly smaller paired FDP at the reported 1% q cutoff.
 E4 used `--rescore-model gbm`; it approached E1 but still lost 977 IDs at the
 empirical cutoff.
 E5 used `--rescore-model hybrid`; it also lost substantial target yield.
+
+E6 rescored the saved E1 candidates offline across nearby weights, then ran
+the best weight through the full engine. The offline code reproduced all
+1,753,338 stored q-values at weight zero and predicted exactly 31,810 IDs at
+weight −0.10. The full run matched that count. Neighboring weights −0.095 and
+−0.105 yielded 31,769 and 31,795 IDs offline. This is a one-file exploratory
+weight and should be re-estimated on independent data before production use.
+
+Run an offline score scan with:
+
+```sh
+uv run --group interactive python -m experiments.entrapment_20260925.offline_rank \
+  --results shitshit/hela_entrapment/search_no_group/Ast_20240130_Bo_AI_30_2mz_HeLa01.mzML/results.parquet \
+  --pairs shitshit/hela_entrapment/peptide_pairs.tsv \
+  --alpha 0 -0.095 -0.1 -0.105
+```
 
 For each new trial: make one change, run the fixed experiment, append its
 metrics and observation here. Commit improvements to the primary metric;

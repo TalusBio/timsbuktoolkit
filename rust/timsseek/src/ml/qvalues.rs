@@ -602,7 +602,13 @@ fn rescore_mlp_with(
 
     let stats = scorer.feature_stats();
 
-    Ok(finalize(scorer.score(), stats))
+    let mut scored = scorer.score();
+    // Exploration E6: counterweight the MLP score with the raw evidence score.
+    // The weight is selected on the single HeLa entrapment run in the notebook.
+    for candidate in &mut scored {
+        candidate.discriminant_score -= 0.1 * candidate.scoring.primary.main_score.ln_1p();
+    }
+    Ok(finalize(scored, stats))
 }
 
 /// MLP rescorer over the ALL lane (linear ++ nonlinear) -- the same feature set
