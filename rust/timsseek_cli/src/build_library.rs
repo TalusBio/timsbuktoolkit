@@ -692,14 +692,14 @@ mod tests {
         let predicted = predict_in_memory(&prediction, DecoyPolicy::IfMissing)
             .expect("builtin model predicts directly into the arena");
         assert!(!predicted.library.is_empty());
-        assert!(predicted.provenance.is_object());
+        assert!(predicted.provenance.to_json().is_object());
 
         let dir = tempfile::tempdir().unwrap();
         let library = dir.path().join("library.tsv");
         std::fs::write(&library, "PrecursorMz\tProductMz\n100.0\t200.0\n").unwrap();
         std::fs::write(
             default_sidecar(&library),
-            serde_json::to_vec(&predicted.provenance).unwrap(),
+            serde_json::to_vec(&predicted.provenance.to_json()).unwrap(),
         )
         .unwrap();
         assert_eq!(

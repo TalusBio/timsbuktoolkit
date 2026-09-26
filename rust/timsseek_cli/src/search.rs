@@ -506,7 +506,11 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
                 build_library::resolve_search_prediction(fasta.clone(), config.library.as_ref());
             let predicted =
                 build_library::predict_in_memory(&prediction, config.analysis.decoy_strategy)?;
-            (predicted.library, None, Some(predicted.provenance))
+            (
+                predicted.library,
+                None,
+                Some(predicted.provenance.to_json()),
+            )
         }
         // Written and then read back rather than kept in the arena, so the
         // library the next run opens is the one this run searched.

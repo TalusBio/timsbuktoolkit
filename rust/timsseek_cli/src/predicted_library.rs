@@ -54,9 +54,7 @@ const SECONDS_PER_MINUTE: f32 = 60.0;
 /// A library that was predicted rather than read, plus what produced it.
 pub(crate) struct PredictedLibrary {
     pub library: ReferenceLibrary,
-    /// msspeculator's provenance, as the JSON its own sidecar carries, for a
-    /// caller recording what a run used.
-    pub provenance: serde_json::Value,
+    pub provenance: LibraryProvenance,
 }
 
 /// The caller's half of [`sink`]: what the prediction produced, once it has.
@@ -67,13 +65,24 @@ pub(crate) struct PredictedLibraryHandle {
 /// The [`LibrarySink`] half of [`sink`], for `stream_library` to consume.
 pub(crate) struct PredictedLibrarySink {
     shared: Arc<Mutex<Handoff>>,
-    arena: Option<ArenaRows>,
-    normalized_axis: timsquery::RtAxis,
+    state: SinkState,
+}
+
+enum SinkState {
+    AwaitingHeader {
+        arena: ArenaRows,
+    },
+    Building {
+        arena: ArenaRows,
+        provenance: Box<LibraryProvenance>,
+        normalized_axis: timsquery::RtAxis,
+    },
+    Finished,
 }
 
 /// What crosses from the writer thread back to the caller.
 ///
-/// `arena` is `Some` only once `finish` ran, which is not the same as the stream
+/// `completed` is `Some` only once `finish` ran, which is not the same as the stream
 /// having succeeded: msspeculator's `run_library` joins its inference workers
 /// before its writer, so a worker that panics drops the result channel, the
 /// writer's loop over it ends cleanly, and `finish` publishes whatever arrived
@@ -82,8 +91,12 @@ pub(crate) struct PredictedLibrarySink {
 /// successful stream produces and checks its count against what arrived.
 #[derive(Default)]
 struct Handoff {
-    provenance: Option<serde_json::Value>,
-    arena: Option<ArenaRows>,
+    completed: Option<Completed>,
+}
+
+struct Completed {
+    provenance: Box<LibraryProvenance>,
+    arena: ArenaRows,
 }
 
 /// Build a sink and the handle that collects from it.
@@ -95,8 +108,9 @@ pub(crate) fn sink(decoys: DecoyPolicy) -> (PredictedLibraryHandle, PredictedLib
         },
         PredictedLibrarySink {
             shared,
-            arena: Some(ArenaRows::new(decoys)),
-            normalized_axis: timsquery::RtAxis::NormalizedIndex { scale: None },
+            state: SinkState::AwaitingHeader {
+                arena: ArenaRows::new(decoys),
+            },
         },
     )
 }
@@ -115,8 +129,17 @@ impl PredictedLibraryHandle {
     /// making it, so the two are the same count of the same thing: what the sink
     /// was handed, ahead of the decoy policy dropping any of it.
     pub(crate) fn into_library(self, stats: &LibraryStats) -> Result<PredictedLibrary, CliError> {
-        let handoff = std::mem::take(&mut *self.shared.lock().expect("handoff mutex poisoned"));
-        let Some(arena_rows) = handoff.arena else {
+        let completed = self
+            .shared
+            .lock()
+            .expect("handoff mutex poisoned")
+            .completed
+            .take();
+        let Some(Completed {
+            provenance,
+            arena: arena_rows,
+        }) = completed
+        else {
             return Err(CliError::LibraryBuild {
                 source: "the prediction stream handed over no rows, so it did not finish"
                     .to_string(),
@@ -131,13 +154,6 @@ impl PredictedLibraryHandle {
                 ),
             });
         }
-        let Some(provenance) = handoff.provenance else {
-            return Err(CliError::LibraryBuild {
-                source: "the prediction stream handed over rows without a header, so its \
-                         provenance is unknown"
-                    .to_string(),
-            });
-        };
         let arena = arena_rows.seal().map_err(|e| CliError::LibraryBuild {
             source: format!("assembling the predicted library: {e:?}"),
         })?;
@@ -146,53 +162,57 @@ impl PredictedLibraryHandle {
         })?;
         Ok(PredictedLibrary {
             library,
-            provenance,
+            provenance: *provenance,
         })
-    }
-}
-
-impl PredictedLibrarySink {
-    fn record_provenance(&mut self, provenance: serde_json::Value) {
-        self.normalized_axis = timsquery::RtAxis::NormalizedIndex {
-            scale: provenance
-                .pointer("/retention/normalized/scale")
-                .and_then(serde_json::Value::as_str)
-                .map(str::to_owned),
-        };
-        self.shared
-            .lock()
-            .expect("handoff mutex poisoned")
-            .provenance = Some(provenance);
-    }
-
-    /// Stand in for [`LibrarySink::header`], which no test can call:
-    /// `LibraryProvenance` is `#[non_exhaustive]` and has no constructor, so only
-    /// msspeculator can build one.
-    #[cfg(test)]
-    fn record_test_provenance(&mut self) {
-        self.record_provenance(serde_json::json!({ "generator": { "tool": "test" } }));
     }
 }
 
 impl LibrarySink for PredictedLibrarySink {
     fn header(&mut self, provenance: &LibraryProvenance) -> Result<()> {
-        // Kept as the JSON `to_json` builds, unflattened: this is a record of
-        // what produced the library, including its normalized RT scale.
-        self.record_provenance(provenance.to_json());
-        Ok(())
+        match std::mem::replace(&mut self.state, SinkState::Finished) {
+            SinkState::AwaitingHeader { arena } => {
+                self.state = SinkState::Building {
+                    arena,
+                    provenance: Box::new(provenance.clone()),
+                    normalized_axis: timsquery::RtAxis::NormalizedIndex {
+                        scale: Some(provenance.retention.normalized.scale.to_owned()),
+                    },
+                };
+                Ok(())
+            }
+            _ => bail!("prediction header called more than once or after finish"),
+        }
     }
 
     fn spectrum(&mut self, row: &SpectrumRow<'_>) -> Result<()> {
-        self.arena
-            .as_mut()
-            .expect("spectrum after finish")
-            .push(PredictedRow::from_spectrum(row)?, &self.normalized_axis);
-        Ok(())
+        match &mut self.state {
+            SinkState::Building {
+                arena,
+                normalized_axis,
+                ..
+            } => {
+                arena.push(PredictedRow::from_spectrum(row)?, normalized_axis);
+                Ok(())
+            }
+            SinkState::AwaitingHeader { .. } => bail!("prediction spectrum before header"),
+            SinkState::Finished => bail!("prediction spectrum after finish"),
+        }
     }
 
     fn finish(&mut self) -> Result<()> {
-        self.shared.lock().expect("handoff mutex poisoned").arena = self.arena.take();
-        Ok(())
+        match std::mem::replace(&mut self.state, SinkState::Finished) {
+            SinkState::Building {
+                arena, provenance, ..
+            } => {
+                self.shared
+                    .lock()
+                    .expect("handoff mutex poisoned")
+                    .completed = Some(Completed { provenance, arena });
+                Ok(())
+            }
+            SinkState::AwaitingHeader { .. } => bail!("prediction finished before header"),
+            SinkState::Finished => bail!("prediction finished more than once"),
+        }
     }
 }
 
@@ -388,6 +408,7 @@ impl ArenaRows {
 #[cfg(test)]
 mod tests {
     use std::collections::BTreeMap;
+    use std::sync::LazyLock;
 
     use msspeculator_core::peptide::Peptide;
     use msspeculator_inference::{
@@ -401,6 +422,34 @@ mod tests {
     };
 
     use super::*;
+
+    static TEST_PROVENANCE: LazyLock<LibraryProvenance> = LazyLock::new(|| {
+        let fasta =
+            std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/test_data/tiny.fasta");
+        let mut prediction = crate::build_library::resolve_prediction(
+            fasta,
+            &crate::config::LibraryConfig::default(),
+        );
+        prediction.decoys = false;
+        prediction.max_fragments = Some(4);
+        crate::build_library::predict_in_memory(&prediction, DecoyPolicy::Never)
+            .expect("fixture provenance")
+            .provenance
+    });
+
+    fn test_provenance(scale: Option<&'static str>) -> LibraryProvenance {
+        let mut provenance = (*TEST_PROVENANCE).clone();
+        if let Some(scale) = scale {
+            provenance.retention.normalized.scale = scale;
+        }
+        provenance
+    }
+
+    impl PredictedLibrarySink {
+        fn record_test_provenance(&mut self) {
+            self.header(&test_provenance(None)).unwrap();
+        }
+    }
 
     /// A prediction row assembled by hand.
     ///
@@ -486,8 +535,7 @@ mod tests {
         }
     }
 
-    /// Drive the sink the way `stream_library` does, minus the header, whose
-    /// `LibraryProvenance` cannot be built here.
+    /// Drive the sink with typed provenance from one real tiny prediction.
     ///
     /// Borrows the rows rather than taking them so one set can be put through
     /// this route and the file route both.
@@ -498,10 +546,12 @@ mod tests {
     fn build_with_scale(
         rows: &[SpectrumRow<'_>],
         decoys: DecoyPolicy,
-        scale: Option<&str>,
+        scale: Option<&'static str>,
     ) -> PredictedLibrary {
         let (handle, mut collector) = sink(decoys);
-        collector.record_provenance(serde_json::json!({"generator":{"tool":"test"}, "retention":{"normalized":{"scale":scale}}}));
+        collector
+            .header(&test_provenance(scale))
+            .expect("header converts");
         for row in rows {
             collector.spectrum(row).expect("row converts");
         }
@@ -653,7 +703,9 @@ mod tests {
         collector
             .spectrum(&decoy.row(2, true, Some(1), peaks(5)))
             .unwrap();
-        let arena = collector.arena.as_ref().unwrap();
+        let SinkState::Building { arena, .. } = &collector.state else {
+            panic!("header should start building");
+        };
         assert_eq!(arena.received, 2);
         assert_eq!(arena.geom.n_rows(), 1);
         assert_eq!(arena.frag_intens.len(), 3);
@@ -743,6 +795,7 @@ mod tests {
     fn declared_scale_survives_prediction_and_file_loading_only_for_normalized_rows() {
         let fixture = Fixture::new("PEPTIDEK", "PEPTIDEK");
         for scale in [None, Some("reference anchors")] {
+            let declared_scale = scale.unwrap_or(TEST_PROVENANCE.retention.normalized.scale);
             for irt in [None, Some(37.75)] {
                 let rows = [SpectrumRow {
                     irt,
@@ -752,7 +805,7 @@ mod tests {
                 let predicted = build_with_scale(&rows, DecoyPolicy::Never, scale);
                 let TargetTable::Mzpaf {
                     geom: from_file, ..
-                } = via_file_table_with_scale(&rows, scale)
+                } = via_file_table_with_scale(&rows, Some(declared_scale))
                 else {
                     panic!("expected mzpaf")
                 };
@@ -760,7 +813,7 @@ mod tests {
                     timsquery::RtAxis::Seconds
                 } else {
                     timsquery::RtAxis::NormalizedIndex {
-                        scale: scale.map(str::to_owned),
+                        scale: Some(declared_scale.to_owned()),
                     }
                 };
                 let sunk = predicted.library.geometry();
@@ -824,6 +877,7 @@ mod tests {
     fn a_stream_that_never_finished_hands_over_no_library() {
         let fixture = Fixture::new("PEPTIDEK", "PEPTIDEK");
         let (handle, mut collector) = sink(DecoyPolicy::Never);
+        collector.record_test_provenance();
         collector
             .spectrum(&fixture.row(2, false, None, peaks(3)))
             .expect("row converts");
@@ -877,7 +931,7 @@ mod tests {
     /// project's reader back off it, which is what a `build-library` followed by
     /// a `search` does.
     fn via_file_table(rows: &[SpectrumRow<'_>]) -> TargetTable {
-        via_file_table_with_scale(rows, None)
+        via_file_table_with_scale(rows, Some(TEST_PROVENANCE.retention.normalized.scale))
     }
 
     fn via_file_table_with_scale(rows: &[SpectrumRow<'_>], scale: Option<&str>) -> TargetTable {
@@ -1152,17 +1206,36 @@ mod tests {
     fn a_stream_that_published_rows_without_a_header_hands_over_no_library() {
         let fixture = Fixture::new("PEPTIDEK", "PEPTIDEK");
         let (handle, mut collector) = sink(DecoyPolicy::Never);
-        collector
+        let error = collector
             .spectrum(&fixture.row(2, false, None, peaks(3)))
-            .expect("row converts");
-        collector.finish().expect("stream finishes");
+            .expect_err("spectrum before header must fail");
+        assert!(format!("{error}").contains("before header"));
+        assert!(format!("{}", collector.finish().unwrap_err()).contains("before header"));
 
         let Err(error) = handle.into_library(&stats(1)) else {
             panic!("a library whose provenance is unknown is not one this can record");
         };
         assert!(
-            format!("{error}").contains("provenance"),
+            format!("{error}").contains("did not finish"),
             "unexpected error: {error}",
+        );
+    }
+
+    #[test]
+    fn callbacks_after_finish_are_rejected() {
+        let fixture = Fixture::new("PEPTIDEK", "PEPTIDEK");
+        let (_handle, mut collector) = sink(DecoyPolicy::Never);
+        collector.record_test_provenance();
+        collector.finish().unwrap();
+        assert!(format!("{}", collector.finish().unwrap_err()).contains("more than once"));
+        assert!(
+            format!(
+                "{}",
+                collector
+                    .spectrum(&fixture.row(2, false, None, peaks(3)))
+                    .unwrap_err()
+            )
+            .contains("after finish")
         );
     }
 
