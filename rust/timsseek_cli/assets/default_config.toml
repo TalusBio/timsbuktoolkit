@@ -112,9 +112,9 @@ calibration_query_rt_window_minutes = 0.083333336   # 5 seconds (5 / 60)
 # uri = "./results"
 
 
-## How to predict a library, consulted by `timsseek build-library`. Every field
-## is optional and falls through to msspeculator's own default, so the section
-## can be omitted entirely; a build flag beats whatever is set here.
+## How to predict a library, for FASTA searches and `timsseek build-library`.
+## Every field is optional; the section can be omitted. A build flag beats a
+## value here. timsseek defaults to 12 fragments per precursor and decoys on.
 # [library]
 # model = "builtin:small-v0"
 # missed_cleavages = 2
@@ -126,7 +126,7 @@ calibration_query_rt_window_minutes = 0.083333336   # 5 seconds (5 / 60)
 # variable_mods = ["M[UNIMOD:35]"]
 # max_variable_mods = 1
 # min_intensity = 0.01
-# max_fragments = 20
+# max_fragments = 12
 # decoys = true
 ## Acquisition and chromatography context are not settable: a build uses the
 ## model artifact's own defaults. Choosing a different one is a decision about

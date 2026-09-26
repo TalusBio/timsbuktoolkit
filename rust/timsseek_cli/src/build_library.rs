@@ -42,11 +42,10 @@ use crate::predicted_library::{
     PredictedLibrary,
 };
 
-/// msspeculator's defaults, restated here only so a partially-specified
-/// `[library]` section does not have to name every field to change one.
+/// Prediction defaults. Most match msspeculator; a partial `[library]` section
+/// can change one setting without naming the rest.
 const DEFAULT_MODEL: &str = "builtin:small-v0";
-/// The one default that is this project's rather than msspeculator's, whose
-/// `--decoys` is off.
+/// This project's decoy default; msspeculator's `--decoys` is off.
 ///
 /// Every library built here exists to be searched, and a search needs a decoy
 /// for every target to put an FDR on. Predicting them costs twice the
@@ -63,6 +62,7 @@ const DEFAULT_MIN_CHARGE: i64 = 2;
 const DEFAULT_MAX_CHARGE: i64 = 4;
 const DEFAULT_MAX_VARIABLE_MODS: usize = 1;
 const DEFAULT_MIN_INTENSITY: f64 = 0.01;
+const DEFAULT_MAX_FRAGMENTS: usize = 12;
 const DEFAULT_FIXED_MOD: &str = "C[UNIMOD:4]";
 const DEFAULT_VARIABLE_MOD: &str = "M[UNIMOD:35]";
 
@@ -85,6 +85,27 @@ pub struct ResolvedPrediction {
     pub min_intensity: f64,
     pub max_fragments: Option<usize>,
     pub decoys: bool,
+}
+
+impl ResolvedPrediction {
+    /// Spell every effective prediction setting into `config_used.json` and
+    /// the configuration log before prediction starts.
+    pub(crate) fn as_library_config(&self) -> LibraryConfig {
+        LibraryConfig {
+            model: Some(self.model.clone()),
+            missed_cleavages: Some(self.missed_cleavages),
+            min_length: Some(self.min_length),
+            max_length: Some(self.max_length),
+            min_charge: Some(self.min_charge),
+            max_charge: Some(self.max_charge),
+            fixed_mods: Some(self.fixed_mods.clone()),
+            variable_mods: Some(self.variable_mods.clone()),
+            max_variable_mods: Some(self.max_variable_mods),
+            min_intensity: Some(self.min_intensity),
+            max_fragments: self.max_fragments,
+            decoys: Some(self.decoys),
+        }
+    }
 }
 
 /// What to predict, plus where `build-library` puts it.
@@ -161,7 +182,7 @@ pub fn resolve_prediction(fasta: PathBuf, library: &LibraryConfig) -> ResolvedPr
             .max_variable_mods
             .unwrap_or(DEFAULT_MAX_VARIABLE_MODS),
         min_intensity: library.min_intensity.unwrap_or(DEFAULT_MIN_INTENSITY),
-        max_fragments: library.max_fragments,
+        max_fragments: Some(library.max_fragments.unwrap_or(DEFAULT_MAX_FRAGMENTS)),
         decoys: library.decoys.unwrap_or(DEFAULT_DECOYS),
     }
 }
@@ -656,14 +677,10 @@ mod tests {
         toml::from_str(toml).expect("a library-only configuration must parse")
     }
 
-    /// The literals, not the constants. `x.unwrap_or(K) == K` holds whatever `K`
-    /// says, so a default drifting from msspeculator's would not show; spelled
-    /// out, it shows in the diff.
-    ///
-    /// `decoys` is the exception and is asserted the other way round, because it
-    /// is deliberately not msspeculator's answer.
+    /// Pin the effective defaults as literals. Fragment count and decoys are
+    /// project choices; the other values follow msspeculator's defaults.
     #[test]
-    fn an_absent_setting_falls_through_to_msspeculators_default() {
+    fn an_absent_setting_uses_prediction_defaults() {
         let resolved = resolve_build(&args(&[]), &BuildConfig::default()).prediction;
         assert_eq!(resolved.model, "builtin:small-v0");
         assert_eq!(resolved.missed_cleavages, 2);
@@ -675,10 +692,18 @@ mod tests {
         assert_eq!(resolved.min_intensity, 0.01);
         assert_eq!(resolved.fixed_mods, ["C[UNIMOD:4]"]);
         assert_eq!(resolved.variable_mods, ["M[UNIMOD:35]"]);
-        assert_eq!(resolved.max_fragments, None);
+        assert_eq!(resolved.max_fragments, Some(12));
         assert!(
             resolved.decoys,
             "predicted decoys beat the mass-shift ones a search would derive"
+        );
+        let recorded: LibraryConfig =
+            serde_json::from_value(serde_json::to_value(resolved.as_library_config()).unwrap())
+                .unwrap();
+        assert_eq!(
+            resolve_prediction(resolved.fasta.clone(), &recorded),
+            resolved,
+            "the recorded effective config must reproduce the prediction settings"
         );
     }
 
@@ -687,11 +712,18 @@ mod tests {
         let fasta = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/test_data/tiny.fasta");
         let mut prediction = resolve_prediction(fasta, &LibraryConfig::default());
         prediction.decoys = false;
-        prediction.max_fragments = Some(4);
 
         let predicted = predict_in_memory(&prediction, DecoyPolicy::IfMissing)
             .expect("builtin model predicts directly into the arena");
         assert!(!predicted.library.is_empty());
+        assert!(
+            predicted.library.geometry().rows().all(|row| predicted
+                .library
+                .geometry()
+                .frag_range(row)
+                .len()
+                <= 12)
+        );
         assert!(predicted.provenance.to_json().is_object());
 
         let dir = tempfile::tempdir().unwrap();

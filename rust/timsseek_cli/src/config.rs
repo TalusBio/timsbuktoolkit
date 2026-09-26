@@ -136,7 +136,7 @@ impl IndexingConfig {
 
 /// How to predict a library.
 ///
-/// Every field is optional and falls through to msspeculator's own default, so
+/// Every field is optional and falls through to timsseek's prediction default, so
 /// the section can be omitted entirely and a build flag can beat any single
 /// field without the others having to be spelled. This project owns the flag
 /// surface and none of the digestion, modification or prediction logic.
