@@ -576,6 +576,7 @@ fn rescore_mlp_with(
     library: &ReferenceLibrary,
     gbm_weight: Option<f32>,
     lda_weight: Option<f32>,
+    narrow_weight: Option<f32>,
 ) -> RescoreResult {
     canonicalize_and_shuffle(&mut data);
 
@@ -636,6 +637,30 @@ fn rescore_mlp_with(
     let write_row = |candidate: &CompetedCandidate, out: &mut [f64]| {
         write_competed_all_row(library, candidate, out)
     };
+    let narrow_scores = if narrow_weight.is_some() {
+        let mut narrow_config = config.clone();
+        narrow_config.hidden = vec![16, 8];
+        let mut narrow =
+            CrossValidatedScorer::<CompetedCandidate, MlpFoldModel>::new_from_shuffled_streaming(
+                N_RESCORE_FOLDS,
+                data.clone(),
+                narrow_config,
+                names.clone(),
+                &write_row,
+            );
+        narrow.fit_parallel().map_err(|e| RescoreError::Model {
+            model: "narrow MLP blend",
+            reason: e.to_string(),
+        })?;
+        let narrow_scored = narrow.score();
+        assert!(data.iter().zip(&narrow_scored).all(|(left, right)| {
+            left.scoring.identity.source_id == right.scoring.identity.source_id
+                && left.scoring.identity.precursor_charge == right.scoring.identity.precursor_charge
+        }));
+        narrow_scored.iter().map(|c| c.discriminant_score).collect()
+    } else {
+        vec![0.0; data.len()]
+    };
     let mut scorer =
         CrossValidatedScorer::<CompetedCandidate, MlpFoldModel>::new_from_shuffled_streaming(
             N_RESCORE_FOLDS,
@@ -654,13 +679,33 @@ fn rescore_mlp_with(
     let mut scored = scorer.score();
     // Exploration E6: counterweight the MLP score with the raw evidence score.
     // The weight is selected on the single HeLa entrapment run in the notebook.
-    for ((candidate, gbm_score), lda_score) in scored.iter_mut().zip(gbm_scores).zip(lda_scores) {
-        candidate.discriminant_score -= 0.1 * candidate.scoring.primary.main_score.ln_1p();
+    let blend = |mut mlp_score: f32, main_score: f32, gbm_score: f32, lda_score: f32| {
+        mlp_score -= 0.1 * main_score.ln_1p();
         if let Some(weight) = gbm_weight {
-            candidate.discriminant_score += weight * gbm_score;
+            mlp_score += weight * gbm_score;
         }
         if let Some(weight) = lda_weight {
-            candidate.discriminant_score += weight * lda_score;
+            mlp_score += weight * lda_score;
+        }
+        mlp_score
+    };
+    for (((candidate, gbm_score), lda_score), narrow_score) in scored
+        .iter_mut()
+        .zip(gbm_scores)
+        .zip(lda_scores)
+        .zip(narrow_scores)
+    {
+        let main_score = candidate.scoring.primary.main_score;
+        let primary_score = blend(
+            candidate.discriminant_score,
+            main_score,
+            gbm_score,
+            lda_score,
+        );
+        candidate.discriminant_score = primary_score;
+        if let Some(weight) = narrow_weight {
+            candidate.discriminant_score +=
+                weight * blend(narrow_score, main_score, gbm_score, lda_score);
         }
     }
     Ok(finalize(scored, stats))
@@ -674,7 +719,14 @@ fn rescore_mlp_with(
 ///
 /// Runtime and sensitivity comparisons are not constant across candidate counts.
 pub fn rescore_mlp(data: Vec<CompetedCandidate>, library: &ReferenceLibrary) -> RescoreResult {
-    rescore_mlp_with(data, MlpConfig::default(), library, Some(0.4), Some(-1.1))
+    rescore_mlp_with(
+        data,
+        MlpConfig::default(),
+        library,
+        Some(0.4),
+        Some(-1.1),
+        Some(0.5),
+    )
 }
 
 // ---------------------------------------------------------------------------
@@ -1722,6 +1774,7 @@ mod feature_tests {
                     library(),
                     None,
                     None,
+                    None,
                 )
             };
             let (out_a, stats_a) = run().unwrap();
@@ -1776,6 +1829,7 @@ mod feature_tests {
             library(),
             Some(0.4),
             Some(-1.1),
+            Some(0.5),
         )
         .unwrap();
         assert_eq!(out.len(), 360);
@@ -1789,6 +1843,7 @@ mod feature_tests {
                 synthetic_competed(120),
                 mlp_test_cfg(seed),
                 library(),
+                None,
                 None,
                 None,
             )
@@ -1995,6 +2050,7 @@ mod feature_tests {
             indistinguishable_competed(24),
             mlp_test_cfg(7),
             library(),
+            None,
             None,
             None,
         )

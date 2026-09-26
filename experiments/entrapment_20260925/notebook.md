@@ -31,6 +31,7 @@ follow-up branches can re-implement retained ideas cleanly.
 | E9 | Cached direct-field additions to E8 | 33,257* | — | — | Reject (only +43 offline) |
 | E10 | Widen MLP hidden layers from 32/16 to 64/32 | 31,330 | 34,030 | 1.25% | Roll back (−1,884 vs E8) |
 | E11 | Narrow MLP hidden layers from 32/16 to 16/8 | 32,012 | 34,279 | 1.24% | Roll back (−1,202 vs E8) |
+| E12 | E8 score + 0.50 × E11 score | 33,445 | 35,316 | 1.30% | Keep (+231 vs E8) |
 
 E1 reused the earlier full search in `shitshit/hela_entrapment/search_no_group`.
 It scored the same 1,753,338 candidates with identical raw scores as the
@@ -84,6 +85,12 @@ E11 narrowed the MLP to 16/8 and lost 1,202 IDs alone, so that width change was
 also reverted. Cached score mixing later showed that E11 may add complementary
 information: E8 score + 0.5× E11 score reached 33,445 IDs offline. An E8 + E10
 score mix reached only 33,289 IDs at its best tested weight.
+
+E12 trained the 32/16 and 16/8 MLPs on the same folds and applied the E8
+GBM/LDA/main-score blend to each before summing. Its full run matched the
+cached 33,445 exactly. Nearby narrow-score weights 0.4 and 0.6 gave 33,361
+and 33,404 IDs offline. The extra MLP fit increases rescore time; the
+single-run target gain is small and remains exploratory.
 
 Run an offline score scan with:
 
