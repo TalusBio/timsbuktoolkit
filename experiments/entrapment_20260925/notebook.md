@@ -27,6 +27,7 @@ follow-up branches can re-implement retained ideas cleanly.
 | E5 | E1 with hybrid LDA→GBM rescoring | 21,187 | 22,946 | 1.29% | Reject (−9,825 vs E1) |
 | E6 | E1 MLP score − 0.10 × ln(1 + main score) | 31,810 | 33,059 | 1.17% | Keep (+798 vs E1) |
 | E7 | E6 score + 0.40 × held-out GBM score | 32,864 | 34,816 | 1.28% | Keep (+1,054 vs E6) |
+| E8 | E7 score − 1.10 × held-out LDA score | 33,214 | 34,854 | 1.26% | Keep (+350 vs E7) |
 
 E1 reused the earlier full search in `shitshit/hela_entrapment/search_no_group`.
 It scored the same 1,753,338 candidates with identical raw scores as the
@@ -59,6 +60,12 @@ The reported q≤1% cutoff still exceeds 1% paired FDP (1.28%), so the empirical
 cutoff is required for this exploratory result. Adding a further ±0.025 to
 ±0.15 main-score weight did not improve E7. A saved hybrid-score blend also
 failed to improve it.
+
+E8 tried the standalone LDA score as an additive signal. A negative weight
+near −1.1 improved the cached E7 result; neighboring weights −0.9 and −1.25
+yielded 33,092 and 32,961 IDs. The integrated three-model run reproduced the
+cached 33,214 exactly. The negative sign is empirical on this one file and
+should not be interpreted as a general property of LDA.
 
 Run an offline score scan with:
 

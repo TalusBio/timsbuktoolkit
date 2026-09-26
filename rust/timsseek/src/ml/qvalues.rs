@@ -575,6 +575,7 @@ fn rescore_mlp_with(
     config: MlpConfig,
     library: &ReferenceLibrary,
     gbm_weight: Option<f32>,
+    lda_weight: Option<f32>,
 ) -> RescoreResult {
     canonicalize_and_shuffle(&mut data);
 
@@ -608,6 +609,23 @@ fn rescore_mlp_with(
         vec![0.0; data.len()]
     };
 
+    // Exploration E8: use the LDA's held-out scores from the same fold layout.
+    let lda_scores = if lda_weight.is_some() {
+        let linear_names = linear_feature_name_set(library);
+        let write_row = |candidate: &CompetedCandidate, out: &mut [f64]| {
+            write_competed_linear_row(library, candidate, out)
+        };
+        let dataset =
+            StreamingDataset::new(&data, linear_names, N_RESCORE_FOLDS as usize, &write_row);
+        crossfit_lda(&dataset)?
+            .scores
+            .into_iter()
+            .map(|s| s as f32)
+            .collect()
+    } else {
+        vec![0.0; data.len()]
+    };
+
     // Fold assignment remains positional after this shuffle. Feature values are
     // streamed one row at a time into the MLP's two reusable batch buffers;
     // there is deliberately no raw or transformed fold matrix on this path.
@@ -636,10 +654,13 @@ fn rescore_mlp_with(
     let mut scored = scorer.score();
     // Exploration E6: counterweight the MLP score with the raw evidence score.
     // The weight is selected on the single HeLa entrapment run in the notebook.
-    for (candidate, gbm_score) in scored.iter_mut().zip(gbm_scores) {
+    for ((candidate, gbm_score), lda_score) in scored.iter_mut().zip(gbm_scores).zip(lda_scores) {
         candidate.discriminant_score -= 0.1 * candidate.scoring.primary.main_score.ln_1p();
         if let Some(weight) = gbm_weight {
             candidate.discriminant_score += weight * gbm_score;
+        }
+        if let Some(weight) = lda_weight {
+            candidate.discriminant_score += weight * lda_score;
         }
     }
     Ok(finalize(scored, stats))
@@ -653,7 +674,7 @@ fn rescore_mlp_with(
 ///
 /// Runtime and sensitivity comparisons are not constant across candidate counts.
 pub fn rescore_mlp(data: Vec<CompetedCandidate>, library: &ReferenceLibrary) -> RescoreResult {
-    rescore_mlp_with(data, MlpConfig::default(), library, Some(0.4))
+    rescore_mlp_with(data, MlpConfig::default(), library, Some(0.4), Some(-1.1))
 }
 
 // ---------------------------------------------------------------------------
@@ -1694,8 +1715,15 @@ mod feature_tests {
         let n = 90;
 
         for seed in [7u64, 13, 42, 1234] {
-            let run =
-                || rescore_mlp_with(synthetic_competed(n), mlp_test_cfg(seed), library(), None);
+            let run = || {
+                rescore_mlp_with(
+                    synthetic_competed(n),
+                    mlp_test_cfg(seed),
+                    library(),
+                    None,
+                    None,
+                )
+            };
             let (out_a, stats_a) = run().unwrap();
             let (out_b, _) = run().unwrap();
 
@@ -1747,6 +1775,7 @@ mod feature_tests {
             mlp_test_cfg(7),
             library(),
             Some(0.4),
+            Some(-1.1),
         )
         .unwrap();
         assert_eq!(out.len(), 360);
@@ -1756,9 +1785,14 @@ mod feature_tests {
     #[test]
     fn mlp_streamed_rows_are_aligned_with_the_shuffled_data() {
         for seed in [7u64, 13, 42, 1234] {
-            let (out, _) =
-                rescore_mlp_with(synthetic_competed(120), mlp_test_cfg(seed), library(), None)
-                    .unwrap();
+            let (out, _) = rescore_mlp_with(
+                synthetic_competed(120),
+                mlp_test_cfg(seed),
+                library(),
+                None,
+                None,
+            )
+            .unwrap();
             let scores: Vec<f64> = out.iter().map(|r| r.discriminant_score as f64).collect();
             let is_target: Vec<bool> = out.iter().map(|r| r.scoring.identity.is_target).collect();
             let auc = pair_auc(&scores, &is_target);
@@ -1961,6 +1995,7 @@ mod feature_tests {
             indistinguishable_competed(24),
             mlp_test_cfg(7),
             library(),
+            None,
             None,
         )
         .unwrap_err();
