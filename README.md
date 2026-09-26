@@ -149,6 +149,8 @@ Auth via AWS default chain. MinIO/R2: set `AWS_ENDPOINT_URL`. See `docs/developm
 ## Development
 
 See [docs/development.md](docs/development.md) for dev utilities, compile flags, env vars, Taskfile targets, and scripts.
+For a one-fold peptide entrapment experiment and FDRBench comparison, see
+[docs/entrapment.md](docs/entrapment.md).
 
 ## License
 
