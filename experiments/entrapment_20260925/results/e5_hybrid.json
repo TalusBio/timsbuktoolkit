@@ -1,0 +1,22 @@
+{
+  "fdp_limit": 0.01,
+  "reported_q": 0.01,
+  "n_rows": 786201,
+  "best_at_empirical_fdp": {
+    "q_value": 0.007901626639068127,
+    "paired_fdp": 0.00999436936936937,
+    "n_targets": 21187,
+    "n_entrapments": 125
+  },
+  "at_reported_q": {
+    "q_value": 0.009996121749281883,
+    "paired_fdp": 0.01289038844190674,
+    "n_targets": 22946,
+    "n_entrapments": 172
+  },
+  "trial": "e5_hybrid",
+  "git_commit": "3e7d6108ff677ed4aafcaa85505583be05d70149",
+  "binary_sha256": "2a6ca976a852f156b97e4f56ce21b00c4a0d10f95086b47c12e92a5bd5388d99",
+  "rescore_model": "hybrid",
+  "report": "shitshit/hela_entrapment/trials/e5_hybrid/fdp/entrapment_fdp.tsv"
+}

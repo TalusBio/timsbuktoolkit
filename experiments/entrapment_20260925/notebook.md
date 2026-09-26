@@ -22,6 +22,9 @@ follow-up branches can re-implement retained ideas cleanly.
 | Baseline | Current MLP, target/decoy competition | 23,048 | 35,663 | 4.21% | Reference |
 | E1 | Omit both decoy-group margin features; keep competition | 31,012 | 34,070 | 1.29% | Keep (+7,964) |
 | E2 | E1 plus no target/decoy competition | 30,430 | 31,368 | 1.10% | Roll back (−582 vs E1) |
+| E3 | E1 with LDA rescoring | 20,086 | 21,375 | 1.18% | Reject (−10,926 vs E1) |
+| E4 | E1 with GBM rescoring | 30,035 | 31,384 | 1.15% | Reject (−977 vs E1) |
+| E5 | E1 with hybrid LDA→GBM rescoring | 21,187 | 22,946 | 1.29% | Reject (−9,825 vs E1) |
 
 E1 reused the earlier full search in `shitshit/hela_entrapment/search_no_group`.
 It scored the same 1,753,338 candidates with identical raw scores as the
@@ -32,6 +35,12 @@ E2 retained both target and decoy candidates after sequence deduplication.
 All E1 winners were present with identical raw scores. The paired FDP curve
 moved closer to reported q, but E2 lost 582 IDs at the empirical 1% FDP cutoff.
 The competition bypass was temporary and is not in this branch.
+
+E3 used `--rescore-model lda` with the E1 binary. It lost substantial target
+yield, despite a slightly smaller paired FDP at the reported 1% q cutoff.
+E4 used `--rescore-model gbm`; it approached E1 but still lost 977 IDs at the
+empirical cutoff.
+E5 used `--rescore-model hybrid`; it also lost substantial target yield.
 
 For each new trial: make one change, run the fixed experiment, append its
 metrics and observation here. Commit improvements to the primary metric;
