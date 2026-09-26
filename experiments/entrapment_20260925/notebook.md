@@ -21,11 +21,17 @@ follow-up branches can re-implement retained ideas cleanly.
 |---|---|---:|---:|---:|---|
 | Baseline | Current MLP, target/decoy competition | 23,048 | 35,663 | 4.21% | Reference |
 | E1 | Omit both decoy-group margin features; keep competition | 31,012 | 34,070 | 1.29% | Keep (+7,964) |
+| E2 | E1 plus no target/decoy competition | 30,430 | 31,368 | 1.10% | Roll back (−582 vs E1) |
 
 E1 reused the earlier full search in `shitshit/hela_entrapment/search_no_group`.
 It scored the same 1,753,338 candidates with identical raw scores as the
 baseline; only the MLP inputs changed. The top cutoff satisfying paired FDP
 ≤1% is reported q=0.007557, with paired FDP 0.996% and 31,012 original targets.
+
+E2 retained both target and decoy candidates after sequence deduplication.
+All E1 winners were present with identical raw scores. The paired FDP curve
+moved closer to reported q, but E2 lost 582 IDs at the empirical 1% FDP cutoff.
+The competition bypass was temporary and is not in this branch.
 
 For each new trial: make one change, run the fixed experiment, append its
 metrics and observation here. Commit improvements to the primary metric;
