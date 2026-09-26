@@ -28,6 +28,7 @@ follow-up branches can re-implement retained ideas cleanly.
 | E6 | E1 MLP score − 0.10 × ln(1 + main score) | 31,810 | 33,059 | 1.17% | Keep (+798 vs E1) |
 | E7 | E6 score + 0.40 × held-out GBM score | 32,864 | 34,816 | 1.28% | Keep (+1,054 vs E6) |
 | E8 | E7 score − 1.10 × held-out LDA score | 33,214 | 34,854 | 1.26% | Keep (+350 vs E7) |
+| E9 | Cached direct-field additions to E8 | 33,257* | — | — | Reject (only +43 offline) |
 
 E1 reused the earlier full search in `shitshit/hela_entrapment/search_no_group`.
 It scored the same 1,753,338 candidates with identical raw scores as the
@@ -66,6 +67,14 @@ near −1.1 improved the cached E7 result; neighboring weights −0.9 and −1.2
 yielded 33,092 and 32,961 IDs. The integrated three-model run reproduced the
 cached 33,214 exactly. The negative sign is empirical on this one file and
 should not be interpreted as a general property of LDA.
+
+E9 screened standardized direct fields on saved E8 candidates: fragment
+coverage, absolute RT error, cosine, scribe, isotope correlation, ratio CV,
+fragment apex agreement, MS2 lazy scores, scored fragment count, and logged MS2
+intensity. Most best weights were zero. Adding 0.15× standardized scored
+fragment count reached 33,257 IDs (*offline only*), a 43-ID gain that did not
+justify another full search or a dataset-wide normalization step. No engine
+change was retained.
 
 Run an offline score scan with:
 

@@ -94,24 +94,39 @@ def main():
         type=Path,
         help="Blend a second rescorer's discriminant score, matched by library ID",
     )
+    parser.add_argument("--field", help="Blend a numeric result field instead")
+    parser.add_argument("--transform", choices=["raw", "abs", "log1p"], default="raw")
+    parser.add_argument("--standardize", action="store_true")
     args = parser.parse_args()
+    if args.field and args.secondary_results:
+        parser.error("choose either --field or --secondary-results")
 
     labels, pairing = load_pairs(args.pairs)
-    frame = pl.read_parquet(
-        args.results,
-        columns=[
-            "sequence",
-            "library_id",
-            "precursor_charge",
-            "is_target",
-            "discriminant_score",
-            "main_score",
-            "qvalue",
-        ],
-    )
+    columns = [
+        "sequence",
+        "library_id",
+        "precursor_charge",
+        "is_target",
+        "discriminant_score",
+        "main_score",
+        "qvalue",
+    ]
+    if args.field and args.field not in columns:
+        columns.append(args.field)
+    frame = pl.read_parquet(args.results, columns=columns)
     is_target = frame["is_target"].to_numpy()
     mlp = frame["discriminant_score"].to_numpy()
-    if args.secondary_results is None:
+    if args.field:
+        blend = frame[args.field].to_numpy().astype(np.float32)
+        if args.transform == "abs":
+            blend = np.abs(blend)
+        elif args.transform == "log1p":
+            blend = np.log1p(np.maximum(blend, 0))
+        if args.standardize:
+            finite = np.isfinite(blend)
+            blend = (blend - blend[finite].mean()) / blend[finite].std()
+        blend = np.nan_to_num(blend, nan=0.0, posinf=0.0, neginf=0.0)
+    elif args.secondary_results is None:
         blend = np.log1p(frame["main_score"].to_numpy())
     else:
         other = pl.read_parquet(
