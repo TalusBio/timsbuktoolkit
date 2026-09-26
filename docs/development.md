@@ -162,5 +162,6 @@ cargo test -p tims_stage --features aws --test minio_smoke
 | Path | Purpose |
 |------|---------|
 | `bench/wandb_bench.py` | wandb-logged benchmark runner |
+| `bench/entrapment.py` | Generate peptide entrapments, run timsseek, estimate FDP; see [entrapment.md](entrapment.md) |
 | `scripts/release.sh` | Release cut helper |
 | `Dockerfile` | Multi-stage image (used by `task docker`) |
