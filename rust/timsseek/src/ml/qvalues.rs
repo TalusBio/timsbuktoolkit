@@ -1115,8 +1115,6 @@ mod feature_tests {
                 s.identity.row = test_handles::row(0);
                 s
             },
-            delta_group_ln1p_diff: 1.0,
-            delta_group_ln1p_ratio: 0.5,
             discriminant_score: 0.0,
             qvalue: 1.0,
         }
@@ -1285,32 +1283,13 @@ mod feature_tests {
     }
 
     #[test]
-    fn competition_group_margins_are_output_only() {
-        let first = sample_competed_candidate();
-        let mut second = first.clone();
-        second.delta_group_ln1p_diff = 3.0;
-        second.delta_group_ln1p_ratio = 0.25;
-
+    fn competition_group_margins_are_not_features() {
         let names = all_feature_name_set(library());
         assert!(
             !names
                 .iter()
                 .any(|name| name.starts_with("delta_group_ln1p_"))
         );
-        let width = names.len();
-        let rows = [first, second.clone()];
-        let matrix = build_all_matrix(library(), competed_rows(&rows));
-        assert_eq!(matrix.len(), 2 * width);
-        assert!(
-            matrix[..width]
-                .iter()
-                .zip(&matrix[width..])
-                .all(|(a, b)| a.to_bits() == b.to_bits())
-        );
-
-        let output = second.into_final();
-        assert_eq!(output.delta_group_ln1p_diff, 3.0);
-        assert_eq!(output.delta_group_ln1p_ratio, 0.25);
     }
 
     /// Build a non-degenerate synthetic candidate set: `n` rows, alternating
@@ -1318,10 +1297,8 @@ mod feature_tests {
     /// varied by label + row so the cross-fit LDA has real within-class scatter
     /// and a class-mean gap (i.e. it actually fits, exercising the score path).
     ///
-    /// Every model input varied here lands in the linear lane. The group margins
-    /// also vary by label but remain output-only. The nonlinear lane is constant.
-    ///
-    /// The nonlinear lane is intentionally constant; use
+    /// Every model input varied here lands in the linear lane. The nonlinear
+    /// lane is intentionally constant; use
     /// [`synthetic_competed_nonlinear_signal`] when a nonlinear split is needed.
     fn synthetic_competed(n: u32) -> Vec<CompetedCandidate> {
         (0..n)
@@ -1337,20 +1314,6 @@ mod feature_tests {
                 c.scoring.counts.falling_cycles = base.saturating_sub(jitter);
                 c.scoring.counts.npeaks = base + (i % 3) as u8;
                 c.scoring.finalize_counts.n_scored_fragments = base + (i % 4) as u8;
-                c.delta_group_ln1p_diff = if is_target { 2.0 } else { 0.5 } + (i % 7) as f32 * 0.1;
-                c.delta_group_ln1p_ratio = if is_target { 0.8 } else { 0.3 };
-                c
-            })
-            .collect()
-    }
-
-    fn synthetic_competed_linear_only(n: u32) -> Vec<CompetedCandidate> {
-        synthetic_competed(n)
-            .into_iter()
-            .map(|mut c| {
-                let sample = sample_competed_candidate();
-                c.delta_group_ln1p_diff = sample.delta_group_ln1p_diff;
-                c.delta_group_ln1p_ratio = sample.delta_group_ln1p_ratio;
                 c
             })
             .collect()
@@ -1985,9 +1948,9 @@ mod feature_tests {
 
     #[test]
     fn hybrid_lda_score_carries_the_linear_lane_into_the_gbm() {
-        assert_nonlinear_lane_is_flat(&synthetic_competed_linear_only(360), "lda_score");
+        assert_nonlinear_lane_is_flat(&synthetic_competed(360), "lda_score");
 
-        let (out, stats) = rescore_hybrid(synthetic_competed_linear_only(360), library()).unwrap();
+        let (out, stats) = rescore_hybrid(synthetic_competed(360), library()).unwrap();
 
         let split_on_it = stats
             .iter()

@@ -39,6 +39,7 @@ use super::results::FinalResult;
 ///   numeric id is written as its digits.
 /// - 4: sequence is canonical and nullable, resolved from stored analyte facts;
 ///   entry_name, molecular_formula and formula_basis are separate nullable columns.
+/// - 6: removed the unused competition-group margin columns.
 ///
 /// `decoy_group_id` equals `library_id` on a row whose library declared no
 /// competition group: the row competes only with its own mass-shift variants
@@ -46,7 +47,7 @@ use super::results::FinalResult;
 /// keys`), and then a target and its shipped decoy share one `decoy_group_id`
 /// across two `library_id`s. Other formats declare nothing, so for them the
 /// duplication is expected, not a bug.
-pub const RESULTS_FORMAT_VERSION: u32 = 5;
+pub const RESULTS_FORMAT_VERSION: u32 = 6;
 
 // ---------------------------------------------------------------------------
 // Build a RecordBatch from a slice of FinalResult
@@ -304,8 +305,6 @@ impl<'a> ResultParquetWriter<'a> {
         assert!(self.raw, "raw scores require the raw output schema");
         self.add(FinalResult {
             scoring: result.scoring,
-            delta_group_ln1p_diff: f32::NAN,
-            delta_group_ln1p_ratio: f32::NAN,
             discriminant_score: f32::NAN,
             qvalue: f32::NAN,
         })
@@ -360,12 +359,7 @@ mod tests {
         for rows in [&[][..], std::slice::from_ref(&row)] {
             let batch = output_batch(rows, &geom, true).unwrap();
             assert_eq!(batch.num_rows(), rows.len());
-            for name in [
-                "qvalue",
-                "discriminant_score",
-                "delta_group_ln1p_diff",
-                "delta_group_ln1p_ratio",
-            ] {
+            for name in ["qvalue", "discriminant_score"] {
                 assert!(batch.schema().field_with_name(name).is_err());
             }
             assert!(batch.schema().field_with_name("main_score").is_ok());
@@ -563,14 +557,12 @@ mod tests {
     }
 
     #[test]
-    fn delta_columns_name_their_ln1p_formulas() {
+    fn unused_group_margin_columns_are_absent() {
         let batch = build_record_batch(&[], &one_row_arena()).expect("schema");
         let schema = batch.schema();
 
-        assert!(schema.index_of("delta_group_ln1p_diff").is_ok());
-        assert!(schema.index_of("delta_group_ln1p_ratio").is_ok());
-        assert!(schema.index_of("delta_group").is_err());
-        assert!(schema.index_of("delta_group_ratio").is_err());
+        assert!(schema.index_of("delta_group_ln1p_diff").is_err());
+        assert!(schema.index_of("delta_group_ln1p_ratio").is_err());
     }
 
     #[test]

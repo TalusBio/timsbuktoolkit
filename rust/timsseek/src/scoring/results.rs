@@ -144,8 +144,6 @@ pub struct ScoredCandidate {
 #[derive(Debug, Clone, Serialize)]
 pub struct CompetedCandidate {
     pub scoring: ScoringFields,
-    pub delta_group_ln1p_diff: f32,
-    pub delta_group_ln1p_ratio: f32,
     /// Scratch field for CrossValidatedScorer (written during rescore)
     pub(crate) discriminant_score: f32,
     /// Scratch field for q-value assignment
@@ -153,11 +151,9 @@ pub struct CompetedCandidate {
 }
 
 impl CompetedCandidate {
-    /// The post-model meta block (used for the ML delta-group features).
+    /// The post-model metadata block.
     pub(crate) fn result_meta(&self) -> ResultMeta {
         ResultMeta {
-            delta_group_ln1p_diff: self.delta_group_ln1p_diff,
-            delta_group_ln1p_ratio: self.delta_group_ln1p_ratio,
             discriminant_score: self.discriminant_score,
             qvalue: self.qvalue,
         }
@@ -168,8 +164,6 @@ impl CompetedCandidate {
 #[derive(Debug, Clone, Serialize)]
 pub struct FinalResult {
     pub scoring: ScoringFields,
-    pub delta_group_ln1p_diff: f32,
-    pub delta_group_ln1p_ratio: f32,
     pub discriminant_score: f32,
     pub qvalue: f32,
 }
@@ -180,8 +174,6 @@ impl FinalResult {
     pub fn sample() -> Self {
         Self {
             scoring: ScoringFields::sample_default(),
-            delta_group_ln1p_diff: 0.0,
-            delta_group_ln1p_ratio: 0.0,
             discriminant_score: 0.0,
             qvalue: 0.0,
         }
@@ -190,8 +182,6 @@ impl FinalResult {
     /// The post-model meta block (used for the Parquet meta columns).
     pub(crate) fn result_meta(&self) -> ResultMeta {
         ResultMeta {
-            delta_group_ln1p_diff: self.delta_group_ln1p_diff,
-            delta_group_ln1p_ratio: self.delta_group_ln1p_ratio,
             discriminant_score: self.discriminant_score,
             qvalue: self.qvalue,
         }
@@ -215,19 +205,10 @@ impl FinalResult {
 // ---------------------------------------------------------------------------
 
 impl ScoredCandidate {
-    /// Convert into a `CompetedCandidate` with the given log-space delta values.
-    ///
-    /// Items that are alone in their group (no competitor) should pass
-    /// `f32::NAN` for both deltas.
-    pub fn into_competed(
-        self,
-        delta_group_ln1p_diff: f32,
-        delta_group_ln1p_ratio: f32,
-    ) -> CompetedCandidate {
+    /// Convert a competition winner into a `CompetedCandidate`.
+    pub fn into_competed(self) -> CompetedCandidate {
         CompetedCandidate {
             scoring: self.scoring,
-            delta_group_ln1p_diff,
-            delta_group_ln1p_ratio,
             discriminant_score: f32::NAN,
             qvalue: f32::NAN,
         }
@@ -239,8 +220,6 @@ impl CompetedCandidate {
     pub fn into_final(self) -> FinalResult {
         FinalResult {
             scoring: self.scoring,
-            delta_group_ln1p_diff: self.delta_group_ln1p_diff,
-            delta_group_ln1p_ratio: self.delta_group_ln1p_ratio,
             discriminant_score: self.discriminant_score,
             qvalue: self.qvalue,
         }

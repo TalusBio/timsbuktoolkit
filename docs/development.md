@@ -47,7 +47,8 @@ in primary and secondary extraction. A failed RT fit never reinterprets an index
 as seconds; initial extraction searches unrestricted RT. Secondary queries still
 center on detected apex RT and observed mobility.
 
-Results format 5 includes `library_rt_axis` Parquet metadata. Unavailable library
+Results format 6 removes the unused competition-group margin columns. Format 5
+added `library_rt_axis` Parquet metadata. Unavailable library
 RT, calibrated RT and RT residuals are NaN; observed apex RT remains seconds.
 Calibration format v4 records the input library axis and effective tolerance
 enums; an empty RT snapshot means no RT fit, while residuals can still contain
@@ -84,7 +85,7 @@ intensities, so those reader routes remain extraction-only.
 Standalone `calib_dash` reads saved `calibration.json`, not a spectral library.
 
 [Analyte module documentation](../rust/timsquery/src/chemistry/analyte.rs) documents chemistry storage, reader mappings,
-library-wide sequence eligibility, and results format version 5.
+library-wide sequence eligibility, and the format 5 changes.
 
 Precursor isotope envelopes retain the three-bin C/S approximation. Scoring
 finalization includes known modification C/S deltas or an explicitly based

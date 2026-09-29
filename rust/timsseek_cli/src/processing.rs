@@ -621,30 +621,15 @@ fn target_decoy_compete(
         glimpse_result_head(&results)
     );
 
-    // Sort competing results adjacent, best first within each competition.
-    results.sort_unstable_by(|x, y| {
-        x.scoring
-            .identity
-            .competition_key()
-            .cmp(&y.scoring.identity.competition_key())
-            .then_with(|| {
-                x.scoring
-                    .primary
-                    .main_score
-                    .partial_cmp(&y.scoring.primary.main_score)
-                    .expect("NaN main_score should have been filtered during Phase 3 scoring")
-                    .reverse()
-            })
-    });
+    // Sort by competition key so each group's members are adjacent. The
+    // winner is found by scanning that group; runner-up ordering is unnecessary.
+    results.sort_unstable_by_key(|result| result.scoring.identity.competition_key());
     info!(
         "Number of results before t/d competition: {}",
         results.len()
     );
 
-    // Each run is one competition, best first. Only the winner survives, and
-    // its separation feature is its margin over the runner-up -- NaN when it
-    // ran alone, since there is nothing to separate from and NaN is the model's
-    // missing marker.
+    // Each run is one competition. Keep only its highest-scoring member.
     let group_lens: Vec<usize> = results
         .chunk_by(|a, b| a.scoring.identity.competes_with(&b.scoring.identity))
         .map(<[_]>::len)
@@ -667,20 +652,18 @@ fn target_decoy_compete(
     group_lens
         .into_iter()
         .map(|len| {
-            let winner = members.next().expect("chunk_by yields non-empty runs");
-            let ln1p_winner = winner.scoring.primary.main_score.ln_1p();
-            // Guard on the run length before taking: a lone winner must not
-            // consume the next competition's winner as its runner-up.
-            let (diff, ratio) = if len >= 2 {
-                let runner_up = members.next().expect("a run of >=2 has a second member");
-                let ln1p_runner_up = runner_up.scoring.primary.main_score.ln_1p();
-                (ln1p_winner - ln1p_runner_up, ln1p_runner_up / ln1p_winner)
-            } else {
-                (f32::NAN, f32::NAN)
-            };
-            // Everyone below the runner-up loses and carries no feature.
-            members.by_ref().take(len.saturating_sub(2)).for_each(drop);
-            winner.into_competed(diff, ratio)
+            members
+                .by_ref()
+                .take(len)
+                .max_by(|a, b| {
+                    a.scoring
+                        .primary
+                        .main_score
+                        .partial_cmp(&b.scoring.primary.main_score)
+                        .expect("NaN main_score should have been filtered during Phase 3 scoring")
+                })
+                .expect("chunk_by yields non-empty runs")
+                .into_competed()
         })
         .collect()
 }
@@ -842,7 +825,7 @@ mod tests {
     }
 
     #[test]
-    fn competition_features_match_their_ln1p_names() {
+    fn competition_keeps_highest_scoring_member() {
         let mut best = candidate("BEST", 501.0, true, 7);
         best.scoring.primary.main_score = 8.0;
         let mut runner_up = candidate("RUNNER", 502.0, false, 7);
@@ -850,19 +833,12 @@ mod tests {
 
         let competed = compete(vec![runner_up, best]);
         assert_eq!(competed.len(), 1);
-        let winner = &competed[0];
-        let best_ln1p = 8.0f32.ln_1p();
-        let runner_up_ln1p = 3.0f32.ln_1p();
-
-        assert!((winner.delta_group_ln1p_diff - (best_ln1p - runner_up_ln1p)).abs() < 1e-6);
-        assert!((winner.delta_group_ln1p_ratio - runner_up_ln1p / best_ln1p).abs() < 1e-6);
+        assert_eq!(competed[0].scoring.identity.source_id, "BEST".into());
     }
 
-    /// `MassShift` makes every group three members, so a
-    /// two-member test never exercised the case that mattered: the margin has
-    /// to come from the runner-up, not from the worst member.
+    /// `MassShift` makes every group three members; scan the whole group.
     #[test]
-    fn a_three_member_group_separates_the_winner_from_the_runner_up() {
+    fn a_three_member_group_keeps_its_winner() {
         let mut best = candidate("BEST", 501.0, true, 7);
         best.scoring.primary.main_score = 8.0;
         let mut middle = candidate("MIDDLE", 502.0, false, 7);
@@ -872,24 +848,17 @@ mod tests {
 
         let competed = compete(vec![worst, middle, best]);
         assert_eq!(competed.len(), 1, "one group, one survivor");
-
-        let (b, m) = (8.0f32.ln_1p(), 3.0f32.ln_1p());
-        assert!((competed[0].delta_group_ln1p_diff - (b - m)).abs() < 1e-6);
-        assert!((competed[0].delta_group_ln1p_ratio - m / b).abs() < 1e-6);
+        assert_eq!(competed[0].scoring.identity.source_id, "BEST".into());
     }
 
-    /// Nothing to separate from, so the feature does not apply. NaN is the
-    /// model's missing marker; 0 would claim a tie with a rival that never
-    /// existed.
     #[test]
-    fn a_lone_group_member_reports_no_separation() {
+    fn a_lone_group_member_survives() {
         let mut only = candidate("ALONE", 501.0, true, 7);
         only.scoring.primary.main_score = 8.0;
 
         let competed = compete(vec![only]);
         assert_eq!(competed.len(), 1);
-        assert!(competed[0].delta_group_ln1p_diff.is_nan());
-        assert!(competed[0].delta_group_ln1p_ratio.is_nan());
+        assert_eq!(competed[0].scoring.identity.source_id, "ALONE".into());
     }
 
     /// A target beaten by a decoy is what competition is for, so it counts as
@@ -929,6 +898,15 @@ mod tests {
 
         let competed = compete(vec![a, b]);
         assert_eq!(competed.len(), 2, "two groups, two survivors");
-        assert!(competed.iter().all(|c| c.delta_group_ln1p_diff.is_nan()));
+        assert!(
+            competed
+                .iter()
+                .any(|c| c.scoring.identity.source_id == "A".into())
+        );
+        assert!(
+            competed
+                .iter()
+                .any(|c| c.scoring.identity.source_id == "B".into())
+        );
     }
 }
