@@ -1284,13 +1284,42 @@ mod feature_tests {
         }
     }
 
+    #[test]
+    fn competition_group_margins_are_output_only() {
+        let first = sample_competed_candidate();
+        let mut second = first.clone();
+        second.delta_group_ln1p_diff = 3.0;
+        second.delta_group_ln1p_ratio = 0.25;
+
+        let names = all_feature_name_set(library());
+        assert!(
+            !names
+                .iter()
+                .any(|name| name.starts_with("delta_group_ln1p_"))
+        );
+        let width = names.len();
+        let rows = [first, second.clone()];
+        let matrix = build_all_matrix(library(), competed_rows(&rows));
+        assert_eq!(matrix.len(), 2 * width);
+        assert!(
+            matrix[..width]
+                .iter()
+                .zip(&matrix[width..])
+                .all(|(a, b)| a.to_bits() == b.to_bits())
+        );
+
+        let output = second.into_final();
+        assert_eq!(output.delta_group_ln1p_diff, 3.0);
+        assert_eq!(output.delta_group_ln1p_ratio, 0.25);
+    }
+
     /// Build a non-degenerate synthetic candidate set: `n` rows, alternating
     /// target/decoy, distinct arena rows, with the LINEAR-lane count fields
     /// varied by label + row so the cross-fit LDA has real within-class scatter
     /// and a class-mean gap (i.e. it actually fits, exercising the score path).
     ///
-    /// Every field varied here lands in the linear lane, including the two
-    /// log-space group-delta features. The nonlinear lane is therefore constant.
+    /// Every model input varied here lands in the linear lane. The group margins
+    /// also vary by label but remain output-only. The nonlinear lane is constant.
     ///
     /// The nonlinear lane is intentionally constant; use
     /// [`synthetic_competed_nonlinear_signal`] when a nonlinear split is needed.
@@ -2058,16 +2087,16 @@ mod feature_tests {
     /// Every consumer indexes on that contract -- `rescore_dash` sweeps the
     /// matrix a row at a time with every column's accumulator live, so an
     /// interleaved or transposed write would silently mix features together
-    /// rather than fail. Rows carry distinct `delta_group_ln1p_diff` values so the
+    /// rather than fail. Rows carry distinct `rising_cycles` values so the
     /// assertion can tell them apart; a length check alone passes even when
     /// the layout is wrong.
     #[test]
     fn feature_frame_rows_are_contiguous() {
-        let rows: Vec<_> = [1.0f32, 2.0, 3.0]
+        let rows: Vec<_> = [1u8, 2, 3]
             .into_iter()
-            .map(|delta_group_ln1p_diff| {
+            .map(|rising_cycles| {
                 let mut c = sample_competed_candidate();
-                c.delta_group_ln1p_diff = delta_group_ln1p_diff;
+                c.scoring.counts.rising_cycles = rising_cycles;
                 c.into_final()
             })
             .collect();
@@ -2078,13 +2107,13 @@ mod feature_tests {
 
         let j = names
             .iter()
-            .position(|n| &**n == "delta_group_ln1p_diff")
-            .expect("delta_group_ln1p_diff is an ALL-lane feature");
+            .position(|n| &**n == "rising_cycles")
+            .expect("rising_cycles is an ALL-lane feature");
         for (i, expected) in [1.0f64, 2.0, 3.0].into_iter().enumerate() {
             assert_eq!(
                 got[i * nf + j],
                 expected,
-                "row {i}'s delta_group_ln1p_diff is not at matrix[{i} * {nf} + {j}]"
+                "row {i}'s rising_cycles is not at matrix[{i} * {nf} + {j}]"
             );
         }
     }
