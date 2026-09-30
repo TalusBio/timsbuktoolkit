@@ -1,0 +1,23 @@
+{
+  "fdp_limit": 0.01,
+  "reported_q": 0.01,
+  "n_rows": 791917,
+  "best_at_empirical_fdp": {
+    "q_value": 0.008357995189726353,
+    "paired_fdp": 0.00999575343808186,
+    "n_targets": 30426,
+    "n_entrapments": 187
+  },
+  "at_reported_q": {
+    "q_value": 0.009997846558690071,
+    "paired_fdp": 0.011898875015453085,
+    "n_targets": 32123,
+    "n_entrapments": 233
+  },
+  "input": "shitshit/hela_entrapment/search_no_group_no_compete/Ast_20240130_Bo_AI_30_2mz_HeLa01.mzML/results.parquet",
+  "input_rows": 3471981,
+  "winners": 1753338,
+  "output": "shitshit/hela_entrapment/post_rescore_compete_e1/results.parquet",
+  "report": "shitshit/hela_entrapment/post_rescore_compete_e1/fdp/entrapment_fdp.tsv",
+  "method": "best discriminant per (decoy_group_id, precursor_charge), then recompute q"
+}

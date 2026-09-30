@@ -33,6 +33,7 @@ follow-up branches can re-implement retained ideas cleanly.
 | E11 | Narrow MLP hidden layers from 32/16 to 16/8 | 32,012 | 34,279 | 1.24% | Roll back (−1,202 vs E8) |
 | E12 | E8 score + 0.50 × E11 score | 33,445 | 35,316 | 1.30% | Keep (+231 vs E8) |
 | E13 | Change both MLP seeds by xor with 0x9E3779B97F4A7C15 | 32,314 | 35,401 | 1.37% | Roll back (−1,131 vs E12) |
+| E14 | Train/rescore without competition, then compete by discriminant score and recompute q-values | 30,426 | 32,123 | 1.19% | Reject (−586 vs E1; −4 vs E2) |
 
 E1 reused the earlier full search in `shitshit/hela_entrapment/search_no_group`.
 It scored the same 1,753,338 candidates with identical raw scores as the
@@ -43,6 +44,15 @@ E2 retained both target and decoy candidates after sequence deduplication.
 All E1 winners were present with identical raw scores. The paired FDP curve
 moved closer to reported q, but E2 lost 582 IDs at the empirical 1% FDP cutoff.
 The competition bypass was temporary and is not in this branch.
+
+E14 reused E2's saved 3,471,981 rescored rows. Replaying the q-value calculation
+matched every saved q-value exactly. For each `(decoy_group_id, charge)`, it kept
+the first row in E2's descending discriminant-score order, yielding 1,753,338
+winners, then recalculated q-values and paired FDP. Ties retain E2's stable
+score order; no group had a tied top score in this run. The reported q≤1%
+paired FDP fell to 1.19%, but empirical 1% FDP
+yield remained below E1. This was an offline transformation of the saved full
+output, with no model refit or new raw search. See `post_rescore_competition.py`.
 
 E3 used `--rescore-model lda` with the E1 binary. It lost substantial target
 yield, despite a slightly smaller paired FDP at the reported 1% q cutoff.
