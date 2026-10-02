@@ -1,17 +1,17 @@
 version = 1
-revision = 3
+revision = 5
 requires-python = ">=3.11, <3.13"
 resolution-markers = [
     "python_full_version >= '3.12' and platform_machine != 's390x' and sys_platform == 'win32'",
     "python_full_version >= '3.12' and platform_machine == 's390x' and sys_platform == 'win32'",
-    "python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'win32'",
-    "python_full_version < '3.12' and platform_machine == 's390x' and sys_platform == 'win32'",
     "python_full_version >= '3.12' and platform_machine != 's390x' and sys_platform == 'emscripten'",
     "python_full_version >= '3.12' and platform_machine == 's390x' and sys_platform == 'emscripten'",
-    "python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'emscripten'",
-    "python_full_version < '3.12' and platform_machine == 's390x' and sys_platform == 'emscripten'",
     "python_full_version >= '3.12' and platform_machine != 's390x' and sys_platform != 'emscripten' and sys_platform != 'win32'",
     "python_full_version >= '3.12' and platform_machine == 's390x' and sys_platform != 'emscripten' and sys_platform != 'win32'",
+    "python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'win32'",
+    "python_full_version < '3.12' and platform_machine == 's390x' and sys_platform == 'win32'",
+    "python_full_version < '3.12' and platform_machine != 's390x' and sys_platform == 'emscripten'",
+    "python_full_version < '3.12' and platform_machine == 's390x' and sys_platform == 'emscripten'",
     "python_full_version < '3.12' and platform_machine != 's390x' and sys_platform != 'emscripten' and sys_platform != 'win32'",
     "python_full_version < '3.12' and platform_machine == 's390x' and sys_platform != 'emscripten' and sys_platform != 'win32'",
 ]
@@ -676,7 +676,7 @@ wheels = [
 
 [[package]]
 name = "timsseek-workspace"
-version = "0.33.0"
+version = "0.34.0"
 source = { virtual = "." }
 
 [package.dev-dependencies]
