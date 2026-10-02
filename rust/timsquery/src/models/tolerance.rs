@@ -2,7 +2,6 @@ use OptionallyRestricted::{
     Restricted,
     Unrestricted,
 };
-use core::f32;
 use half::f16;
 use serde::{
     Deserialize,

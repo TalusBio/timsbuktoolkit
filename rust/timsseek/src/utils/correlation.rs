@@ -14,8 +14,6 @@
 //! The implementation uses f64 accumulation to handle extreme intensity ranges correctly
 //! (e.g., 100 vs 1,000,000). See `test_extreme_range_stability` for validation.
 
-use std::f32;
-
 use crate::errors::DataProcessingError;
 
 /// Calculates the cosine similarity between two vectors of the same size.
