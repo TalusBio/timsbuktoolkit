@@ -1115,8 +1115,6 @@ mod feature_tests {
                 s.identity.row = test_handles::row(0);
                 s
             },
-            delta_group_ln1p_diff: 1.0,
-            delta_group_ln1p_ratio: 0.5,
             discriminant_score: 0.0,
             qvalue: 1.0,
         }
@@ -1284,15 +1282,23 @@ mod feature_tests {
         }
     }
 
+    #[test]
+    fn competition_group_margins_are_not_features() {
+        let names = all_feature_name_set(library());
+        assert!(
+            !names
+                .iter()
+                .any(|name| name.starts_with("delta_group_ln1p_"))
+        );
+    }
+
     /// Build a non-degenerate synthetic candidate set: `n` rows, alternating
     /// target/decoy, distinct arena rows, with the LINEAR-lane count fields
     /// varied by label + row so the cross-fit LDA has real within-class scatter
     /// and a class-mean gap (i.e. it actually fits, exercising the score path).
     ///
-    /// Every field varied here lands in the linear lane, including the two
-    /// log-space group-delta features. The nonlinear lane is therefore constant.
-    ///
-    /// The nonlinear lane is intentionally constant; use
+    /// Every model input varied here lands in the linear lane. The nonlinear
+    /// lane is intentionally constant; use
     /// [`synthetic_competed_nonlinear_signal`] when a nonlinear split is needed.
     fn synthetic_competed(n: u32) -> Vec<CompetedCandidate> {
         (0..n)
@@ -1308,20 +1314,6 @@ mod feature_tests {
                 c.scoring.counts.falling_cycles = base.saturating_sub(jitter);
                 c.scoring.counts.npeaks = base + (i % 3) as u8;
                 c.scoring.finalize_counts.n_scored_fragments = base + (i % 4) as u8;
-                c.delta_group_ln1p_diff = if is_target { 2.0 } else { 0.5 } + (i % 7) as f32 * 0.1;
-                c.delta_group_ln1p_ratio = if is_target { 0.8 } else { 0.3 };
-                c
-            })
-            .collect()
-    }
-
-    fn synthetic_competed_linear_only(n: u32) -> Vec<CompetedCandidate> {
-        synthetic_competed(n)
-            .into_iter()
-            .map(|mut c| {
-                let sample = sample_competed_candidate();
-                c.delta_group_ln1p_diff = sample.delta_group_ln1p_diff;
-                c.delta_group_ln1p_ratio = sample.delta_group_ln1p_ratio;
                 c
             })
             .collect()
@@ -1956,9 +1948,9 @@ mod feature_tests {
 
     #[test]
     fn hybrid_lda_score_carries_the_linear_lane_into_the_gbm() {
-        assert_nonlinear_lane_is_flat(&synthetic_competed_linear_only(360), "lda_score");
+        assert_nonlinear_lane_is_flat(&synthetic_competed(360), "lda_score");
 
-        let (out, stats) = rescore_hybrid(synthetic_competed_linear_only(360), library()).unwrap();
+        let (out, stats) = rescore_hybrid(synthetic_competed(360), library()).unwrap();
 
         let split_on_it = stats
             .iter()
@@ -2058,16 +2050,16 @@ mod feature_tests {
     /// Every consumer indexes on that contract -- `rescore_dash` sweeps the
     /// matrix a row at a time with every column's accumulator live, so an
     /// interleaved or transposed write would silently mix features together
-    /// rather than fail. Rows carry distinct `delta_group_ln1p_diff` values so the
+    /// rather than fail. Rows carry distinct `rising_cycles` values so the
     /// assertion can tell them apart; a length check alone passes even when
     /// the layout is wrong.
     #[test]
     fn feature_frame_rows_are_contiguous() {
-        let rows: Vec<_> = [1.0f32, 2.0, 3.0]
+        let rows: Vec<_> = [1u8, 2, 3]
             .into_iter()
-            .map(|delta_group_ln1p_diff| {
+            .map(|rising_cycles| {
                 let mut c = sample_competed_candidate();
-                c.delta_group_ln1p_diff = delta_group_ln1p_diff;
+                c.scoring.counts.rising_cycles = rising_cycles;
                 c.into_final()
             })
             .collect();
@@ -2078,13 +2070,13 @@ mod feature_tests {
 
         let j = names
             .iter()
-            .position(|n| &**n == "delta_group_ln1p_diff")
-            .expect("delta_group_ln1p_diff is an ALL-lane feature");
+            .position(|n| &**n == "rising_cycles")
+            .expect("rising_cycles is an ALL-lane feature");
         for (i, expected) in [1.0f64, 2.0, 3.0].into_iter().enumerate() {
             assert_eq!(
                 got[i * nf + j],
                 expected,
-                "row {i}'s delta_group_ln1p_diff is not at matrix[{i} * {nf} + {j}]"
+                "row {i}'s rising_cycles is not at matrix[{i} * {nf} + {j}]"
             );
         }
     }
