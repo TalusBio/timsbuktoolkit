@@ -676,7 +676,7 @@ wheels = [
 
 [[package]]
 name = "timsseek-workspace"
-version = "0.34.0"
+version = "0.34.1"
 source = { virtual = "." }
 
 [package.dev-dependencies]
