@@ -177,3 +177,32 @@ fn peptide_tsv_generates_seeded_decoys_and_assigns_groups() {
     assert_eq!(sidecar["decoys"]["method"], "shuffle");
     assert_eq!(sidecar["decoys"]["seed"], 42);
 }
+
+#[test]
+fn peptide_tsv_rejects_a_generated_decoy_matching_a_target_at_another_charge() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("peptides.tsv");
+    std::fs::write(
+        &input,
+        "proforma\tprotein_ids\nPEPTIDEK/2\tP1\nPEDITPEK/3\tP2\n",
+    )
+    .unwrap();
+    let out = dir.path().join("peptides.mzspeclib.txt");
+    let result = Command::new(env!("CARGO_BIN_EXE_timsseek"))
+        .args([
+            "build-library",
+            "--peptides",
+            input.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+            "--decoy-method",
+            "pseudo-reverse",
+        ])
+        .output()
+        .unwrap();
+    assert!(!result.status.success());
+    assert!(
+        String::from_utf8_lossy(&result.stderr).contains("collision-free pseudo-reverse decoy")
+    );
+    assert!(!out.exists());
+}
