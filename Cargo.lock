@@ -228,7 +228,7 @@ dependencies = [
  "ndk-context",
  "ndk-sys",
  "num_enum",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -2614,7 +2614,7 @@ dependencies = [
  "epaint",
  "log",
  "profiling",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "type-map",
  "web-time",
  "wgpu",
@@ -2982,7 +2982,7 @@ dependencies = [
  "serde_arrow",
  "serde_json",
  "tempfile",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "tokio",
  "url",
 ]
@@ -4213,7 +4213,7 @@ dependencies = [
  "jni-sys 0.4.1",
  "log",
  "simd_cesu8",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "walkdir",
  "windows-link 0.2.1",
 ]
@@ -4289,7 +4289,7 @@ checksum = "bde5057d6143cc94e861d90f591b9303d6716c6b9602309150bd068853c10899"
 dependencies = [
  "hashbrown 0.16.1",
  "portable-atomic",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -4697,7 +4697,7 @@ version = "0.34.1"
 dependencies = [
  "serde",
  "serde_json",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "tracing",
 ]
 
@@ -4892,7 +4892,7 @@ dependencies = [
  "quick-xml 0.41.0",
  "regex",
  "sha1",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -4916,7 +4916,7 @@ dependencies = [
  "mzpeaks",
  "nalgebra",
  "num-traits",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -4941,7 +4941,7 @@ dependencies = [
  "once_cell",
  "rustc-hash 1.1.0",
  "spirv",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "unicode-ident",
 ]
 
@@ -5525,7 +5525,7 @@ dependencies = [
  "serde",
  "serde_json",
  "serde_urlencoded",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "tokio",
  "tracing",
  "url",
@@ -6230,7 +6230,7 @@ dependencies = [
  "rustc-hash 2.1.2",
  "rustls",
  "socket2",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "tokio",
  "tracing",
  "web-time",
@@ -6252,7 +6252,7 @@ dependencies = [
  "rustls",
  "rustls-pki-types",
  "slab",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "tinyvec",
  "tracing",
  "web-time",
@@ -6442,7 +6442,7 @@ dependencies = [
  "palette",
  "serde",
  "strum 0.28.0",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "unicode-segmentation",
  "unicode-truncate",
  "unicode-width 0.2.0",
@@ -6578,7 +6578,7 @@ checksum = "a4e608c6638b9c18977b00b475ac1f28d14e84b27d8d42f70e0bf1e3dec127ac"
 dependencies = [
  "getrandom 0.2.17",
  "libredox",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
 ]
 
 [[package]]
@@ -7379,7 +7379,7 @@ dependencies = [
  "log",
  "memmap2",
  "rustix 1.1.4",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "wayland-backend",
  "wayland-client",
  "wayland-csd-frame",
@@ -7747,11 +7747,11 @@ dependencies = [
 
 [[package]]
 name = "thiserror"
-version = "2.0.18"
+version = "2.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "4288b5bcbc7920c07a1149a35cf9590a2aa808e0bc1eafaade0b80947865fbc4"
+checksum = "09e52cb86a36cede5cb101bf8908837b3e4c6e5e59fe7fd85c23fb56200d189e"
 dependencies = [
- "thiserror-impl 2.0.18",
+ "thiserror-impl 2.0.21",
 ]
 
 [[package]]
@@ -7767,13 +7767,13 @@ dependencies = [
 
 [[package]]
 name = "thiserror-impl"
-version = "2.0.18"
+version = "2.0.21"
 source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "ebc4ee7f67670e9b64d05fa4253e753e016c6c95ff35b89b7941d6b856dec1d5"
+checksum = "fe5197923287db20a58125f0bc85c062f7f2c892de97b18c356f9efb14b28524"
 dependencies = [
  "proc-macro2",
  "quote",
- "syn 2.0.117",
+ "syn 3.0.4",
 ]
 
 [[package]]
@@ -7853,7 +7853,7 @@ dependencies = [
  "indicatif",
  "serde",
  "tempfile",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "timscentroid",
  "tracing",
  "url",
@@ -7885,7 +7885,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "timsrust",
  "timsrust-calibration",
  "tokio",
@@ -7915,7 +7915,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "tims_stage",
  "timscentroid",
  "timsrust",
@@ -7935,7 +7935,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "timscentroid",
  "timsquery",
  "timsrust",
@@ -7972,7 +7972,7 @@ dependencies = [
  "ron 0.12.1",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "timscentroid",
  "timsquery",
  "timsrust",
@@ -7988,7 +7988,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "e25d797bec46fdbf542df5042e2d4ce1e1eb474c9729537836350a23b65f84cb"
 dependencies = [
  "rayon",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "timsrust-centroid",
  "timsrust-core",
  "timsrust-minitdf",
@@ -8003,7 +8003,7 @@ version = "0.2.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d86095fb940367806cd4cb7bfb4aa1e47580d15d65a5736fd4304a71cd64c40f"
 dependencies = [
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "timsrust-core",
  "turso",
 ]
@@ -8016,7 +8016,7 @@ checksum = "02ec5f949ef0457ac08d587b1b1ec5f604a04dcda3434bff212977b62846db50"
 dependencies = [
  "rayon",
  "rustc-hash 2.1.2",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "timsrust-core",
 ]
 
@@ -8039,7 +8039,7 @@ checksum = "4cbfc13c9ca83b45161f5720bfc0f3d64f65783d658432b59e2cffab0241d3cf"
 dependencies = [
  "bytemuck",
  "serde",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "timsrust-core",
  "zstd",
 ]
@@ -8063,7 +8063,7 @@ dependencies = [
  "lzf",
  "rayon",
  "serde",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "timsrust-core",
  "zstd",
 ]
@@ -8075,7 +8075,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "a4545a5792396df8c838a4de7fbe00309a28736b3c613630948f78bfaecefda1"
 dependencies = [
  "serde",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "timsrust-core",
  "zstd",
 ]
@@ -8402,7 +8402,7 @@ checksum = "050686193eb999b4bb3bc2acfa891a13da00f79734704c4b8b4ef1a10b368a3c"
 dependencies = [
  "crossbeam-channel",
  "symlink",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "time",
  "tracing-subscriber",
 ]
@@ -8447,7 +8447,7 @@ dependencies = [
  "cfg-if",
  "linear-map",
  "nix",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "tracing",
  "tracing-subscriber",
 ]
@@ -8501,7 +8501,7 @@ version = "0.6.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "832bb70436d4b4d3ed45285c5c6abd62328d5e2486297b32cf2b0812abeba6d4"
 dependencies = [
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "tracing",
  "tracing-subscriber",
  "turso_core",
@@ -8562,7 +8562,7 @@ dependencies = [
  "strum 0.26.3",
  "strum_macros 0.26.4",
  "tempfile",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "tracing",
  "tracing-subscriber",
  "turso_ext",
@@ -8607,7 +8607,7 @@ dependencies = [
  "miette",
  "strum 0.26.3",
  "strum_macros 0.26.4",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "turso_macros",
 ]
 
@@ -8653,7 +8653,7 @@ dependencies = [
  "roaring",
  "serde",
  "serde_json",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "tracing",
  "turso_core",
  "turso_parser",
@@ -9355,7 +9355,7 @@ dependencies = [
  "raw-window-handle",
  "rustc-hash 1.1.0",
  "smallvec",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "wgpu-core-deps-apple",
  "wgpu-core-deps-emscripten",
  "wgpu-core-deps-windows-linux-android",
@@ -9431,7 +9431,7 @@ dependencies = [
  "raw-window-handle",
  "renderdoc-sys",
  "smallvec",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "wasm-bindgen",
  "web-sys",
  "wgpu-types",
@@ -9449,7 +9449,7 @@ dependencies = [
  "bytemuck",
  "js-sys",
  "log",
- "thiserror 2.0.18",
+ "thiserror 2.0.21",
  "web-sys",
 ]
 
