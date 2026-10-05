@@ -69,6 +69,19 @@ cargo run --release --bin timsseek -- build-library \
     --max-fragments 10 \
     -o $SPECLIB_NAME
 
+# Or predict exact modified peptides and charge states from a TSV.
+# protein_ids separates multiple IDs with semicolons.
+cat > peptides.tsv <<'EOF'
+proforma	protein_ids	decoy	decoy_group
+PEC[UNIMOD:4]TIDEK/2	P1	false	cam
+PECTIDEK/3	P1	false	plain
+PEK[UNIMOD:259]TIDEK/2	PRTC	false	heavy
+PECTDIEK/3	P1	true	plain
+EOF
+timsseek build-library --peptides peptides.tsv \
+    --decoy-method shuffle --decoy-seed 42 \
+    -o peptides.mzspeclib.txt.gz
+
 # Run timsseek. Config is optional; defaults work for most runs.
 # To tweak tolerances: `timsseek --write-default-config config.toml`, edit, pass with `-c`.
 # TOML and JSON both accepted (sniffed by extension).
@@ -138,11 +151,10 @@ A proteome build takes minutes and reports as it goes: a progress bar per phase 
 
 Not supported by `build-library` right now, having been dropped along with the separate `speclib_build_cli`:
 
-- **Remote paths.** `--fasta` and `--out` are filesystem paths; a remote URI is rejected by name rather than staged. Build locally and copy.
+- **Remote paths.** `--fasta`, `--peptides` and `--out` are filesystem paths; a remote URI is rejected by name rather than staged. Build locally and copy.
 - **Acquisition and chromatography context.** A build uses the model artifact's own defaults; picking a different one is a decision about the model.
-- **A peptide list instead of a FASTA.** Digestion is the only input path.
 - **Fragment and precursor filters** beyond `--min-intensity` and `--max-fragments`: no minimum transition count, and no precursor or fragment *m/z* bounds.
-- **A choice of decoy method.** Decoys are pseudo-reversed; the old `reverse` / `edge_mutate` selection is gone. They are predicted by default, because a search derives ±CH2 mass-shift decoys for a library that ships none and a mass shift is a far weaker null than a reversed sequence through the same model. `--no-decoys` opts out.
+- **A choice of decoy method for FASTA.** FASTA decoys are pseudo-reversed. Peptide TSV builds support `--decoy-method pseudo-reverse|shuffle` and `--decoy-seed`. Generated decoys are predicted by default; `--no-decoys` disables generation but retains supplied decoys. Supplied target and decoy rows must share a `decoy_group` and charge; each group has one target and at most one supplied decoy. Peptide TSV builds require an mzSpecLib output suffix so the groups survive serialization.
 
 Auth via AWS default chain. MinIO/R2: set `AWS_ENDPOINT_URL`. See `docs/development.md` for `[staging]` config + env var list.
 
@@ -181,4 +193,3 @@ Some of the forms of contributing to the current state of the project could be:
 - Code
     - We welcome pull requests! We would really appreciate if an issue is open
       to discuss potential changes before they are merged.
-

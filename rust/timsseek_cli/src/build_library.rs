@@ -15,23 +15,29 @@ use std::path::{
 
 use msspeculator_inference::{
     BuiltinModel,
+    DecoyMethod,
     Difference,
     LibraryCheck,
     LibraryOptions,
     LibraryProvenance,
     ModelSource,
+    PeptideLibraryOptions,
     ProgressFn,
     StreamOptions,
     check_against,
     check_library,
     stream_library,
     write_library,
+    write_peptide_library,
 };
 use timsseek::DecoyPolicy;
 use tracing::info;
 
 use crate::build_progress::BuildProgress;
-use crate::cli::BuildLibraryArgs;
+use crate::cli::{
+    BuildLibraryArgs,
+    CliDecoyMethod,
+};
 use crate::config::{
     BuildConfig,
     LibraryConfig,
@@ -116,6 +122,9 @@ impl ResolvedPrediction {
 #[derive(Debug, Clone, PartialEq)]
 pub struct ResolvedBuild {
     pub prediction: ResolvedPrediction,
+    pub peptides: Option<PathBuf>,
+    pub decoy_method: DecoyMethod,
+    pub decoy_seed: u64,
     pub out: PathBuf,
     pub config_out: Option<PathBuf>,
     pub overwrite: bool,
@@ -124,8 +133,19 @@ pub struct ResolvedBuild {
 /// Fold the command line over the configuration file's `[library]` section.
 pub fn resolve_build(args: &BuildLibraryArgs, config: &BuildConfig) -> ResolvedBuild {
     let library = library_overrides(args, config.library.clone().unwrap_or_default());
+    let input = args
+        .fasta
+        .clone()
+        .or_else(|| args.peptides.clone())
+        .expect("clap requires FASTA or peptide TSV");
     ResolvedBuild {
-        prediction: resolve_prediction(args.fasta.clone(), &library),
+        prediction: resolve_prediction(input, &library),
+        peptides: args.peptides.clone(),
+        decoy_method: match args.decoy_method.unwrap_or(CliDecoyMethod::PseudoReverse) {
+            CliDecoyMethod::PseudoReverse => DecoyMethod::PseudoReverse,
+            CliDecoyMethod::Shuffle => DecoyMethod::Shuffle,
+        },
+        decoy_seed: args.decoy_seed.unwrap_or(0),
         out: args.out.clone(),
         config_out: sidecar_path(args),
         // No configuration counterpart: replacing a file is a decision about
@@ -219,6 +239,9 @@ pub(crate) fn resolve_search_build(
 ) -> ResolvedBuild {
     ResolvedBuild {
         prediction: resolve_search_prediction(fasta, library),
+        peptides: None,
+        decoy_method: DecoyMethod::PseudoReverse,
+        decoy_seed: 0,
         config_out: Some(default_sidecar(&out)),
         out,
         overwrite,
@@ -234,7 +257,17 @@ pub(crate) fn resolve_search_build(
 /// limitation is stated instead of discovered.
 fn reject_remote_paths(resolved: &ResolvedBuild) -> Result<(), CliError> {
     for (flag, path) in [
-        ("--fasta", &resolved.prediction.fasta),
+        (
+            if resolved.peptides.is_some() {
+                "--peptides"
+            } else {
+                "--fasta"
+            },
+            resolved
+                .peptides
+                .as_ref()
+                .unwrap_or(&resolved.prediction.fasta),
+        ),
         ("--out", &resolved.out),
     ] {
         let uri = path.to_string_lossy();
@@ -439,9 +472,13 @@ pub fn run(resolved: &ResolvedBuild) -> Result<(), CliError> {
     reject_existing_output(resolved)?;
     let model = parse_model_source(&resolved.prediction.model)?;
 
+    let input = resolved
+        .peptides
+        .as_ref()
+        .unwrap_or(&resolved.prediction.fasta);
     info!(
         "Predicting a library from {} with {}",
-        resolved.prediction.fasta.display(),
+        input.display(),
         resolved.prediction.model
     );
     // Held in a binding: the callback borrows it, so a temporary would be
@@ -465,12 +502,28 @@ pub fn run(resolved: &ResolvedBuild) -> Result<(), CliError> {
             report_rebuild_check(&resolved.out, resolved.config_out.as_deref(), provenance);
         }
     };
-    let stats = write_library(&LibraryOptions {
-        out: &pending_out,
-        config_out: pending_config.as_deref(),
-        stream: stream_options(&resolved.prediction, model, &report),
-        before_writing: Some(&report_rebuild),
-    })
+    let stats = if let Some(peptides) = resolved.peptides.as_deref() {
+        write_peptide_library(&PeptideLibraryOptions {
+            model,
+            peptides,
+            out: &pending_out,
+            config_out: pending_config.as_deref(),
+            min_intensity: resolved.prediction.min_intensity,
+            max_fragments: resolved.prediction.max_fragments,
+            generate_decoys: resolved.prediction.decoys,
+            decoy_method: resolved.decoy_method,
+            decoy_seed: resolved.decoy_seed,
+            progress: Some(&report),
+            before_writing: Some(&report_rebuild),
+        })
+    } else {
+        write_library(&LibraryOptions {
+            out: &pending_out,
+            config_out: pending_config.as_deref(),
+            stream: stream_options(&resolved.prediction, model, &report),
+            before_writing: Some(&report_rebuild),
+        })
+    }
     .map_err(|e| CliError::LibraryBuild {
         source: format!("{}: {e:#}", resolved.out.display()),
     })?;

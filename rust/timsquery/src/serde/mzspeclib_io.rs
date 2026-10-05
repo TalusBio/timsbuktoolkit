@@ -129,6 +129,7 @@ const ION_MOBILITY_DRIFT_TIME: u32 = 1_002_476;
 /// msspeculator's decoy-to-target link, carried as a project-defined name/value
 /// pair because no PSI-MS term identifies the target a decoy was derived from.
 const MSSPECULATOR_PAIR_ID: &str = "msspeculator:decoy_pair_id";
+const MSSPECULATOR_DECOY_GROUP: &str = "msspeculator:decoy_group";
 
 /// Whether `accession` names a decoy spectrum.
 ///
@@ -905,7 +906,7 @@ fn declared_group(spectrum: &Spectrum) -> Option<String> {
         .description
         .params
         .iter()
-        .find(|p| p.name == MSSPECULATOR_PAIR_ID)
+        .find(|p| p.name == MSSPECULATOR_PAIR_ID || p.name == MSSPECULATOR_DECOY_GROUP)
     {
         return Some(param.value.to_string());
     }

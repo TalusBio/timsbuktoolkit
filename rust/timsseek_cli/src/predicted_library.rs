@@ -491,6 +491,7 @@ mod tests {
                 proforma: &self.proforma,
                 decoy,
                 decoy_pair_id: pair,
+                decoy_group: None,
                 charge,
                 precursor_mz: 500.25 + charge as f64,
                 neutral_mass: 998.5,
