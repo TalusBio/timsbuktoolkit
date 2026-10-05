@@ -28,8 +28,8 @@ jobs:
           cache: true
           # Per leg: the two resolve different features and would thrash one entry.
           cache-key: ${{ matrix.features }}
-          # This action defaults to `-D warnings`; `task clippy` owns that.
-          rustflags: ''
+          # Keeps the action's `-D warnings` default so PRs fail on what
+          # release.yml fails on.
       - name: Build
         run: cargo build --verbose -p timsseek ${{ matrix.features }}
       - name: Run tests
@@ -55,8 +55,6 @@ jobs:
           # Bump when the `-p` list changes: the key ignores it, so a widened
           # build hits the old key and rust-cache saves nothing.
           cache-key: pkgs-cli-sim-viewer
-          # This action defaults to `-D warnings`; `task clippy` owns that.
-          rustflags: ''
       - name: Build
         run: cargo build --verbose -p timsseek_cli -p apex_sim -p timsseek_macros -p rescore_dash -p timsquery_viewer
       - name: Run tests

@@ -37,7 +37,7 @@ default-members = [
 ]
 
 [workspace.package]
-version = "0.34.0"
+version = "0.34.1"
 edition = "2024"
 authors = ["Sebastian Paez"]
 license = "Apache-2.0"
@@ -53,7 +53,7 @@ tracing-subscriber = { version = "0.3.18", features = [
   "json",
 ] }
 timsrust = { version = "0.6.5", default-features = false }
-timsrust-calibration = "0.2.0"
+timsrust-calibration = "0.2.1"
 rusqlite = "0.35.0"
 rayon = "1.5"
 memmap2 = "0.9"
