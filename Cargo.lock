@@ -204,7 +204,7 @@ dependencies = [
 
 [[package]]
 name = "alloc_track"
-version = "0.35.0"
+version = "0.35.1"
 
 [[package]]
 name = "allocator-api2"
@@ -320,7 +320,7 @@ checksum = "330a5ed07fa54e4702c9d6c4174f74427fc0ef6e214bbd677ae50a5099946470"
 
 [[package]]
 name = "apex_sim"
-version = "0.35.0"
+version = "0.35.1"
 dependencies = [
  "eframe",
  "egui",
@@ -371,7 +371,7 @@ dependencies = [
 
 [[package]]
 name = "array2d"
-version = "0.35.0"
+version = "0.35.1"
 dependencies = [
  "serde",
 ]
@@ -1746,7 +1746,7 @@ dependencies = [
 
 [[package]]
 name = "calib_dash"
-version = "0.35.0"
+version = "0.35.1"
 dependencies = [
  "calibrt",
  "insta",
@@ -1758,7 +1758,7 @@ dependencies = [
 
 [[package]]
 name = "calibrt"
-version = "0.35.0"
+version = "0.35.1"
 dependencies = [
  "array2d",
  "rand 0.9.3",
@@ -4693,7 +4693,7 @@ dependencies = [
 
 [[package]]
 name = "micromzpaf"
-version = "0.35.0"
+version = "0.35.1"
 dependencies = [
  "serde",
  "serde_json",
@@ -4791,7 +4791,7 @@ dependencies = [
 [[package]]
 name = "msspeculator-core"
 version = "0.1.0"
-source = "git+https://github.com/TalusBio/msspeculator?rev=3fb9dddbd848f4e7ccf3ccfc049690d2f10431a9#3fb9dddbd848f4e7ccf3ccfc049690d2f10431a9"
+source = "git+https://github.com/TalusBio/msspeculator?rev=1a708fa7a543cd9fcee0f667164ad3a596dc236f#1a708fa7a543cd9fcee0f667164ad3a596dc236f"
 dependencies = [
  "anyhow",
  "blake2",
@@ -4807,7 +4807,7 @@ dependencies = [
 [[package]]
 name = "msspeculator-inference"
 version = "0.1.0"
-source = "git+https://github.com/TalusBio/msspeculator?rev=3fb9dddbd848f4e7ccf3ccfc049690d2f10431a9#3fb9dddbd848f4e7ccf3ccfc049690d2f10431a9"
+source = "git+https://github.com/TalusBio/msspeculator?rev=1a708fa7a543cd9fcee0f667164ad3a596dc236f#1a708fa7a543cd9fcee0f667164ad3a596dc236f"
 dependencies = [
  "anyhow",
  "blake2",
@@ -6666,7 +6666,7 @@ dependencies = [
 
 [[package]]
 name = "rescore_dash"
-version = "0.35.0"
+version = "0.35.1"
 dependencies = [
  "ratatui",
  "rayon",
@@ -7845,7 +7845,7 @@ dependencies = [
 
 [[package]]
 name = "tims_stage"
-version = "0.35.0"
+version = "0.35.1"
 dependencies = [
  "bytes",
  "filetime",
@@ -7861,7 +7861,7 @@ dependencies = [
 
 [[package]]
 name = "timscentroid"
-version = "0.35.0"
+version = "0.35.1"
 dependencies = [
  "arrow 59.2.0",
  "async-trait",
@@ -7896,7 +7896,7 @@ dependencies = [
 
 [[package]]
 name = "timsquery"
-version = "0.35.0"
+version = "0.35.1"
 dependencies = [
  "array2d",
  "arrow 59.2.0",
@@ -7925,7 +7925,7 @@ dependencies = [
 
 [[package]]
 name = "timsquery_cli"
-version = "0.35.0"
+version = "0.35.1"
 dependencies = [
  "base64 0.22.1",
  "clap",
@@ -7945,7 +7945,7 @@ dependencies = [
 
 [[package]]
 name = "timsquery_pyo3"
-version = "0.35.0"
+version = "0.35.1"
 dependencies = [
  "numpy",
  "pyo3",
@@ -7956,7 +7956,7 @@ dependencies = [
 
 [[package]]
 name = "timsquery_viewer"
-version = "0.35.0"
+version = "0.35.1"
 dependencies = [
  "calibrt",
  "clap",
@@ -8091,7 +8091,7 @@ dependencies = [
 
 [[package]]
 name = "timsseek"
-version = "0.35.0"
+version = "0.35.1"
 dependencies = [
  "array2d",
  "arrow 59.2.0",
@@ -8119,7 +8119,7 @@ dependencies = [
 
 [[package]]
 name = "timsseek_cli"
-version = "0.35.0"
+version = "0.35.1"
 dependencies = [
  "alloc_track",
  "anyhow",
@@ -8149,7 +8149,7 @@ dependencies = [
 
 [[package]]
 name = "timsseek_macros"
-version = "0.35.0"
+version = "0.35.1"
 dependencies = [
  "proc-macro2",
  "quote",
