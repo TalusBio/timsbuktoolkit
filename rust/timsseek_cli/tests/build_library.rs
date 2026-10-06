@@ -179,7 +179,7 @@ fn peptide_tsv_generates_seeded_decoys_and_assigns_groups() {
 }
 
 #[test]
-fn peptide_tsv_keeps_targets_when_generated_decoys_collide_at_another_charge() {
+fn peptide_tsv_retries_pseudo_reverse_after_a_target_collision() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("peptides.tsv");
     std::fs::write(
@@ -205,7 +205,7 @@ fn peptide_tsv_keeps_targets_when_generated_decoys_collide_at_another_charge() {
         "{}",
         String::from_utf8_lossy(&result.stderr)
     );
-    assert!(String::from_utf8_lossy(&result.stderr).contains("skipped 2 generated decoys"));
+    assert!(!String::from_utf8_lossy(&result.stderr).contains("skipped"));
     let table = timsquery::serde::read_targets_with(
         &out,
         timsquery::models::capabilities::LoadPolicy::default(),
@@ -214,6 +214,47 @@ fn peptide_tsv_keeps_targets_when_generated_decoys_collide_at_another_charge() {
     let timsquery::serde::TargetTable::Mzpaf { geom, .. } = table else {
         panic!("predicted fragments should have mzPAF annotations");
     };
-    assert_eq!(geom.n_rows(), 2);
+    assert_eq!(geom.n_rows(), 4);
+    assert_eq!(geom.rows().filter(|r| geom.is_decoy(*r)).count(), 2);
+    assert!(
+        std::fs::read_to_string(&out)
+            .unwrap()
+            .contains("PEPITDEK/2")
+    );
+}
+
+#[test]
+fn peptide_tsv_keeps_unpaired_targets_when_every_reversal_collides() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("peptides.tsv");
+    std::fs::write(&input, "proforma\tprotein_ids\nPEEEEEEK/2\tP1\n").unwrap();
+    let out = dir.path().join("peptides.mzspeclib.txt");
+    let result = Command::new(env!("CARGO_BIN_EXE_timsseek"))
+        .args([
+            "build-library",
+            "--peptides",
+            input.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+            "--decoy-method",
+            "pseudo-reverse",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    assert!(String::from_utf8_lossy(&result.stderr).contains("skipped 1 generated decoys"));
+    let table = timsquery::serde::read_targets_with(
+        &out,
+        timsquery::models::capabilities::LoadPolicy::default(),
+    )
+    .unwrap();
+    let timsquery::serde::TargetTable::Mzpaf { geom, .. } = table else {
+        panic!("predicted fragments should have mzPAF annotations");
+    };
+    assert_eq!(geom.n_rows(), 1);
     assert_eq!(geom.rows().filter(|r| geom.is_decoy(*r)).count(), 0);
 }
