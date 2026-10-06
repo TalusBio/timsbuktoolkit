@@ -132,6 +132,38 @@ fn peptide_tsv_preserves_modified_charges_and_supplied_decoy_groups() {
 }
 
 #[test]
+fn peptide_tsv_accepts_mixed_lengths_at_one_charge() {
+    let dir = tempfile::tempdir().unwrap();
+    let input = dir.path().join("peptides.tsv");
+    std::fs::write(
+        &input,
+        "proforma\tprotein_ids\nPEPTIDK/2\tP1\nPEPTIDEK/2\tP2\n",
+    )
+    .unwrap();
+    let out = dir.path().join("peptides.mzspeclib.txt");
+    let result = Command::new(env!("CARGO_BIN_EXE_timsseek"))
+        .args([
+            "build-library",
+            "--peptides",
+            input.to_str().unwrap(),
+            "--out",
+            out.to_str().unwrap(),
+            "--no-decoys",
+        ])
+        .output()
+        .unwrap();
+    assert!(
+        result.status.success(),
+        "{}",
+        String::from_utf8_lossy(&result.stderr)
+    );
+    let text = std::fs::read_to_string(&out).unwrap();
+    for peptide in ["PEPTIDK/2", "PEPTIDEK/2"] {
+        assert!(text.contains(peptide), "missing {peptide}");
+    }
+}
+
+#[test]
 fn peptide_tsv_generates_seeded_decoys_and_assigns_groups() {
     let dir = tempfile::tempdir().unwrap();
     let input = dir.path().join("peptides.tsv");
