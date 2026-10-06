@@ -87,6 +87,7 @@ use crate::models::capabilities::{
     UnannotatedPeaks,
 };
 use crate::models::{
+    OwnedSourceId,
     Row,
     TargetCapabilities,
     TargetColumnsBuilder,
@@ -126,9 +127,8 @@ const SPECTRUM_AGGREGATION_TYPE: u32 = 1_003_065;
 const INVERSE_REDUCED_MOBILITY: u32 = 1_002_815;
 /// `MS:1002476|ion mobility drift time`, the drift-tube spelling.
 const ION_MOBILITY_DRIFT_TIME: u32 = 1_002_476;
-/// msspeculator's decoy-to-target link, carried as a project-defined name/value
-/// pair because no PSI-MS term identifies the target a decoy was derived from.
-const MSSPECULATOR_PAIR_ID: &str = "msspeculator:decoy_pair_id";
+/// msspeculator's numeric competition group, carried as a project-defined
+/// name/value pair because no PSI-MS term identifies it.
 const MSSPECULATOR_DECOY_GROUP: &str = "msspeculator:decoy_group";
 
 /// Whether `accession` names a decoy spectrum.
@@ -286,8 +286,7 @@ fn read_counting_degradation(
         // column rather than storing a group per row.
         let group = row
             .declared_group
-            .unwrap_or_else(|| row.key.to_string())
-            .into();
+            .unwrap_or_else(|| OwnedSourceId::Text(row.key.to_string()));
 
         frag_intens.extend_from_slice(&row.intensities);
         geom.push_row(Row {
@@ -435,7 +434,7 @@ struct SpectrumRow {
     charge: u8,
     mobility: f32,
     is_decoy: bool,
-    declared_group: Option<String>,
+    declared_group: Option<OwnedSourceId>,
     analyte: crate::chemistry::analyte::Analyte,
     /// Parallel to `intensities`, and pushed straight into the arena.
     frags: Vec<(IonAnnot, f64)>,
@@ -563,7 +562,7 @@ impl SpectrumRow {
             charge: charge(spectrum, peptidoform),
             mobility: mobility(spectrum),
             is_decoy: is_decoy(spectrum)?,
-            declared_group: declared_group(spectrum),
+            declared_group: declared_group(spectrum)?,
             analyte,
             frags,
             intensities,
@@ -896,29 +895,35 @@ fn is_ms_attribute(attribute: &Attribute, accession: u32) -> bool {
         }
 }
 
-/// Which entries compete. msspeculator's project-defined pair id first, then
-/// SpectraST's `related spectrum keys`.
+/// Which entries compete. msspeculator's numeric group first, then SpectraST's
+/// `related spectrum keys`.
 ///
 /// Both name the target a decoy was derived from, so the target and its decoy
 /// land in one group. `None` leaves the row as its own group.
-fn declared_group(spectrum: &Spectrum) -> Option<String> {
+fn declared_group(spectrum: &Spectrum) -> Result<Option<OwnedSourceId>, TargetReadingError> {
     if let Some(param) = spectrum
         .description
         .params
         .iter()
-        .find(|p| p.name == MSSPECULATOR_PAIR_ID || p.name == MSSPECULATOR_DECOY_GROUP)
+        .find(|p| p.name == MSSPECULATOR_DECOY_GROUP)
     {
-        return Some(param.value.to_string());
+        let group = param.value.to_string().parse::<u64>().map_err(|_| {
+            TargetReadingError::SpeclibParse(format!(
+                "msspeculator:decoy_group must be an integer, got {}",
+                param.value
+            ))
+        })?;
+        return Ok(Some(OwnedSourceId::Numeric(group)));
     }
-    spectrum
+    Ok(spectrum
         .attributes
         .iter()
         .flatten()
         .find(|a| a.name.accession == mzcv::curie!(MS:1003259))
         .map(|a| match &a.value {
-            AttributeValue::Scalar(v) => v.to_string(),
-            other => other.to_string(),
-        })
+            AttributeValue::Scalar(v) => OwnedSourceId::Text(v.to_string()),
+            other => OwnedSourceId::Text(other.to_string()),
+        }))
 }
 
 /// The theoretical m/z for an annotated peak.
@@ -1797,7 +1802,7 @@ mod tests {
     /// it. It exercises every term msspeculator actually emits rather than the
     /// terms a vendor happens to use: `MS:1002815|inverse reduced ion mobility`
     /// for the timsTOF axis, `MS:1000896` for retention, and the
-    /// project-defined `msspeculator:decoy_pair_id` for the target/decoy
+    /// project-defined `msspeculator:decoy_group` for the target/decoy
     /// pairing.
     ///
     /// Stored as plain text, not gzipped, so it can be read in a review; the
@@ -1812,13 +1817,17 @@ mod tests {
         let geom = arena("msspeculator_built.mzspeclib.txt");
         assert_eq!(geom.n_rows(), 4, "two targets and their two decoys");
         assert_eq!(geom.rows().filter(|r| geom.is_decoy(*r)).count(), 2);
+        assert!(
+            geom.rows()
+                .all(|r| matches!(geom.decoy_group(r), crate::models::SourceId::Numeric(_)))
+        );
 
         let groups: std::collections::HashSet<_> =
             geom.rows().map(|r| geom.decoy_group_code(r)).collect();
         assert_eq!(
             groups.len(),
             2,
-            "`decoy_pair_id` puts each decoy in its target's group"
+            "`decoy_group` puts each decoy in its target's group"
         );
 
         // Four peaks per entry, decoys included: the writer's `Decoy` set

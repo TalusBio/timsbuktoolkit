@@ -70,13 +70,13 @@ cargo run --release --bin timsseek -- build-library \
     -o $SPECLIB_NAME
 
 # Or predict exact modified peptides and charge states from a TSV.
-# protein_ids separates multiple IDs with semicolons.
+# protein_ids separates multiple IDs with semicolons; decoy_group is an integer.
 cat > peptides.tsv <<'EOF'
 proforma	protein_ids	decoy	decoy_group
-PEC[UNIMOD:4]TIDEK/2	P1	false	cam
-PECTIDEK/3	P1	false	plain
-PEK[UNIMOD:259]TIDEK/2	PRTC	false	heavy
-PECTDIEK/3	P1	true	plain
+PEC[UNIMOD:4]TIDEK/2	P1	false	1
+PECTIDEK/3	P1	false	2
+PEK[UNIMOD:259]TIDEK/2	PRTC	false	3
+PECTDIEK/3	P1	true	2
 EOF
 timsseek build-library --peptides peptides.tsv \
     --decoy-method shuffle --decoy-seed 42 \
@@ -154,7 +154,7 @@ Not supported by `build-library` right now, having been dropped along with the s
 - **Remote paths.** `--fasta`, `--peptides` and `--out` are filesystem paths; a remote URI is rejected by name rather than staged. Build locally and copy.
 - **Acquisition and chromatography context.** A build uses the model artifact's own defaults; picking a different one is a decision about the model.
 - **Fragment and precursor filters** beyond `--min-intensity` and `--max-fragments`: no minimum transition count, and no precursor or fragment *m/z* bounds.
-- **Decoy generation.** FASTA decoys are pseudo-reversed. Peptide TSV builds support `--decoy-method pseudo-reverse|shuffle` and `--decoy-seed`. Generated decoys are predicted by default; `--no-decoys` disables generation but retains supplied decoys. Pseudo-reverse retries with successively shorter interior spans; shuffle retries with its seed. When no collision-free decoy exists, the builder warns and keeps the target unpaired. Supplied target and decoy rows must share a `decoy_group` and charge; each group has one target and at most one supplied decoy. Peptide TSV builds require an mzSpecLib output suffix so the groups survive serialization.
+- **Decoy generation.** FASTA decoys are pseudo-reversed. Peptide TSV builds support `--decoy-method pseudo-reverse|shuffle` and `--decoy-seed`. Generated decoys are predicted by default; `--no-decoys` disables generation but retains supplied decoys. Pseudo-reverse retries with successively shorter interior spans; shuffle retries with its seed. When no collision-free decoy exists, the builder warns and keeps the target unpaired. Supplied target and decoy rows must share an integer `decoy_group` and charge; each group has one target and at most one supplied decoy. Targets without a group get unique numeric IDs. Peptide TSV builds require an mzSpecLib output suffix so the groups survive serialization.
 
 Auth via AWS default chain. MinIO/R2: set `AWS_ENDPOINT_URL`. See `docs/development.md` for `[staging]` config + env var list.
 

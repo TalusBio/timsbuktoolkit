@@ -68,10 +68,10 @@ fn peptide_tsv_preserves_modified_charges_and_supplied_decoy_groups() {
         &input,
         concat!(
             "proforma\tprotein_ids\tdecoy\tdecoy_group\n",
-            "PEC[UNIMOD:4]TIDEK/2\tP1;P2\tfalse\tcam\n",
-            "PECTIDEK/3\tP1\tfalse\tplain\n",
-            "PEK[UNIMOD:259]TIDEK/2\tPRTC\tfalse\theavy\n",
-            "PECTDIEK/3\tP1\ttrue\tplain\n",
+            "PEC[UNIMOD:4]TIDEK/2\tP1;P2\tfalse\t1\n",
+            "PECTIDEK/3\tP1\tfalse\t2\n",
+            "PEK[UNIMOD:259]TIDEK/2\tPRTC\tfalse\t3\n",
+            "PECTDIEK/3\tP1\ttrue\t2\n",
         ),
     )
     .unwrap();
@@ -102,7 +102,11 @@ fn peptide_tsv_preserves_modified_charges_and_supplied_decoy_groups() {
     ] {
         assert!(text.contains(peptide), "missing {peptide}");
     }
-    assert_eq!(text.matches("other attribute value=plain").count(), 2);
+    assert_eq!(
+        text.matches("[3]MS:1003276|other attribute value=2\n")
+            .count(),
+        2
+    );
     let table = timsquery::serde::read_targets_with(
         &out,
         timsquery::models::capabilities::LoadPolicy::default(),
@@ -113,6 +117,10 @@ fn peptide_tsv_preserves_modified_charges_and_supplied_decoy_groups() {
     };
     assert_eq!(geom.n_rows(), 4);
     assert_eq!(geom.rows().filter(|r| geom.is_decoy(*r)).count(), 1);
+    assert!(
+        geom.rows()
+            .all(|r| matches!(geom.decoy_group(r), timsquery::models::SourceId::Numeric(_)))
+    );
     assert_eq!(
         geom.rows()
             .map(|r| geom.decoy_group_code(r))
@@ -164,6 +172,10 @@ fn peptide_tsv_generates_seeded_decoys_and_assigns_groups() {
     };
     assert_eq!(geom.n_rows(), 4);
     assert_eq!(geom.rows().filter(|r| geom.is_decoy(*r)).count(), 2);
+    assert!(
+        geom.rows()
+            .all(|r| matches!(geom.decoy_group(r), timsquery::models::SourceId::Numeric(_)))
+    );
     assert_eq!(
         geom.rows()
             .map(|r| geom.decoy_group_code(r))
