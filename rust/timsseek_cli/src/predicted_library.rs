@@ -35,6 +35,7 @@ use timsquery::ion::{
     NeutralLoss,
 };
 use timsquery::models::{
+    OwnedSourceId,
     Row,
     TargetCapabilities,
     TargetColumnsBuilder,
@@ -223,10 +224,9 @@ struct PredictedRow {
     /// same precursor under `MS:1003061|library spectrum name`, so a row keeps
     /// one name across both routes. Stored independently of chemistry.
     id: String,
-    /// The source peptide's pair id, `None` when decoys are off. All modified
-    /// forms and all charges of one peptide share it, so a group is a peptide
-    /// rather than a target/decoy couple.
-    group: Option<String>,
+    /// Numeric group ID shared by a target and its decoy. Each modified form
+    /// and charge has its own group; absent when decoys are off.
+    group: Option<OwnedSourceId>,
     analyte: timsquery::chemistry::analyte::Analyte,
     precursor_mz: f64,
     charge: u8,
@@ -262,7 +262,9 @@ impl PredictedRow {
             // this is the decoy's own sequence rather than its target's.
             analyte: timsquery::chemistry::analyte::Analyte::from_sequence(row.proforma),
             id,
-            group: row.decoy_pair_id.map(|pair| pair.to_string()),
+            group: row
+                .decoy_group
+                .map(|group| OwnedSourceId::Numeric(group as u64)),
             precursor_mz: row.precursor_mz,
             charge,
             // `rt` is the quantity the mzSpecLib writer puts under the term the
@@ -337,7 +339,10 @@ impl ArenaRows {
         if !self.decoys.accepts(row.is_decoy) {
             return;
         }
-        let group = row.group.clone().unwrap_or_else(|| row.id.clone());
+        let group = row
+            .group
+            .clone()
+            .unwrap_or_else(|| OwnedSourceId::Text(row.id.clone()));
         self.frag_intens.extend_from_slice(&row.intensities);
         self.geom.push_row(Row {
             precursor_mz: row.precursor_mz,
@@ -356,7 +361,7 @@ impl ArenaRows {
             entry_name: Some(&row.id),
             is_decoy: row.is_decoy,
             id: Some(row.id.clone().into()),
-            decoy_group: Some(group.into()),
+            decoy_group: Some(group),
         });
     }
 
@@ -490,7 +495,7 @@ mod tests {
                 peptide: &self.peptide,
                 proforma: &self.proforma,
                 decoy,
-                decoy_pair_id: pair,
+                decoy_group: pair,
                 charge,
                 precursor_mz: 500.25 + charge as f64,
                 neutral_mass: 998.5,
@@ -618,7 +623,7 @@ mod tests {
     }
 
     #[test]
-    fn a_target_and_its_decoy_that_share_a_pair_id_land_in_one_competition_group() {
+    fn a_target_and_its_decoy_share_one_numeric_competition_group() {
         let target = Fixture::new("PEPTIDEK", "PEPTIDEK");
         let decoy = Fixture::new("PDITPEEK", "PDITPEEK");
         let lib = build(
@@ -1015,7 +1020,7 @@ mod tests {
     ///
     /// Every such quantity rather than a sample of them, because the two routes
     /// spell each one independently and any of them could drift. Two charge
-    /// states of one peptide, which msspeculator gives one `decoy_pair_id`, so
+    /// states of one peptide, which msspeculator gives distinct `decoy_group` IDs, so
     /// the group column is stored rather than derived and the comparison of it
     /// means something.
     ///

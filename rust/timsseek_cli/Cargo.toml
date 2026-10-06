@@ -15,10 +15,10 @@ tempfile = { workspace = true }
 # Library prediction. The digestion, modification and prediction logic lives
 # there; this crate owns only the flag surface. Pinned to a revision rather than
 # a branch, and unpublished, so it is a git reference until it reaches crates.io.
-msspeculator-inference = { git = "https://github.com/TalusBio/msspeculator", rev = "14634ad065ddcb9750d3c1bb0c817a2c3e332e07" }
+msspeculator-inference = { git = "https://github.com/TalusBio/msspeculator", rev = "3fb9dddbd848f4e7ccf3ccfc049690d2f10431a9" }
 # For `builtin::BUILTIN_PREFIX` and `builtin::names()`, which the inference
 # crate does not re-export. Same revision, already in the graph.
-msspeculator-core = { git = "https://github.com/TalusBio/msspeculator", rev = "14634ad065ddcb9750d3c1bb0c817a2c3e332e07" }
+msspeculator-core = { git = "https://github.com/TalusBio/msspeculator", rev = "3fb9dddbd848f4e7ccf3ccfc049690d2f10431a9" }
 calib_dash = { path = "../calib_dash", optional = true }
 
 # The error type of msspeculator's `LibrarySink`, which this crate implements.

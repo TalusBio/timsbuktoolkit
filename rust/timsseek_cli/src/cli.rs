@@ -70,7 +70,7 @@ pub enum Command {
     /// Deprecated spelling of a bare invocation; use `timsseek <SEARCH ARGS>`.
     /// Removed after 2026-12-31.
     Search(Box<SearchArgs>),
-    /// Predict a spectral library from a FASTA and write it.
+    /// Predict a spectral library from a FASTA or peptide TSV and write it.
     BuildLibrary(Box<BuildLibraryArgs>),
 }
 
@@ -294,13 +294,28 @@ pub struct SearchArgs {
 #[derive(clap::Args, Debug)]
 pub struct BuildLibraryArgs {
     /// Sequence database to digest.
-    #[arg(long, value_name = "PATH")]
-    pub fasta: PathBuf,
+    #[arg(
+        long,
+        value_name = "PATH",
+        required_unless_present = "peptides",
+        conflicts_with = "peptides"
+    )]
+    pub fasta: Option<PathBuf>,
+
+    /// TSV with proforma and protein_ids columns; optional decoy and decoy_group.
+    /// ProForma must include charge, e.g. PEPC[UNIMOD:4]IDEK/2.
+    #[arg(
+        long,
+        value_name = "PATH",
+        required_unless_present = "fasta",
+        conflicts_with = "fasta"
+    )]
+    pub peptides: Option<PathBuf>,
 
     /// Where to write the library. The suffix picks the format:
     /// `.mzspeclib.txt` writes mzSpecLib, anything else writes DIA-NN TSV, and
     /// a trailing `.gz` compresses either. `.mzspeclib.txt.gz` is the
-    /// recommended spelling.
+    /// recommended spelling. Peptide TSV input requires mzSpecLib output.
     #[arg(long, short = 'o', value_name = "PATH")]
     pub out: PathBuf,
 
@@ -313,31 +328,39 @@ pub struct BuildLibraryArgs {
     #[arg(long, value_name = "MODEL")]
     pub model: Option<String>,
 
-    #[arg(long, value_name = "N")]
+    #[arg(long, value_name = "N", conflicts_with = "peptides")]
     pub missed_cleavages: Option<usize>,
-    #[arg(long, value_name = "N")]
+    #[arg(long, value_name = "N", conflicts_with = "peptides")]
     pub min_length: Option<usize>,
-    #[arg(long, value_name = "N")]
+    #[arg(long, value_name = "N", conflicts_with = "peptides")]
     pub max_length: Option<usize>,
-    #[arg(long, value_name = "Z")]
+    #[arg(long, value_name = "Z", conflicts_with = "peptides")]
     pub min_charge: Option<i64>,
-    #[arg(long, value_name = "Z")]
+    #[arg(long, value_name = "Z", conflicts_with = "peptides")]
     pub max_charge: Option<i64>,
 
     /// Fixed modification rule, repeatable.
-    #[arg(long = "fixed-mod", value_name = "TARGETS[MOD]")]
+    #[arg(
+        long = "fixed-mod",
+        value_name = "TARGETS[MOD]",
+        conflicts_with = "peptides"
+    )]
     fixed_mods: Option<Vec<String>>,
     /// Predict with no fixed modifications at all.
     ///
     /// Needed because the default is carbamidomethyl and an empty
     /// `--fixed-mod` list cannot be spelled: repeating a flag zero times is
     /// indistinguishable from not passing it.
-    #[arg(long, conflicts_with = "fixed_mods")]
+    #[arg(long, conflicts_with_all = ["fixed_mods", "peptides"])]
     pub no_fixed_mods: bool,
     /// Variable modification rule, repeatable.
-    #[arg(long = "variable-mod", value_name = "TARGETS[MOD]")]
+    #[arg(
+        long = "variable-mod",
+        value_name = "TARGETS[MOD]",
+        conflicts_with = "peptides"
+    )]
     pub variable_mods: Option<Vec<String>>,
-    #[arg(long, value_name = "N")]
+    #[arg(long, value_name = "N", conflicts_with = "peptides")]
     pub max_variable_mods: Option<usize>,
 
     // No acquisition or chromatography context. The model artifact has its own
@@ -363,6 +386,14 @@ pub struct BuildLibraryArgs {
     #[arg(long, overrides_with = "decoys")]
     no_decoys: bool,
 
+    /// Decoy method for peptide TSV input.
+    #[arg(long, value_enum, requires = "peptides")]
+    pub decoy_method: Option<CliDecoyMethod>,
+
+    /// Reproducible seed for peptide TSV decoy generation.
+    #[arg(long, value_name = "N", requires = "peptides")]
+    pub decoy_seed: Option<u64>,
+
     /// Replace the library if it already exists.
     ///
     /// Predicting a proteome takes minutes, so overwriting one by accident is
@@ -378,6 +409,12 @@ pub struct BuildLibraryArgs {
     /// Skip the resolved-configuration sidecar.
     #[arg(long)]
     pub no_config_out: bool,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum CliDecoyMethod {
+    PseudoReverse,
+    Shuffle,
 }
 
 impl BuildLibraryArgs {

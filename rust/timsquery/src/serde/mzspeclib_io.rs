@@ -51,6 +51,7 @@ use mzannotate::fragment::{
 use mzannotate::mzdata::params::{
     ControlledVocabulary,
     ParamValue,
+    Value,
 };
 use mzannotate::mzdata::prelude::PeakCollection;
 use mzannotate::mzspeclib::record::{
@@ -87,6 +88,7 @@ use crate::models::capabilities::{
     UnannotatedPeaks,
 };
 use crate::models::{
+    OwnedSourceId,
     Row,
     TargetCapabilities,
     TargetColumnsBuilder,
@@ -126,9 +128,9 @@ const SPECTRUM_AGGREGATION_TYPE: u32 = 1_003_065;
 const INVERSE_REDUCED_MOBILITY: u32 = 1_002_815;
 /// `MS:1002476|ion mobility drift time`, the drift-tube spelling.
 const ION_MOBILITY_DRIFT_TIME: u32 = 1_002_476;
-/// msspeculator's decoy-to-target link, carried as a project-defined name/value
-/// pair because no PSI-MS term identifies the target a decoy was derived from.
-const MSSPECULATOR_PAIR_ID: &str = "msspeculator:decoy_pair_id";
+/// msspeculator's numeric competition group, carried as a project-defined
+/// name/value pair because no PSI-MS term identifies it.
+const MSSPECULATOR_DECOY_GROUP: &str = "msspeculator:decoy_group";
 
 /// Whether `accession` names a decoy spectrum.
 ///
@@ -233,6 +235,8 @@ fn read_counting_degradation(
 
     let mut geom = TargetColumnsBuilder::with_capabilities(TargetCapabilities::default_diann());
     let mut frag_intens: Vec<f32> = Vec::new();
+    let mut spectrum_keys = Vec::new();
+    let mut related_keys = HashSet::new();
     let mut degradation = Degradation::default();
     // Read off the header before the iterator takes the parser, which is also
     // the only place it can be read: it is what an entry declaring nothing about
@@ -277,16 +281,17 @@ fn read_counting_degradation(
             degradation.rows_without_fragments += 1;
         }
 
-        // Both halves of a pair have to land in one namespace. A decoy names its
-        // target by `<Spectrum=N>` key, so every row names its own key and a
-        // decoy overrides that with its target's -- not its source id, which is
-        // a different string entirely. A library that declares no pair therefore
-        // ends up with one key per row, all singletons, and `seal` drops the
-        // column rather than storing a group per row.
-        let group = row
-            .declared_group
-            .unwrap_or_else(|| row.key.to_string())
-            .into();
+        // SpectraST declares a link only on the decoy. Record the target key
+        // so its row can receive the same group after the full file is read.
+        let group = match row.declared_group {
+            Some(DeclaredGroup::Direct(group)) => Some(OwnedSourceId::Numeric(group)),
+            Some(DeclaredGroup::RelatedSpectrum(key)) => {
+                related_keys.insert(key);
+                Some(OwnedSourceId::Numeric(key as u64))
+            }
+            None => None,
+        };
+        spectrum_keys.push(row.key);
 
         frag_intens.extend_from_slice(&row.intensities);
         geom.push_row(Row {
@@ -299,8 +304,16 @@ fn read_counting_degradation(
             entry_name: row.entry_name.as_deref(),
             is_decoy: row.is_decoy,
             id: Some(row.id.as_str().into()),
-            decoy_group: Some(group),
+            decoy_group: group,
         });
+    }
+
+    if !related_keys.is_empty() {
+        for (row, key) in spectrum_keys.into_iter().enumerate() {
+            if related_keys.contains(&key) && geom.inner.pending_groups[row].is_none() {
+                geom.inner.pending_groups[row] = Some(OwnedSourceId::Numeric(key as u64));
+            }
+        }
     }
 
     let geom = geom.seal(policy.decoys)?;
@@ -434,7 +447,7 @@ struct SpectrumRow {
     charge: u8,
     mobility: f32,
     is_decoy: bool,
-    declared_group: Option<String>,
+    declared_group: Option<DeclaredGroup>,
     analyte: crate::chemistry::analyte::Analyte,
     /// Parallel to `intensities`, and pushed straight into the arena.
     frags: Vec<(IonAnnot, f64)>,
@@ -562,7 +575,7 @@ impl SpectrumRow {
             charge: charge(spectrum, peptidoform),
             mobility: mobility(spectrum),
             is_decoy: is_decoy(spectrum)?,
-            declared_group: declared_group(spectrum),
+            declared_group: declared_group(spectrum)?,
             analyte,
             frags,
             intensities,
@@ -895,29 +908,53 @@ fn is_ms_attribute(attribute: &Attribute, accession: u32) -> bool {
         }
 }
 
-/// Which entries compete. msspeculator's project-defined pair id first, then
-/// SpectraST's `related spectrum keys`.
-///
-/// Both name the target a decoy was derived from, so the target and its decoy
-/// land in one group. `None` leaves the row as its own group.
-fn declared_group(spectrum: &Spectrum) -> Option<String> {
+enum DeclaredGroup {
+    Direct(u64),
+    RelatedSpectrum(u32),
+}
+
+/// Which entries compete. SpectraST names a spectrum key on the decoy, while
+/// msspeculator writes the group on every member. Both values are integers.
+fn declared_group(spectrum: &Spectrum) -> Result<Option<DeclaredGroup>, TargetReadingError> {
     if let Some(param) = spectrum
         .description
         .params
         .iter()
-        .find(|p| p.name == MSSPECULATOR_PAIR_ID)
+        .find(|p| p.name == MSSPECULATOR_DECOY_GROUP)
     {
-        return Some(param.value.to_string());
+        let group = match &param.value {
+            Value::Int(n) => u64::try_from(*n).ok(),
+            Value::String(s) => s.parse::<u64>().ok(),
+            _ => None,
+        }
+        .ok_or_else(|| {
+            TargetReadingError::SpeclibParse(format!(
+                "msspeculator:decoy_group must be an integer, got {}",
+                param.value
+            ))
+        })?;
+        return Ok(Some(DeclaredGroup::Direct(group)));
     }
-    spectrum
+    let related = spectrum
         .attributes
         .iter()
         .flatten()
-        .find(|a| a.name.accession == mzcv::curie!(MS:1003259))
-        .map(|a| match &a.value {
-            AttributeValue::Scalar(v) => v.to_string(),
-            other => other.to_string(),
-        })
+        .find(|a| a.name.accession == mzcv::curie!(MS:1003259));
+    let Some(related) = related else {
+        return Ok(None);
+    };
+    let key = match &related.value {
+        AttributeValue::Scalar(Value::Int(n)) => u32::try_from(*n).ok(),
+        AttributeValue::Scalar(Value::String(s)) => s.parse::<u32>().ok(),
+        _ => None,
+    }
+    .ok_or_else(|| {
+        TargetReadingError::SpeclibParse(format!(
+            "MS:1003259|related spectrum keys must name one numeric spectrum key, got {}",
+            related.value
+        ))
+    })?;
+    Ok(Some(DeclaredGroup::RelatedSpectrum(key)))
 }
 
 /// The theoretical m/z for an annotated peak.
@@ -1538,6 +1575,16 @@ mod tests {
         let groups: std::collections::HashSet<_> =
             geom.rows().map(|r| geom.decoy_group_code(r)).collect();
         assert_eq!(groups.len(), 5, "each decoy competes with its own target");
+        let rows: Vec<_> = geom.rows().collect();
+        assert_eq!(
+            geom.decoy_group(rows[6]),
+            crate::models::SourceId::Numeric(7)
+        );
+        assert_eq!(
+            geom.decoy_group(rows[9]),
+            crate::models::SourceId::Numeric(7)
+        );
+        assert_eq!(geom.decoy_group(rows[8]), geom.output_id(rows[8]));
     }
 
     /// The two exports disagree on nearly every term, so reading both is what
@@ -1547,6 +1594,10 @@ mod tests {
         // DIA-NN writes `MS:1000744|selected ion m/z` and no retention time.
         let diann = arena("diann_export.mzspeclib.txt");
         assert!(diann.n_rows() > 0);
+        assert!(
+            diann.decoy_groups.is_none(),
+            "unlinked rows store no group column"
+        );
         let first = diann.rows().next().unwrap();
         assert!((diann.precursor_mz(first) - 778.412_96).abs() < 1e-4);
         assert_eq!(diann.charge(first), 2);
@@ -1796,7 +1847,7 @@ mod tests {
     /// it. It exercises every term msspeculator actually emits rather than the
     /// terms a vendor happens to use: `MS:1002815|inverse reduced ion mobility`
     /// for the timsTOF axis, `MS:1000896` for retention, and the
-    /// project-defined `msspeculator:decoy_pair_id` for the target/decoy
+    /// project-defined `msspeculator:decoy_group` for the target/decoy
     /// pairing.
     ///
     /// Stored as plain text, not gzipped, so it can be read in a review; the
@@ -1811,13 +1862,17 @@ mod tests {
         let geom = arena("msspeculator_built.mzspeclib.txt");
         assert_eq!(geom.n_rows(), 4, "two targets and their two decoys");
         assert_eq!(geom.rows().filter(|r| geom.is_decoy(*r)).count(), 2);
+        assert!(
+            geom.rows()
+                .all(|r| matches!(geom.decoy_group(r), crate::models::SourceId::Numeric(_)))
+        );
 
         let groups: std::collections::HashSet<_> =
             geom.rows().map(|r| geom.decoy_group_code(r)).collect();
         assert_eq!(
             groups.len(),
             2,
-            "`decoy_pair_id` puts each decoy in its target's group"
+            "`decoy_group` puts each decoy in its target's group"
         );
 
         // Four peaks per entry, decoys included: the writer's `Decoy` set
