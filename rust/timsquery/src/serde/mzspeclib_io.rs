@@ -51,6 +51,7 @@ use mzannotate::fragment::{
 use mzannotate::mzdata::params::{
     ControlledVocabulary,
     ParamValue,
+    Value,
 };
 use mzannotate::mzdata::prelude::PeakCollection;
 use mzannotate::mzspeclib::record::{
@@ -234,6 +235,8 @@ fn read_counting_degradation(
 
     let mut geom = TargetColumnsBuilder::with_capabilities(TargetCapabilities::default_diann());
     let mut frag_intens: Vec<f32> = Vec::new();
+    let mut spectrum_keys = Vec::new();
+    let mut related_keys = HashSet::new();
     let mut degradation = Degradation::default();
     // Read off the header before the iterator takes the parser, which is also
     // the only place it can be read: it is what an entry declaring nothing about
@@ -278,15 +281,17 @@ fn read_counting_degradation(
             degradation.rows_without_fragments += 1;
         }
 
-        // Both halves of a pair have to land in one namespace. A decoy names its
-        // target by `<Spectrum=N>` key, so every row names its own key and a
-        // decoy overrides that with its target's -- not its source id, which is
-        // a different string entirely. A library that declares no pair therefore
-        // ends up with one key per row, all singletons, and `seal` drops the
-        // column rather than storing a group per row.
-        let group = row
-            .declared_group
-            .unwrap_or_else(|| OwnedSourceId::Text(row.key.to_string()));
+        // SpectraST declares a link only on the decoy. Record the target key
+        // so its row can receive the same group after the full file is read.
+        let group = match row.declared_group {
+            Some(DeclaredGroup::Direct(group)) => Some(OwnedSourceId::Numeric(group)),
+            Some(DeclaredGroup::RelatedSpectrum(key)) => {
+                related_keys.insert(key);
+                Some(OwnedSourceId::Numeric(key as u64))
+            }
+            None => None,
+        };
+        spectrum_keys.push(row.key);
 
         frag_intens.extend_from_slice(&row.intensities);
         geom.push_row(Row {
@@ -299,8 +304,16 @@ fn read_counting_degradation(
             entry_name: row.entry_name.as_deref(),
             is_decoy: row.is_decoy,
             id: Some(row.id.as_str().into()),
-            decoy_group: Some(group),
+            decoy_group: group,
         });
+    }
+
+    if !related_keys.is_empty() {
+        for (row, key) in spectrum_keys.into_iter().enumerate() {
+            if related_keys.contains(&key) && geom.inner.pending_groups[row].is_none() {
+                geom.inner.pending_groups[row] = Some(OwnedSourceId::Numeric(key as u64));
+            }
+        }
     }
 
     let geom = geom.seal(policy.decoys)?;
@@ -434,7 +447,7 @@ struct SpectrumRow {
     charge: u8,
     mobility: f32,
     is_decoy: bool,
-    declared_group: Option<OwnedSourceId>,
+    declared_group: Option<DeclaredGroup>,
     analyte: crate::chemistry::analyte::Analyte,
     /// Parallel to `intensities`, and pushed straight into the arena.
     frags: Vec<(IonAnnot, f64)>,
@@ -895,35 +908,53 @@ fn is_ms_attribute(attribute: &Attribute, accession: u32) -> bool {
         }
 }
 
-/// Which entries compete. msspeculator's numeric group first, then SpectraST's
-/// `related spectrum keys`.
-///
-/// Both name the target a decoy was derived from, so the target and its decoy
-/// land in one group. `None` leaves the row as its own group.
-fn declared_group(spectrum: &Spectrum) -> Result<Option<OwnedSourceId>, TargetReadingError> {
+enum DeclaredGroup {
+    Direct(u64),
+    RelatedSpectrum(u32),
+}
+
+/// Which entries compete. SpectraST names a spectrum key on the decoy, while
+/// msspeculator writes the group on every member. Both values are integers.
+fn declared_group(spectrum: &Spectrum) -> Result<Option<DeclaredGroup>, TargetReadingError> {
     if let Some(param) = spectrum
         .description
         .params
         .iter()
         .find(|p| p.name == MSSPECULATOR_DECOY_GROUP)
     {
-        let group = param.value.to_string().parse::<u64>().map_err(|_| {
+        let group = match &param.value {
+            Value::Int(n) => u64::try_from(*n).ok(),
+            Value::String(s) => s.parse::<u64>().ok(),
+            _ => None,
+        }
+        .ok_or_else(|| {
             TargetReadingError::SpeclibParse(format!(
                 "msspeculator:decoy_group must be an integer, got {}",
                 param.value
             ))
         })?;
-        return Ok(Some(OwnedSourceId::Numeric(group)));
+        return Ok(Some(DeclaredGroup::Direct(group)));
     }
-    Ok(spectrum
+    let related = spectrum
         .attributes
         .iter()
         .flatten()
-        .find(|a| a.name.accession == mzcv::curie!(MS:1003259))
-        .map(|a| match &a.value {
-            AttributeValue::Scalar(v) => OwnedSourceId::Text(v.to_string()),
-            other => OwnedSourceId::Text(other.to_string()),
-        }))
+        .find(|a| a.name.accession == mzcv::curie!(MS:1003259));
+    let Some(related) = related else {
+        return Ok(None);
+    };
+    let key = match &related.value {
+        AttributeValue::Scalar(Value::Int(n)) => u32::try_from(*n).ok(),
+        AttributeValue::Scalar(Value::String(s)) => s.parse::<u32>().ok(),
+        _ => None,
+    }
+    .ok_or_else(|| {
+        TargetReadingError::SpeclibParse(format!(
+            "MS:1003259|related spectrum keys must name one numeric spectrum key, got {}",
+            related.value
+        ))
+    })?;
+    Ok(Some(DeclaredGroup::RelatedSpectrum(key)))
 }
 
 /// The theoretical m/z for an annotated peak.
@@ -1544,6 +1575,16 @@ mod tests {
         let groups: std::collections::HashSet<_> =
             geom.rows().map(|r| geom.decoy_group_code(r)).collect();
         assert_eq!(groups.len(), 5, "each decoy competes with its own target");
+        let rows: Vec<_> = geom.rows().collect();
+        assert_eq!(
+            geom.decoy_group(rows[6]),
+            crate::models::SourceId::Numeric(7)
+        );
+        assert_eq!(
+            geom.decoy_group(rows[9]),
+            crate::models::SourceId::Numeric(7)
+        );
+        assert_eq!(geom.decoy_group(rows[8]), geom.output_id(rows[8]));
     }
 
     /// The two exports disagree on nearly every term, so reading both is what
@@ -1553,6 +1594,10 @@ mod tests {
         // DIA-NN writes `MS:1000744|selected ion m/z` and no retention time.
         let diann = arena("diann_export.mzspeclib.txt");
         assert!(diann.n_rows() > 0);
+        assert!(
+            diann.decoy_groups.is_none(),
+            "unlinked rows store no group column"
+        );
         let first = diann.rows().next().unwrap();
         assert!((diann.precursor_mz(first) - 778.412_96).abs() < 1e-4);
         assert_eq!(diann.charge(first), 2);
