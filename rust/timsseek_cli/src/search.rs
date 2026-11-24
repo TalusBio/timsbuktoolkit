@@ -276,6 +276,17 @@ impl SearchRun<'_> {
                 "Mobility axis: unsupported [{label}] -- mobility filter + score features disabled"
             ),
         }
+        // Printed, not only logged: a user who never opens the log or the report
+        // should still learn the run had acquisition gaps.
+        if let Some(first) = index.dropped_cycles().first() {
+            println!(
+                "WARNING: dropped {} incomplete acquisition cycle(s); first at frame {}, {:.2} s \
+                 (details in performance_report.json / run_report.json)",
+                index.dropped_cycles().len(),
+                first.first_frame,
+                first.rt_seconds,
+            );
+        }
         alloc_track::snap!("Loading index");
 
         // On-disk caches use `bucket_size=4096`, too large for the tight mz

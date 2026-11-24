@@ -32,7 +32,7 @@ pub struct CycleTable {
     pub n_complete: u32,
 }
 
-#[derive(Debug, Clone, PartialEq, serde::Serialize)]
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct DroppedCycle {
     pub first_frame: usize,
     pub rt_seconds: f64,

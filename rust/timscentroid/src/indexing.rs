@@ -130,6 +130,12 @@ pub struct IndexedTimstofPeaks {
     /// serialized before this field existed deserialize to current behavior.
     #[serde(default)]
     pub(crate) mobility_kind: MobilityKind,
+    /// Incomplete acquisition cycles dropped mid-run (see [`crate::cycles`]).
+    /// Defaults to empty for indices serialized before the field existed: those
+    /// were only ever built from runs without interior incomplete cycles,
+    /// because indexing such a run panicked.
+    #[serde(default)]
+    pub(crate) dropped_cycles: Vec<DroppedCycle>,
 }
 
 /// Statistics about the indexing process.
@@ -141,8 +147,6 @@ pub struct IndexBuildingStats {
     pub ms2_total_time: std::time::Duration,
     pub ms1_stats: IndexedPeakGroupBuildingStats,
     pub ms2_stats: IndexedPeakGroupBuildingStats,
-    /// Incomplete cycles dropped mid-run (see [`crate::cycles`]).
-    pub dropped_cycles: Vec<DroppedCycle>,
 }
 
 impl std::fmt::Display for IndexBuildingStats {
@@ -185,7 +189,19 @@ impl IndexedTimstofPeaks {
             ms1_peaks,
             ms2_window_groups,
             mobility_kind: MobilityKind::Ook0,
+            dropped_cycles: Vec::new(),
         }
+    }
+
+    /// Incomplete acquisition cycles dropped while indexing (see [`crate::cycles`]).
+    pub fn dropped_cycles(&self) -> &[DroppedCycle] {
+        &self.dropped_cycles
+    }
+
+    /// Attach dropped-cycle records, for indices assembled outside [`Self::from_timstof_file`].
+    pub fn with_dropped_cycles(mut self, dropped_cycles: Vec<DroppedCycle>) -> Self {
+        self.dropped_cycles = dropped_cycles;
+        self
     }
 
     /// The kind of mobility axis this run carries (see [`MobilityKind`]).
@@ -255,6 +271,7 @@ impl IndexedTimstofPeaks {
             ms2_window_groups,
             ms1_peaks,
             mobility_kind: MobilityKind::Ook0,
+            dropped_cycles: cycles.dropped_interior,
         };
         Ok((
             out,
@@ -263,7 +280,6 @@ impl IndexedTimstofPeaks {
                 ms2_total_time: read_time_ms2,
                 ms1_stats: ms1_summ,
                 ms2_stats: ms2_summ,
-                dropped_cycles: cycles.dropped_interior,
             },
         ))
     }
@@ -281,6 +297,7 @@ impl IndexedTimstofPeaks {
             ms1_peaks,
             ms2_window_groups,
             mobility_kind: self.mobility_kind,
+            dropped_cycles: self.dropped_cycles,
         }
     }
 

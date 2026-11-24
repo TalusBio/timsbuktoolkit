@@ -538,3 +538,57 @@ fn test_nested_path_prefix_handling() {
     // Cleanup
     std::fs::remove_dir_all(&temp_root).unwrap();
 }
+
+#[test]
+fn dropped_cycles_survive_roundtrip_and_default_to_empty_for_older_indices() {
+    // The `.idx` cache skips cycle validation on reload, so the record of what
+    // was dropped must travel with the index or a cached run would report none.
+    let peaks: Vec<_> = (0..4)
+        .map(|i| IndexedPeak {
+            mz: 400.0 + (i as f32) * 10.0,
+            intensity: 100.0,
+            mobility_ook0: f16::from_f32(1.0),
+            cycle_index: MS1CycleIndex::new(i % 2),
+        })
+        .collect();
+    let (ms1_group, _) =
+        IndexedPeakGroup::testing_new(peaks, CycleToRTMapping::new(vec![0, 100]), 4);
+    let dropped = vec![timscentroid::cycles::DroppedCycle {
+        first_frame: 11519,
+        rt_seconds: 664.109,
+        has_ms1: true,
+        window_groups_present: 0,
+        window_groups_expected: 12,
+    }];
+    let index =
+        IndexedTimstofPeaks::from_parts(ms1_group, vec![]).with_dropped_cycles(dropped.clone());
+
+    let temp_dir = std::env::temp_dir().join("timscentroid_test_dropped_cycles_roundtrip");
+    if temp_dir.exists() {
+        std::fs::remove_dir_all(&temp_dir).unwrap();
+    }
+    index
+        .save_to_directory_with_config(&temp_dir, Default::default())
+        .unwrap();
+    let reloaded =
+        IndexedTimstofPeaks::load_from_storage(StorageLocation::from_path(&temp_dir)).unwrap();
+    assert_eq!(reloaded.dropped_cycles(), dropped.as_slice());
+
+    // An index written before the field existed has no `dropped_cycles` key.
+    let metadata_path = temp_dir.join("metadata.json");
+    let mut metadata: serde_json::Value =
+        serde_json::from_str(&std::fs::read_to_string(&metadata_path).unwrap()).unwrap();
+    assert!(
+        metadata
+            .as_object_mut()
+            .unwrap()
+            .remove("dropped_cycles")
+            .is_some()
+    );
+    std::fs::write(&metadata_path, metadata.to_string()).unwrap();
+    let older =
+        IndexedTimstofPeaks::load_from_storage(StorageLocation::from_path(&temp_dir)).unwrap();
+    assert!(older.dropped_cycles().is_empty());
+
+    std::fs::remove_dir_all(&temp_dir).unwrap();
+}

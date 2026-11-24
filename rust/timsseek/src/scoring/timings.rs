@@ -164,6 +164,9 @@ pub struct PipelineReport {
     // Skip breakdown per phase (peptides that entered the phase but did not
     // produce a result, grouped by reason).
     pub phase3_skips: SkipCounts,
+
+    /// Incomplete acquisition cycles dropped while indexing; empty for a clean run.
+    pub dropped_cycles: Vec<timscentroid::cycles::DroppedCycle>,
 }
 
 /// Terminal state of a run. `Completed` is the normal happy path; `Aborted`
