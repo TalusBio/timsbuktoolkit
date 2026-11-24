@@ -24,6 +24,11 @@ use tracing::{
     warn,
 };
 
+use crate::cycles::{
+    CycleError,
+    CycleTable,
+    DroppedCycle,
+};
 use crate::dimension::MobilityKind;
 use crate::rt_mapping::{
     CycleToRTMapping,
@@ -125,6 +130,12 @@ pub struct IndexedTimstofPeaks {
     /// serialized before this field existed deserialize to current behavior.
     #[serde(default)]
     pub(crate) mobility_kind: MobilityKind,
+    /// Incomplete acquisition cycles dropped mid-run (see [`crate::cycles`]).
+    /// Defaults to empty for indices serialized before the field existed: those
+    /// were only ever built from runs without interior incomplete cycles,
+    /// because indexing such a run panicked.
+    #[serde(default)]
+    pub(crate) dropped_cycles: Vec<DroppedCycle>,
 }
 
 /// Statistics about the indexing process.
@@ -178,7 +189,19 @@ impl IndexedTimstofPeaks {
             ms1_peaks,
             ms2_window_groups,
             mobility_kind: MobilityKind::Ook0,
+            dropped_cycles: Vec::new(),
         }
+    }
+
+    /// Incomplete acquisition cycles dropped while indexing (see [`crate::cycles`]).
+    pub fn dropped_cycles(&self) -> &[DroppedCycle] {
+        &self.dropped_cycles
+    }
+
+    /// Attach dropped-cycle records, for indices assembled outside [`Self::from_timstof_file`].
+    pub fn with_dropped_cycles(mut self, dropped_cycles: Vec<DroppedCycle>) -> Self {
+        self.dropped_cycles = dropped_cycles;
+        self
     }
 
     /// The kind of mobility axis this run carries (see [`MobilityKind`]).
@@ -199,11 +222,15 @@ impl IndexedTimstofPeaks {
         self
     }
 
+    /// # Errors
+    /// Fails when the run has no complete acquisition cycle or too many incomplete
+    /// ones (see [`crate::cycles`]).
     pub fn from_timstof_file(
         file: &TimsTofPath,
         centroiding_config: IndexingCentroidingConfig,
-    ) -> (Self, IndexBuildingStats) {
+    ) -> Result<(Self, IndexBuildingStats), CycleError> {
         let frame_reader = file.frame_reader().unwrap();
+        let cycles = CycleTable::from_frame_reader(&frame_reader)?;
         let metadata = Metadata::new(file.as_ref()).unwrap();
         let calibration = RunCalibration::from_path(file).unwrap();
         let mz_converter = calibration.mz_converter_median().unwrap();
@@ -226,23 +253,27 @@ impl IndexedTimstofPeaks {
         // Read MS1 peaks (MS1-specific centroiding config)
         let st = std::time::Instant::now();
         let (ms1_peaks, ms1_summ) =
-            Self::read_ms1(&frame_reader, &calibration, centroiding_config.ms1);
+            Self::read_ms1(&frame_reader, &cycles, &calibration, centroiding_config.ms1);
         let read_time_ms1 = st.elapsed();
 
         // Read MS2 peaks organized by window groups (MS2-specific config)
         let st = std::time::Instant::now();
-        let (ms2_window_groups, ms2_summ) =
-            Self::read_ms2_window_groups(&frame_reader, &calibration, centroiding_config.ms2)
-                .unwrap();
+        let (ms2_window_groups, ms2_summ) = Self::read_ms2_window_groups(
+            &frame_reader,
+            &cycles,
+            &calibration,
+            centroiding_config.ms2,
+        )
+        .unwrap();
         let read_time_ms2 = st.elapsed();
 
         let out = Self {
             ms2_window_groups,
             ms1_peaks,
             mobility_kind: MobilityKind::Ook0,
+            dropped_cycles: cycles.dropped_interior,
         };
-        // out.print_glimpse();
-        (
+        Ok((
             out,
             IndexBuildingStats {
                 ms1_total_time: read_time_ms1,
@@ -250,7 +281,7 @@ impl IndexedTimstofPeaks {
                 ms1_stats: ms1_summ,
                 ms2_stats: ms2_summ,
             },
-        )
+        ))
     }
 
     /// Rebuild every peak group (MS1 + all MS2 window groups) at a new
@@ -266,6 +297,7 @@ impl IndexedTimstofPeaks {
             ms1_peaks,
             ms2_window_groups,
             mobility_kind: self.mobility_kind,
+            dropped_cycles: self.dropped_cycles,
         }
     }
 
@@ -411,6 +443,7 @@ impl IndexedTimstofPeaks {
     /// To use this outside of the indexing use []
     fn read_ms1(
         frame_reader: &TdfFrameReader,
+        cycles: &CycleTable,
         calibration: &RunCalibration,
         centroiding_config: CentroidingConfig,
     ) -> (
@@ -419,6 +452,7 @@ impl IndexedTimstofPeaks {
     ) {
         IndexedPeakGroup::read_with_filter(
             frame_reader,
+            cycles,
             calibration,
             |meta| matches!(meta.ms_level(), MSLevel::MS1),
             centroiding_config,
@@ -427,6 +461,7 @@ impl IndexedTimstofPeaks {
 
     fn read_ms2_window_groups(
         frame_reader: &TdfFrameReader,
+        cycles: &CycleTable,
         calibration: &RunCalibration,
         centroiding_config: CentroidingConfig,
     ) -> Result<(Ms2WindowGroups, IndexedPeakGroupBuildingStats), ()> {
@@ -453,6 +488,7 @@ impl IndexedTimstofPeaks {
             };
             let (indexed_peaks, building_stats) = IndexedPeakGroup::read_with_filter(
                 frame_reader,
+                cycles,
                 calibration,
                 filter,
                 centroiding_config,
@@ -1447,19 +1483,19 @@ impl<T: RTIndex> IndexedPeakGroup<T> {
     ///      instead of the previous one.
     fn get_frame_indices_matching(
         frame_reader: &TdfFrameReader,
+        cycles: &CycleTable,
         filter: impl Fn(&FrameInfo) -> bool + Sync,
     ) -> Vec<(usize, u32, u32)> {
-        let mut out = Vec::new();
-        let mut cycle_index = 0;
-        let mut last_pushed_cycle = None;
-
         let mut indices: Vec<_> = frame_reader.iter_indices().collect();
         indices.sort_unstable();
+        let mut out = Vec::with_capacity(indices.len());
+        let mut last_pushed_cycle = None;
         for i in indices {
+            // Frames of dropped cycles are excluded from every group alike.
+            let Some(cycle_index) = cycles.cycle_of(i) else {
+                continue;
+            };
             let meta = frame_reader.get_info(i).unwrap();
-            if matches!(meta.ms_level(), MSLevel::MS1) {
-                cycle_index += 1;
-            }
             if filter(&meta) {
                 if let Some(last_cycle) = last_pushed_cycle
                     && last_cycle == cycle_index
@@ -1480,8 +1516,6 @@ impl<T: RTIndex> IndexedPeakGroup<T> {
                 last_pushed_cycle = Some(cycle_index);
             }
         }
-        // TODO: check that cycle indices are continuous AND without replicates
-        // or gaps ...
         out.as_slice().windows(2).for_each(|w| {
             // Note: These are assertions instead of errors because
             // they are invariants I am checking, not recoverable errors, none of the logic
@@ -1516,12 +1550,13 @@ impl<T: RTIndex> IndexedPeakGroup<T> {
     #[tracing::instrument(level = "debug", skip_all)]
     fn read_with_filter(
         frame_reader: &TdfFrameReader,
+        cycles: &CycleTable,
         calibration: &RunCalibration,
         filter: impl Fn(&FrameInfo) -> bool + Sync,
         centroiding_config: CentroidingConfig,
     ) -> (Self, IndexedPeakGroupBuildingStats) {
         // I dont like this allocation but its not that big of a deal RN ...
-        let indices = Self::get_frame_indices_matching(frame_reader, filter);
+        let indices = Self::get_frame_indices_matching(frame_reader, cycles, filter);
 
         // I am still not sure what I prefer here ...
         // On the greater schme of things allocating a vec for every frame is not thaaaat bad

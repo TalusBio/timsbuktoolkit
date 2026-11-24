@@ -414,7 +414,8 @@ pub fn execute_pipeline<I: ScorerQueriable>(
 
     Ok(PipelineReport {
         raw_scores: false,
-        load_index_ms: 0, // set by caller after return
+        load_index_ms: 0,           // set by caller after return
+        dropped_cycles: Vec::new(), // set by caller after return
         phase1_prescore_ms: phase1_ms,
         phase1_detail: phase1_timings,
         phase2_calibration_ms: phase2_ms,
@@ -680,6 +681,7 @@ pub fn run_pipeline(
 
     let mut timings = execute_pipeline(speclib, calib_lib, pipeline, options)?;
     timings.load_index_ms = load_index_ms;
+    timings.dropped_cycles = pipeline.index.dropped_cycles().to_vec();
     // Write per-file report
     let perf_report =
         serde_json::to_string_pretty(&timings).map_err(|e| TimsSeekError::ParseError {

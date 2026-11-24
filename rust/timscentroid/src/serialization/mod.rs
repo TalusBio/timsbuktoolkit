@@ -13,7 +13,7 @@
 //! // Index peaks from raw data (per-level MS1/MS2 config; `::default()` is tuned)
 //! let file = TimsTofPath::new("data.d")?;
 //! let config = IndexingCentroidingConfig::default();
-//! let (index, _) = IndexedTimstofPeaks::from_timstof_file(&file, config);
+//! let (index, _) = IndexedTimstofPeaks::from_timstof_file(&file, config).expect("complete cycles");
 //!
 //! // Save with default settings (balanced speed/size)
 //! index.save_to_directory("indexed_peaks/")?;
@@ -244,6 +244,9 @@ pub struct TimscentroidMetadata {
     /// round-trip instead of silently reverting to a searchable TIMS axis.
     #[serde(default)]
     pub mobility_kind: crate::dimension::MobilityKind,
+    /// See [`crate::indexing::IndexedTimstofPeaks::dropped_cycles`].
+    #[serde(default)]
+    pub dropped_cycles: Vec<crate::cycles::DroppedCycle>,
 }
 
 #[derive(Serialize, Deserialize, Debug, Clone)]
@@ -482,6 +485,7 @@ impl IndexedTimstofPeaks {
             ms1_peaks: ms1_meta,
             ms2_window_groups: ms2_metas,
             mobility_kind: self.mobility_kind.clone(),
+            dropped_cycles: self.dropped_cycles.clone(),
         };
 
         let metadata_json = serde_json::to_string_pretty(&meta)?;
@@ -594,6 +598,7 @@ impl IndexedTimstofPeaks {
             // Restored from metadata (defaults to `Ook0` for pre-field indices),
             // so a persisted non-`Ook0` run survives the round-trip.
             mobility_kind: meta.mobility_kind,
+            dropped_cycles: meta.dropped_cycles,
         })
     }
 }

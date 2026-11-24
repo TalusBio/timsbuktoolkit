@@ -1,4 +1,5 @@
 pub mod centroiding;
+pub mod cycles;
 pub mod dimension;
 pub mod geometry;
 pub mod indexing;

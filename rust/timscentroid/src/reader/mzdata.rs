@@ -288,6 +288,8 @@ pub fn from_mzml_file(
         ms2_window_groups,
         ms1_peaks: ms1_group,
         mobility_kind,
+        // mzML cycles are not validated (see crate::cycles); nothing is dropped.
+        dropped_cycles: Vec::new(),
     })
 }
 

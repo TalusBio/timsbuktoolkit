@@ -103,6 +103,26 @@ ignore = [
   # Linux accessibility bus -- not spectra, not library files.
   { id = "RUSTSEC-2026-0194", reason = "quick-xml < 0.41 quadratic duplicate-attribute check; blocked on arrow-rs and accesskit" },
   { id = "RUSTSEC-2026-0195", reason = "quick-xml < 0.41 unbounded namespace allocation; blocked on arrow-rs and accesskit" },
+
+  # Unmaintained, no fixed version; all arrive through dependencies, none direct.
+  # chrono: arrow-rs (both arrow lines). humantime: object_store 0.11 (timsrust-core
+  # -> filemanager) and 0.13 (parquet 59). pin-utils: aws-smithy-http under
+  # aws-config. zbus_names / zvariant / zvariant_derive: the Linux accessibility
+  # bus under eframe -> accesskit -> atspi.
+  { id = "RUSTSEC-2026-0543", reason = "chrono unmaintained; no fixed version, reached via arrow-rs" },
+  { id = "RUSTSEC-2026-0542", reason = "humantime unmaintained; no fixed version, reached via object_store" },
+  { id = "RUSTSEC-2026-0441", reason = "pin-utils unmaintained; no fixed version, reached via aws-smithy-http" },
+  { id = "RUSTSEC-2026-0371", reason = "zbus_names unmaintained; no fixed version, reached via eframe -> accesskit" },
+  { id = "RUSTSEC-2026-0370", reason = "zvariant unmaintained; no fixed version, reached via eframe -> accesskit" },
+  { id = "RUSTSEC-2026-0372", reason = "zvariant_derive unmaintained; no fixed version, reached via eframe -> accesskit" },
+
+  # Blocked on timsrust-core: its filemanager pins rusqlite 0.35 (bundled SQLite
+  # via libsqlite3-sys 0.33) and parquet 57 (thrift 0.17). libsqlite3-sys declares
+  # `links = "sqlite3"`, so the workspace cannot move to the fixed 0.39 alone.
+  # The SQLite read is the run's own analysis.tdf; the thrift read is parquet
+  # metadata of files we wrote. Fix by bumping both in the timsrust fork.
+  { id = "RUSTSEC-2026-0459", reason = "SQLite CVE via libsqlite3-sys 0.33; blocked on timsrust-core rusqlite 0.35" },
+  { id = "RUSTSEC-2026-0435", reason = "thrift 0.17 unbounded read_bytes via parquet 57; blocked on timsrust-core parquet 57" },
 ]
 # Threshold for security vulnerabilities, any vulnerability with a CVSS score
 # lower than the range specified will be ignored. Note that ignored advisories

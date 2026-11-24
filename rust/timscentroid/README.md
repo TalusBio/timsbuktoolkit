@@ -15,7 +15,7 @@ use timscentroid::utils::{TupleRange, OptionallyRestricted::*};
 let index = IndexedTimstofPeaks::from_timstof_file(
     &file,
     IndexingCentroidingConfig::default()
-);
+).expect("complete cycles");
 
 // 2. Save to disk
 index.save_to_directory("./indexed_peaks")?;
@@ -198,7 +198,7 @@ let config = IndexingCentroidingConfig {
     },
 };
 
-let index = IndexedTimstofPeaks::from_timstof_file(&file, config);
+let index = IndexedTimstofPeaks::from_timstof_file(&file, config).expect("complete cycles");
 ```
 
 ## Working with S3-Compatible Services
