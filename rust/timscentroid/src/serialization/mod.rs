@@ -13,7 +13,7 @@
 //! // Index peaks from raw data (per-level MS1/MS2 config; `::default()` is tuned)
 //! let file = TimsTofPath::new("data.d")?;
 //! let config = IndexingCentroidingConfig::default();
-//! let (index, _) = IndexedTimstofPeaks::from_timstof_file(&file, config);
+//! let (index, _) = IndexedTimstofPeaks::from_timstof_file(&file, config).expect("complete cycles");
 //!
 //! // Save with default settings (balanced speed/size)
 //! index.save_to_directory("indexed_peaks/")?;

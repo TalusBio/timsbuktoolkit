@@ -291,7 +291,8 @@ impl RawReader for BrukerTdfReader {
             .ok_or_else(|| ReadError::Build(format!("path is not valid UTF-8: {path:?}")))?;
         let tt = crate::indexing::TimsTofPath::new(path_str)
             .map_err(|e| ReadError::Build(format!("failed to open {path:?}: {e:?}")))?;
-        let (idx, _stats) = IndexedTimstofPeaks::from_timstof_file(&tt, *cfg);
+        let (idx, _stats) = IndexedTimstofPeaks::from_timstof_file(&tt, *cfg)
+            .map_err(|e| ReadError::Build(format!("{path:?}: {e}")))?;
         Ok(idx)
     }
 }

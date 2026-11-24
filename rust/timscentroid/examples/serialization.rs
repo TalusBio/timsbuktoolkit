@@ -39,7 +39,8 @@ fn main() {
     let (index_original, index_stats) = IndexedTimstofPeaks::from_timstof_file(
         &file,
         IndexingCentroidingConfig::uniform(centroiding_config),
-    );
+    )
+    .expect("run has complete acquisition cycles");
     let centroid_time = start_centroid.elapsed();
 
     println!("Indexing Stats: {}", index_stats);

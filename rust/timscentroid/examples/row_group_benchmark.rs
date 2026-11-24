@@ -60,7 +60,8 @@ fn main() {
 
     let start = std::time::Instant::now();
     let (index, stats) =
-        IndexedTimstofPeaks::from_timstof_file(&file, IndexingCentroidingConfig::uniform(config));
+        IndexedTimstofPeaks::from_timstof_file(&file, IndexingCentroidingConfig::uniform(config))
+            .expect("run has complete acquisition cycles");
     println!("Indexed in {:?}: {}\n", start.elapsed(), stats);
 
     // Generate deterministic queries
