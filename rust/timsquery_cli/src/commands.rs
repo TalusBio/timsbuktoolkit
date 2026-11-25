@@ -272,16 +272,9 @@ pub fn stream_process_batches<L: KeyLike + Display + DecoyShift>(
         index,
         tolerance,
         ser,
-        total_batches,
         batch_size,
-    )?;
-    let serialization_elapsed = serialization_start.elapsed();
-    println!("Wrote to {}", output_path.display());
-    println!(
-        "Total processing and serialization took {:#?}",
-        serialization_elapsed
-    );
-    Ok(())
+        (output_path, serialization_start),
+    )
 }
 
 /// Processes batches of arena flyweights and serializes the aggregated results.
@@ -294,9 +287,10 @@ fn process_and_serialize<L: KeyLike + Display + DecoyShift>(
     index: &IndexedTimstofPeaks,
     tolerance: &Tolerance,
     mut ser: JsonStreamSerializer<impl Write>,
-    total_batches: usize,
     batch_size: usize,
+    output: (&Path, Instant),
 ) -> Result<(), CliError> {
+    let total_batches = geom.expanded_len().div_ceil(batch_size);
     let mut last_progress = Instant::now();
     let progress_interval = Duration::from_secs(2);
 
@@ -325,6 +319,13 @@ fn process_and_serialize<L: KeyLike + Display + DecoyShift>(
     }
 
     ser.finish()?;
+    let (output_path, serialization_start) = output;
+    let serialization_elapsed = serialization_start.elapsed();
+    println!("Wrote to {}", output_path.display());
+    println!(
+        "Total processing and serialization took {:#?}",
+        serialization_elapsed
+    );
     Ok(())
 }
 
