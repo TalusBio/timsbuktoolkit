@@ -396,8 +396,8 @@ fn ms1_to_ms2_cycle_range(
     match cycle_range {
         Restricted(x) => Restricted(
             TupleRange::try_new(
-                WindowCycleIndex::new(x.start().as_u32()),
-                WindowCycleIndex::new(x.end().as_u32()),
+                WindowCycleIndex::from(x.start()),
+                WindowCycleIndex::from(x.end()),
             )
             .unwrap(),
         ),

@@ -38,6 +38,7 @@ use crate::rt_mapping::{
     MS1CycleIndex,
     RTIndex,
     WindowCycleIndex,
+    fill_missing_cycle_rts,
 };
 use crate::storage::{
     StorageLocation,
@@ -254,13 +255,56 @@ pub struct PeakGroupMetadata<T: RTIndex> {
     pub relative_path: PathBuf,
     pub cycle_to_rt_ms: CycleToRTMapping<T>,
     pub bucket_size: usize,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub frame_present: Option<Vec<bool>>,
 }
 
 #[derive(Serialize, Deserialize)]
 pub struct Ms2GroupMetadata {
     pub id: usize,
     pub quadrupole_isolation: QuadrupoleIsolationScheme,
+    #[serde(deserialize_with = "deserialize_ms2_group_info")]
     pub group_info: PeakGroupMetadata<WindowCycleIndex>,
+}
+
+fn deserialize_ms2_group_info<'de, D>(
+    deserializer: D,
+) -> Result<PeakGroupMetadata<WindowCycleIndex>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    let mut group = PeakGroupMetadata::deserialize(deserializer)?;
+    if let Some(present) = &group.frame_present {
+        if present.len() != group.cycle_to_rt_ms.len() {
+            return Err(serde::de::Error::custom(
+                "MS2 frame presence and RT lengths differ",
+            ));
+        }
+    } else {
+        // Recover caches written when missing frames were encoded in the RT map.
+        let mut rts = group.cycle_to_rt_ms.unpack();
+        const LEGACY_MISSING_RT: u32 = u32::MAX;
+        if rts.contains(&LEGACY_MISSING_RT) {
+            let present: Vec<_> = rts.iter().map(|&rt| rt != LEGACY_MISSING_RT).collect();
+            if !rts
+                .iter()
+                .copied()
+                .filter(|&rt| rt != LEGACY_MISSING_RT)
+                .is_sorted()
+            {
+                return Err(serde::de::Error::custom("MS2 frame RTs are out of order"));
+            }
+            fill_missing_cycle_rts(&mut rts, &present);
+            group.frame_present = Some(present);
+        } else {
+            // Pre-presence caches cannot say which cycles were acquired; every
+            // cycle is treated as present (the old behaviour). Rebuild the
+            // index for exact frame presence.
+            tracing::warn!("MS2 group cache has no frame presence; assuming every cycle present");
+        }
+        group.cycle_to_rt_ms = CycleToRTMapping::new(rts);
+    }
+    Ok(group)
 }
 
 /// Expected schema for IndexedPeak parquet files
@@ -444,6 +488,7 @@ impl IndexedTimstofPeaks {
                     relative_path: PathBuf::from("ms1.parquet"),
                     cycle_to_rt_ms: self.ms1_peaks.cycle_to_rt_ms.clone(),
                     bucket_size: self.ms1_peaks.bucket_size,
+                    frame_present: None,
                 })
             },
             // Write all MS2 groups in parallel
@@ -468,6 +513,7 @@ impl IndexedTimstofPeaks {
                                 relative_path: PathBuf::from(&path),
                                 cycle_to_rt_ms: group.cycle_to_rt_ms.clone(),
                                 bucket_size: group.bucket_size,
+                                frame_present: group.frame_present.clone(),
                             },
                         })
                     })
@@ -583,6 +629,10 @@ impl IndexedTimstofPeaks {
                             group_meta.group_info.cycle_to_rt_ms.clone(),
                             group_meta.group_info.bucket_size,
                         );
+                        let group = match &group_meta.group_info.frame_present {
+                            Some(present) => group.with_frame_presence(present.clone()),
+                            None => group,
+                        };
                         Ok((group_meta.quadrupole_isolation.clone(), group))
                     })
                     .collect()

@@ -54,6 +54,7 @@ pub mod relative_intensities;
 pub mod result_meta;
 pub mod rt;
 pub mod sequence_counts;
+pub mod shadow;
 
 // ---------------------------------------------------------------------------
 // Trait

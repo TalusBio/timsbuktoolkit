@@ -10,8 +10,10 @@ pub mod pipeline;
 pub mod plan;
 pub mod results;
 mod scores;
+mod shadow;
 pub mod skip;
 pub mod timings;
+mod window_map;
 
 pub use scores::hyperscore;
 

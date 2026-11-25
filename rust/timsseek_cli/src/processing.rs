@@ -24,7 +24,10 @@ use timsseek::rt_calibration::{
     CalibrationResult,
     MzFitOutcome,
 };
-use timsseek::scoring::pipeline::Scorer;
+use timsseek::scoring::pipeline::{
+    Scorer,
+    ShadowRun,
+};
 use timsseek::scoring::timings::{
     TimedStep,
     make_progress_bar,
@@ -142,14 +145,32 @@ fn execute_raw_pipeline<I: ScorerQueriable>(
         ..Default::default()
     };
     let mut timings = ScoreTimings::default();
+    let shadow = pipeline.prepare_shadows(None)?;
+    let mut shadow_rows = shadow.as_ref().map(|_| Vec::default());
     for batch in library.chunks(options.chunk_size) {
-        let (rows, timing, skips) = match &trace {
-            Some(trace) => pipeline.score_traced_batch(library, &batch, None, &trace.phase3),
-            None => pipeline.score_raw_batch(library, &batch),
-        };
+        let (rows, timing, skips) = pipeline.score_shadow_batch(
+            library,
+            &batch,
+            None,
+            trace.as_ref().map(|trace| &trace.phase3),
+            shadow.as_ref(),
+        );
         timings += timing;
         report.phase3_skips += skips;
         report.total_scored += rows.len();
+        if let Some(shadow_rows) = &mut shadow_rows {
+            shadow_rows.reserve(rows.len());
+            shadow_rows.extend(rows);
+        } else {
+            for row in rows {
+                writer.add_raw(row).map_err(io_error)?;
+            }
+        }
+    }
+    if let Some((shadow, mut rows)) = shadow.zip(shadow_rows) {
+        let step = TimedStep::begin("Phase 3.5: Shadow scores");
+        shadow.score(&mut rows, library)?;
+        step.finish();
         for row in rows {
             writer.add_raw(row).map_err(io_error)?;
         }
@@ -338,23 +359,32 @@ where
 
     calib_dash_hook::show_final(&mut calib_dash_state, &calibration);
 
+    let shadow = pipeline.prepare_shadows(Some(&calibration))?;
+
     // === PHASE 3: Narrow scoring with calibrated tolerances ===
     info!("Phase 3: Scoring with calibrated extraction...");
     timscentroid::indexing::reset_for_each_peak_funnel();
     let step = TimedStep::begin("Phase 3: Score");
     let mut phase3_timings = ScoreTimings::default();
-    let (results, phase3_skips) = phase3_score(
+    let (mut results, phase3_skips) = phase3_score(
         speclib,
         pipeline,
         &calibration,
         chunk_size,
         &mut phase3_timings,
         trace.as_ref(),
+        shadow.as_ref(),
     );
     step.finish_with(format_args!("{} peptides", results.len()));
     alloc_track::snap!("Phase 3: Score");
     timscentroid::indexing::dump_for_each_peak_funnel("Phase 3");
     timscentroid::indexing::reset_for_each_peak_funnel();
+    if let Some(shadow) = shadow {
+        let step = TimedStep::begin("Phase 3.5: Shadow scores");
+        shadow.score(&mut results, speclib)?;
+        step.finish();
+        timscentroid::indexing::reset_for_each_peak_funnel();
+    }
 
     let total_scored = results.len();
 
@@ -499,6 +529,7 @@ fn phase3_score<I: ScorerQueriable>(
     chunk_size: usize,
     timings: &mut ScoreTimings,
     trace: Option<&PrecursorTrace<'_>>,
+    shadow: Option<&ShadowRun<'_>>,
 ) -> (Vec<ScoredCandidate>, SkipCounts) {
     let total_peptides = speclib.len();
     let n_chunks = total_peptides.div_ceil(chunk_size);
@@ -510,12 +541,13 @@ fn phase3_score<I: ScorerQueriable>(
     // Chunk the flat index space `0..len` and hand each range to the batch
     // scorer, which drives the lazy flyweight by index.
     for batch in speclib.chunks(chunk_size).progress_with(pb) {
-        let (batch_results, batch_timings, batch_skips) = match trace {
-            Some(trace) => {
-                pipeline.score_traced_batch(speclib, &batch, Some(calibration), &trace.phase3)
-            }
-            None => pipeline.score_calibrated_batch(speclib, &batch, calibration),
-        };
+        let (batch_results, batch_timings, batch_skips) = pipeline.score_shadow_batch(
+            speclib,
+            &batch,
+            Some(calibration),
+            trace.map(|trace| &trace.phase3),
+            shadow,
+        );
         *timings += batch_timings;
         skips += batch_skips;
         results.extend(batch_results);
@@ -833,7 +865,7 @@ mod tests {
         // All fixtures tie on score so the (seq, score, is_target) tiebreak arm
         // is what orders them.
         scoring.primary.main_score = 5.0;
-        ScoredCandidate { scoring }
+        ScoredCandidate::new(scoring)
     }
 
     fn survivors(mut results: Vec<ScoredCandidate>) -> Vec<(String, u64, bool)> {

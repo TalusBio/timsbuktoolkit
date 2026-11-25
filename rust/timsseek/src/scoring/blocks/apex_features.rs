@@ -16,7 +16,6 @@ use crate::models::query_item::linear_get;
 use crate::scoring::apex_dsp::{
     argmax,
     build_gaussian_reference,
-    estimate_fwhm,
     pearson_correlation,
 };
 
@@ -55,7 +54,7 @@ pub struct ApexFeatures {
 /// `cosine_profile` is C(t) = cos(t)^3 * I(t).
 /// `precursor_trace` is the summed precursor intensity trace.
 /// `joint_apex` is the apex cycle index (Pass 1's weighted-apex_profile pick).
-/// `n_cycles` is the total number of cycles in the extraction window.
+/// `peak_width_cycles` is the FWHM of the cosine profile at that apex.
 pub fn compute_apex_features<T: KeyLike + Default>(
     fragments: &MzMajorIntensityArray<T, f32>,
     precursors: &MzMajorIntensityArray<i8, f32>,
@@ -63,9 +62,10 @@ pub fn compute_apex_features<T: KeyLike + Default>(
     cosine_profile: &[f32],
     precursor_trace: &[f32],
     joint_apex: usize,
-    n_cycles: usize,
+    peak_width_cycles: f32,
 ) -> ApexFeatures {
     let apex = joint_apex;
+    let n_cycles = cosine_profile.len();
 
     // ---- Peak Shape ----
     let peak_shape = compute_peak_shape(cosine_profile, apex, 10);
@@ -102,7 +102,8 @@ pub fn compute_apex_features<T: KeyLike + Default>(
         compute_isotope_correlation(precursors, expected.precursor_intensities.as_slice(), apex);
 
     // ---- Gaussian Correlation ----
-    let gaussian_correlation = compute_gaussian_correlation(cosine_profile, apex, 15);
+    let gaussian_correlation =
+        compute_gaussian_correlation(cosine_profile, apex, 15, peak_width_cycles);
 
     // ---- Per-Fragment Gaussian Correlation ----
     let per_frag_gaussian_corr = compute_per_frag_gaussian_corr(fragments, apex, 10);
@@ -434,7 +435,7 @@ fn compute_isotope_correlation(
 /// and an ideal Gaussian centered at the apex.
 ///
 /// sigma is estimated from the observed FWHM: sigma = FWHM / 2.355
-fn compute_gaussian_correlation(profile: &[f32], apex: usize, hw: usize) -> f32 {
+fn compute_gaussian_correlation(profile: &[f32], apex: usize, hw: usize, fwhm: f32) -> f32 {
     let n = profile.len();
     if n == 0 {
         return 0.0;
@@ -447,7 +448,6 @@ fn compute_gaussian_correlation(profile: &[f32], apex: usize, hw: usize) -> f32 
         return 0.0;
     }
 
-    let fwhm = estimate_fwhm(profile, apex);
     let sigma = (fwhm / 2.355).max(0.5);
     let gaussian = build_gaussian_reference(win_len, lo, apex, sigma);
 

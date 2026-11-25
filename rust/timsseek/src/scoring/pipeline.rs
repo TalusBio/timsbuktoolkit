@@ -30,6 +30,11 @@ use crate::data_sources::reference_library::{
     ScoredIdentity,
 };
 use crate::errors::DataProcessingError;
+use crate::rt_calibration::{
+    CalibrationResult,
+    LibraryRT,
+    ObservedRTSeconds,
+};
 use crate::{
     IonAnnot,
     ScorerQueriable,
@@ -59,6 +64,7 @@ use timsquery::{
     SpectralCollector,
     Tolerance,
 };
+use tracing::warn;
 
 use super::accumulator::IonSearchAccumulator;
 use super::apex_finding::{
@@ -75,6 +81,7 @@ use super::results::{
     ScoredCandidate,
     ScoringFields,
 };
+pub use super::shadow::ShadowRun;
 use super::skip::{
     SkipCounts,
     SkipReason,
@@ -110,16 +117,17 @@ pub struct Phase3Trace {
 }
 
 struct CandidateIdentity {
+    flat: FlatIdx,
     handles: RowHandles,
     source_id: timsquery::models::OwnedSourceId,
     is_target: bool,
 }
-use crate::rt_calibration::{
-    CalibrationResult,
-    LibraryRT,
-    ObservedRTSeconds,
-};
-use tracing::warn;
+
+#[derive(Clone, Copy)]
+struct BatchScoring<'a, 'index> {
+    calibration: Option<&'a CalibrationResult>,
+    shadow: Option<&'a ShadowRun<'index>>,
+}
 
 /// Per-rayon-worker scoring state. Holds a `TraceScorer` plus reusable scratch:
 /// - `Extraction` slot (ChromatogramCollector reset-and-reused, not reallocated)
@@ -683,7 +691,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         if !self.index.mobility_kind().is_scoreable() {
             scoring.neutralize_mobility();
         }
-        Ok(ScoredCandidate { scoring })
+        Ok(ScoredCandidate::new(scoring))
     }
 }
 
@@ -778,11 +786,13 @@ impl<I: ScorerQueriable> Scorer<I> {
         &self,
         query: &RefQuery<'_>,
         identity: CandidateIdentity,
-        calibration: Option<&CalibrationResult>,
+        batch: BatchScoring<'_, '_>,
         worker: &mut ScoringWorker,
         timings: &mut ScoreTimings,
         mut trace: Option<&mut Phase3Trace>,
     ) -> Result<ScoredCandidate, SkipReason> {
+        let calibration = batch.calibration;
+        let flat = identity.flat;
         if TRACE && let Some(trace) = trace.as_deref_mut() {
             trace.stage = Phase3Stage::ExpectedFragments;
         }
@@ -908,6 +918,15 @@ impl<I: ScorerQueriable> Scorer<I> {
             .as_ref()
             .expect("extraction set by build_extraction_into");
         let nqueries = scoring_ctx.chromatograms.fragments.num_ions() as u8;
+        let shadow_context = batch.shadow.and_then(|shadow| {
+            shadow.context(
+                query,
+                flat,
+                scoring_ctx.chromatograms.cycle_offset(),
+                apex_score.joint_apex_cycle,
+                apex_score.peak_width_cycles,
+            )
+        });
         if TRACE && let Some(trace) = trace {
             trace.stage = Phase3Stage::Finalize;
             trace.main_score = Some(apex_score.primary.main_score);
@@ -924,6 +943,10 @@ impl<I: ScorerQueriable> Scorer<I> {
                     inner_collector,
                     isotope_collector,
                 )
+                .map(|mut candidate| {
+                    candidate.shadow_context = shadow_context;
+                    candidate
+                })
                 .map_err(|e| {
                     warn!("Error in scoring: {:?}", e);
                     finalize_error_to_skip(&e)
@@ -943,7 +966,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         flats: &[FlatIdx],
         calibration: &CalibrationResult,
     ) -> (Vec<ScoredCandidate>, ScoreTimings, SkipCounts) {
-        self.score_batch::<false>(lib, flats, Some(calibration), None)
+        self.score_shadow_batch(lib, flats, Some(calibration), None, None)
     }
 
     /// Score spectra over the acquisition's full RT range, without calibration
@@ -953,7 +976,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         lib: &ReferenceLibrary,
         flats: &[FlatIdx],
     ) -> (Vec<ScoredCandidate>, ScoreTimings, SkipCounts) {
-        self.score_batch::<false>(lib, flats, None, None)
+        self.score_shadow_batch(lib, flats, None, None, None)
     }
 
     pub fn score_traced_batch(
@@ -963,14 +986,34 @@ impl<I: ScorerQueriable> Scorer<I> {
         calibration: Option<&CalibrationResult>,
         traces: &HashMap<FlatIdx, Mutex<Phase3Trace>>,
     ) -> (Vec<ScoredCandidate>, ScoreTimings, SkipCounts) {
-        self.score_batch::<true>(lib, flats, calibration, Some(traces))
+        self.score_shadow_batch(lib, flats, calibration, Some(traces), None)
+    }
+
+    /// Score a Phase 3 batch and capture the run-local shadow context.
+    pub fn score_shadow_batch(
+        &self,
+        lib: &ReferenceLibrary,
+        flats: &[FlatIdx],
+        calibration: Option<&CalibrationResult>,
+        traces: Option<&HashMap<FlatIdx, Mutex<Phase3Trace>>>,
+        shadow: Option<&ShadowRun<'_>>,
+    ) -> (Vec<ScoredCandidate>, ScoreTimings, SkipCounts) {
+        let batch = BatchScoring {
+            calibration,
+            shadow,
+        };
+        if traces.is_some() {
+            self.score_batch::<true>(lib, flats, batch, traces)
+        } else {
+            self.score_batch::<false>(lib, flats, batch, None)
+        }
     }
 
     fn score_batch<const TRACE: bool>(
         &self,
         lib: &ReferenceLibrary,
         flats: &[FlatIdx],
-        calibration: Option<&CalibrationResult>,
+        batch: BatchScoring<'_, '_>,
         traces: Option<&HashMap<FlatIdx, Mutex<Phase3Trace>>>,
     ) -> (Vec<ScoredCandidate>, ScoreTimings, SkipCounts) {
         let get_item = |f| lib.item_at(f);
@@ -1031,6 +1074,7 @@ impl<I: ScorerQueriable> Scorer<I> {
                         tracing::span!(tracing::Level::TRACE, "score_calibrated_item").entered();
                     let mut t = ScoreTimings::default();
                     let identity = CandidateIdentity {
+                        flat,
                         handles: q.handles(),
                         source_id: q.output_id().to_owned_id(),
                         is_target: q.is_target(),
@@ -1038,7 +1082,7 @@ impl<I: ScorerQueriable> Scorer<I> {
                     let result = self.score_extraction::<TRACE>(
                         &q,
                         identity,
-                        calibration,
+                        batch,
                         &mut worker,
                         &mut t,
                         trace.as_deref_mut(),

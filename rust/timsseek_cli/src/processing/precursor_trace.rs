@@ -679,7 +679,7 @@ mod tests {
                     main_score: Some(score),
                     ..Default::default()
                 };
-                ScoredCandidate { scoring }
+                ScoredCandidate::new(scoring)
             })
             .collect();
         let competed = super::super::target_decoy_compete(candidates, &library, Some(&mut trace));

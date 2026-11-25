@@ -31,6 +31,12 @@ pub struct WindowCycleIndex {
     pub index: u32,
 }
 
+impl From<MS1CycleIndex> for WindowCycleIndex {
+    fn from(cycle: MS1CycleIndex) -> Self {
+        Self { index: cycle.index }
+    }
+}
+
 pub trait RTIndex:
     Copy + PartialEq + Eq + PartialOrd + Ord + std::fmt::Debug + Send + Sync + Debug
 {
@@ -162,6 +168,36 @@ impl<T: RTIndex> CycleToRTMapping<T> {
         }
         Ok(&self.rt_milis[start..=end])
     }
+}
+
+/// Fill gaps between acquired frames by interpolating their RTs. Keep the
+/// leading baseline at zero and extend the last RT over any trailing gaps.
+pub(crate) fn fill_missing_cycle_rts(rts: &mut [u32], frame_present: &[bool]) {
+    assert_eq!(rts.len(), frame_present.len());
+    let mut gap_start = 0;
+    if frame_present.first() == Some(&false) {
+        rts[0] = 0;
+        gap_start = 1;
+    }
+    let mut previous_rt = 0;
+    for (end, _) in frame_present
+        .iter()
+        .enumerate()
+        .filter(|&(_, present)| *present)
+    {
+        let end_rt = rts[end];
+        let gap = &mut rts[gap_start..end];
+        let steps = u32::try_from(gap.len() + 1).expect("cycle count fits u32");
+        let delta = u64::from(end_rt - previous_rt);
+        for (rt, step) in gap.iter_mut().zip(1..steps) {
+            let offset = delta * u64::from(step) / u64::from(steps);
+            *rt = previous_rt + u32::try_from(offset).expect("bounded by the RT delta");
+        }
+        previous_rt = end_rt;
+        gap_start = end + 1;
+    }
+    rts[gap_start..].fill(previous_rt);
+    assert!(rts.is_sorted());
 }
 
 #[derive(Debug)]

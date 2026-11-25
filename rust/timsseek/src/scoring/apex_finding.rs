@@ -142,6 +142,8 @@ pub struct ApexLocation {
 pub struct ApexBlocks {
     /// Local cycle index of the joint apex.
     pub joint_apex_cycle: usize,
+    /// Full width at half maximum of the apex-local cosine profile in cycles.
+    pub(super) peak_width_cycles: f32,
     /// Retention time at the apex (ms). Also the secondary-query bridge input.
     pub retention_time_ms: u32,
 
@@ -492,7 +494,8 @@ impl TraceScorer {
         let effective_apex = cycle;
 
         // 11 features at effective apex
-        let n_cycles = self.cosine_profile.len();
+        let peak_width_cycles =
+            super::apex_dsp::estimate_fwhm(&self.cosine_profile, effective_apex);
         let features = compute_apex_features(
             &scoring_ctx.chromatograms.fragments,
             &scoring_ctx.chromatograms.precursors,
@@ -500,7 +503,7 @@ impl TraceScorer {
             &self.cosine_profile,
             &self.traces.ms1_precursor_trace,
             effective_apex,
-            n_cycles,
+            peak_width_cycles,
         );
 
         let score = compute_weighted_score(evidence.apex_evidence, &features);
@@ -530,6 +533,7 @@ impl TraceScorer {
 
         Ok(ApexBlocks {
             joint_apex_cycle: effective_apex,
+            peak_width_cycles,
             retention_time_ms,
             evidence: *evidence,
             features,

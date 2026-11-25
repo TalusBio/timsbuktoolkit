@@ -111,6 +111,9 @@ impl DataProcessingError {
 
 #[derive(Debug)]
 pub enum TimsSeekError {
+    ShadowBounds {
+        message: &'static str,
+    },
     TimsTofPath(TimsTofPathError),
     TimsRust(TimsRustError),
     Timsquery(TimsqueryError),
@@ -130,6 +133,7 @@ impl std::fmt::Display for TimsSeekError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
             Self::Rescore(error) => error.fmt(f),
+            Self::ShadowBounds { message } => write!(f, "shadow scoring: {message}"),
             other => write!(f, "{other:?}"),
         }
     }
