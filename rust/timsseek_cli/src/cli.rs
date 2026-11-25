@@ -303,12 +303,14 @@ pub struct BuildLibraryArgs {
     pub fasta: Option<PathBuf>,
 
     /// TSV with proforma and protein_ids columns; optional decoy and decoy_group.
-    /// ProForma must include charge, e.g. PEPC[UNIMOD:4]IDEK/2.
+    /// ProForma must include charge, e.g. `PEPC[UNIMOD:4]IDEK/2`.
     #[arg(
         long,
         value_name = "PATH",
         required_unless_present = "fasta",
-        conflicts_with = "fasta"
+        conflicts_with = "fasta",
+        help = "TSV with proforma and protein_ids columns; optional decoy and decoy_group. \
+                ProForma must include charge, e.g. PEPC[UNIMOD:4]IDEK/2"
     )]
     pub peptides: Option<PathBuf>,
 

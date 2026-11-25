@@ -55,6 +55,11 @@ type ChromatogramComputeResult = Result<
     String,
 >;
 
+struct ChromatogramSettings {
+    tolerance: Tolerance,
+    smoothing: SmoothingMethod,
+}
+
 /// Handle to cancel a running background computation
 #[derive(Clone)]
 struct CancellationToken {
@@ -547,8 +552,10 @@ impl ViewerApp {
                 }
             });
             let expected_intensities_owned = expected_intensities.clone();
-            let tolerance_owned = self.data.tolerance.clone();
-            let smoothing_owned = self.data.smoothing;
+            let settings = ChromatogramSettings {
+                tolerance: self.data.tolerance.clone(),
+                smoothing: self.data.smoothing,
+            };
             let ctx_clone = ctx.clone();
             match std::thread::Builder::new()
                 .name(format!("chrom-{}", selected_idx))
@@ -563,8 +570,7 @@ impl ViewerApp {
                         expected_intensities_owned,
                         selected_idx,
                         index_owned,
-                        tolerance_owned,
-                        smoothing_owned,
+                        settings,
                         cancel_token,
                     );
                     if let Err(e) = &result {
@@ -604,8 +610,7 @@ impl ViewerApp {
         expected_intensities: timsseek::ExpectedIntensities<IonAnnot>,
         selected_idx: usize,
         index: Arc<IndexedPeaksHandle>,
-        tolerance: Tolerance,
-        smoothing: SmoothingMethod,
+        settings: ChromatogramSettings,
         cancel_token: CancellationToken,
     ) -> ChromatogramComputeResult {
         // Check if cancelled before starting
@@ -620,7 +625,7 @@ impl ViewerApp {
         );
         let rt = timsquery::ResolvedRt::from_mapping(
             selection,
-            &tolerance.rt,
+            &settings.tolerance.rt,
             index.ms1_cycle_mapping(),
         )
         .map_err(|e| format!("Invalid extraction RT: {e:?}"))?;
@@ -639,8 +644,8 @@ impl ViewerApp {
             &mut collector,
             &elution_group,
             &index,
-            &tolerance,
-            &smoothing,
+            &settings.tolerance,
+            &settings.smoothing,
         )
         .map_err(|e| format!("Failed to generate chromatogram: {:?}", e))?;
 
@@ -1635,9 +1640,11 @@ impl<'a> TabViewer for AppTabViewer<'a> {
                         crate::plot_renderer::render_chromatogram_plot(
                             ui,
                             chromatogram,
-                            crate::plot_renderer::PlotMode::PrecursorsOnly,
-                            Some("precursor_fragment_x_axis"),
-                            true,
+                            crate::plot_renderer::ChromatogramPlotOptions {
+                                mode: crate::plot_renderer::PlotMode::PrecursorsOnly,
+                                link_group_id: Some("precursor_fragment_x_axis"),
+                                show_header: true,
+                            },
                             counter,
                             &mode,
                             &ref_lines,
@@ -1673,9 +1680,11 @@ impl<'a> TabViewer for AppTabViewer<'a> {
                         crate::plot_renderer::render_chromatogram_plot(
                             ui,
                             chromatogram,
-                            crate::plot_renderer::PlotMode::FragmentsOnly,
-                            Some("precursor_fragment_x_axis"),
-                            false,
+                            crate::plot_renderer::ChromatogramPlotOptions {
+                                mode: crate::plot_renderer::PlotMode::FragmentsOnly,
+                                link_group_id: Some("precursor_fragment_x_axis"),
+                                show_header: false,
+                            },
                             counter,
                             &mode,
                             &ref_lines,

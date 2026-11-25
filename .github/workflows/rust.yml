@@ -10,6 +10,7 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   CARGO_INCREMENTAL: 0
+  TASK_VERSION: '3.54.0'
 
 jobs:
   build:
@@ -30,17 +31,16 @@ jobs:
           cache-key: ${{ matrix.features }}
           # Keeps the action's `-D warnings` default so PRs fail on what
           # release.yml fails on.
-      - name: Build
-        run: cargo build --verbose -p timsseek ${{ matrix.features }}
-      - name: Run tests
-        run: cargo test --verbose -p timsseek ${{ matrix.features }}
+      - uses: go-task/setup-task@v1
+        with:
+          version: ${{ env.TASK_VERSION }}
+      - name: Build and test timsseek
+        run: task test:timsseek FEATURES='${{ matrix.features }}'
       # timsseek alone misses timscentroid's mzdata ingest, tims_stage staging
       # and the timsquery mobility gate.
       - name: Run reader + staging tests (mzdata)
         if: matrix.features == ''
-        run: |
-          cargo test -p timscentroid --features mzdata
-          cargo test -p tims_stage -p timsquery
+        run: task test:readers
 
   # Crates the timsseek matrix above never compiles. `--all-targets` so examples
   # are built too — that is what let `timsseek_cli/examples/load_bench.rs` rot.
@@ -55,20 +55,77 @@ jobs:
           # Bump when the `-p` list changes: the key ignores it, so a widened
           # build hits the old key and rust-cache saves nothing.
           cache-key: pkgs-cli-sim-viewer
-      - name: Build
-        run: cargo build --verbose -p timsseek_cli -p apex_sim -p timsseek_macros -p rescore_dash -p timsquery_viewer
-      - name: Run tests
-        run: cargo test --verbose -p timsseek_cli -p apex_sim -p timsseek_macros -p rescore_dash -p timsquery_viewer --all-targets
-      # Opt-in, so these call sites compile under no other leg.
-      - name: Type-check (dashboard feature)
-        run: cargo check -p timsseek_cli --features dashboard --all-targets
+      - uses: go-task/setup-task@v1
+        with:
+          version: ${{ env.TASK_VERSION }}
+      - name: Build and test CLI, simulator, macros, dashboard and viewer
+        run: task test:cli-and-sim
       # calibrt compiles in every leg but nothing above runs its tests, and
       # calib_dash is built by no other leg at all. The feature leg is the only
       # one that compiles `calib_dash_hook`'s real arm.
       - name: Run calibrt / calib_dash tests
-        run: cargo test --verbose -p calibrt -p calib_dash
-      - name: Check timsseek_cli with the calib-dashboard feature
-        run: cargo check --verbose -p timsseek_cli --features calib-dashboard --all-targets
+        run: task test:calibration
+      # Opt-in, so these call sites compile under no other leg.
+      - name: Type-check dashboard features
+        run: task check:dashboards
+
+  rust-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: true
+          cache-key: task-rust-tests
+          rustflags: ''
+      - uses: go-task/setup-task@v1
+        with:
+          version: ${{ env.TASK_VERSION }}
+      - run: task test:rust
+
+  python-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - uses: go-task/setup-task@v1
+        with:
+          version: ${{ env.TASK_VERSION }}
+      - run: task test:python
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Setup Clippy
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: clippy
+          cache: true
+          cache-key: task-clippy
+          rustflags: ''
+      - uses: go-task/setup-task@v1
+        with:
+          version: ${{ env.TASK_VERSION }}
+      - run: task clippy
+
+  doc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: true
+          cache-key: task-doc
+          rustflags: ''
+      - uses: go-task/setup-task@v1
+        with:
+          version: ${{ env.TASK_VERSION }}
+      - run: task doc
 
   # The PSI-MS `spectrum origin type` subtree is vendored as generated Rust
   # (`rust/timsquery/src/serde/psims_origin_type.rs`), because no crate in the
@@ -91,8 +148,7 @@ jobs:
         run: python3 scripts/gen_psims_origin_type.py --check
 
   # `rustfmt.toml` uses nightly-only options, so a stable `cargo fmt` reports
-  # hundreds of spurious diffs and a nightly one is the only check that means
-  # anything. `task fmt` is the local spelling; this is the same thing in CI.
+  # hundreds of spurious diffs. `task fmt:check` uses nightly.
   fmt:
     runs-on: ubuntu-latest
     steps:
@@ -104,11 +160,13 @@ jobs:
           components: rustfmt
           cache: false
           rustflags: ''
-      - name: rustfmt
-        run: cargo +nightly fmt --all -- --check
       - uses: astral-sh/setup-uv@v6
-      - name: ruff format
-        run: uv run ruff format --check
+        with:
+          enable-cache: true
+      - uses: go-task/setup-task@v1
+        with:
+          version: ${{ env.TASK_VERSION }}
+      - run: task fmt:check
 
   # `deny.toml` existed for a long time with nothing invoking it, so dependency
   # licensing drifted red unnoticed. This is the gate.
@@ -122,6 +180,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: taiki-e/install-action@v2
         with:
-          command: check
+          tool: cargo-deny@0.20.2
+      - uses: go-task/setup-task@v1
+        with:
+          version: ${{ env.TASK_VERSION }}
+      - run: task license_check
