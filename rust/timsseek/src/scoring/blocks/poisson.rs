@@ -155,16 +155,15 @@ fn top_predicted(
 }
 
 fn sum_intensity(row: &[f32]) -> f64 {
-    let mut chunks = row.chunks_exact(4);
+    let (chunks, remainder) = row.as_chunks::<4>();
     let mut sums = [0.0; 4];
-    for chunk in &mut chunks {
+    for chunk in chunks {
         for (sum, &value) in sums.iter_mut().zip(chunk) {
             *sum += f64::from(value.max(0.0));
         }
     }
     sums.into_iter().sum::<f64>()
-        + chunks
-            .remainder()
+        + remainder
             .iter()
             .map(|&value| f64::from(value.max(0.0)))
             .sum::<f64>()
@@ -249,14 +248,14 @@ fn evaluate_signal<const NEWTON: bool>(
                     information += count * slope * slope;
                 }
             };
-            let mut row_chunks = row.chunks_exact(4);
-            let mut shape_chunks = shape.chunks_exact(4);
-            for (values, weights) in (&mut row_chunks).zip(&mut shape_chunks) {
+            let (row_chunks, row_tail) = row.as_chunks::<4>();
+            let (shape_chunks, shape_tail) = shape.as_chunks::<4>();
+            for (values, weights) in row_chunks.iter().zip(shape_chunks) {
                 for (value, weight) in values.iter().zip(weights) {
                     accumulate(value, weight);
                 }
             }
-            for (value, weight) in row_chunks.remainder().iter().zip(shape_chunks.remainder()) {
+            for (value, weight) in row_tail.iter().zip(shape_tail) {
                 accumulate(value, weight);
             }
         }

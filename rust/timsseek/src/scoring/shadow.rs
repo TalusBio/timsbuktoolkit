@@ -736,11 +736,10 @@ type Fragments = SmallVec<[Fragment; TOP_N_FRAGMENTS]>;
 fn has_overlap(subject: &[Fragment], rival: &[Fragment]) -> bool {
     assert!(subject.len() <= TOP_N_FRAGMENTS);
     assert!(rival.len() <= TOP_N_FRAGMENTS);
-    let chunks = subject.chunks_exact(4);
-    let tail = chunks.remainder();
+    let (chunks, tail) = subject.as_chunks::<4>();
     for other in rival {
         let mut hit = false;
-        for chunk in chunks.clone() {
+        for chunk in chunks {
             hit |= chunk[0].shares_channel(other)
                 | chunk[1].shares_channel(other)
                 | chunk[2].shares_channel(other)

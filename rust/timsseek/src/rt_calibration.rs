@@ -123,7 +123,7 @@ impl MzErrorSamples {
 
 /// The RT tolerance a ridge half-width implies, in minutes, floored at
 /// `floor_minutes` -- the same [`FloorsTriplet::rt_minutes`] that
-/// [`DimensionErrors::derive_windows`] applies to the uniform fallback. The
+/// `DimensionErrors::derive_windows` applies to the uniform fallback. The
 /// per-query search path and a single-number UI must both come through here, or
 /// the window a user is shown is not the window the search would open.
 pub fn rt_tolerance_from_ridge(half_width_seconds: f64, floor_minutes: f32) -> f32 {

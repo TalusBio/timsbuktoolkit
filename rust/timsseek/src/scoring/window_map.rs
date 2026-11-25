@@ -267,8 +267,8 @@ fn project_polygon(
         }
     }
     crossings.sort_unstable_by(f64::total_cmp);
-    let pairs = crossings.chunks_exact(2);
-    assert!(pairs.remainder().is_empty());
+    let (pairs, remainder) = crossings.as_chunks::<2>();
+    assert!(remainder.is_empty());
     for pair in pairs {
         assert!(edge_spans.len() < MAX_EDGE_SPANS);
         edge_spans.push((pair[0], pair[1]));
