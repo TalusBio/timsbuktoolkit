@@ -30,6 +30,7 @@ use crate::data_sources::reference_library::RowHandles;
 use timsquery::models::OwnedSourceId;
 
 use super::apex::ApexConfig;
+use super::denoise::ShapeScratch;
 use super::{
     NUM_MS1_IONS,
     NUM_MS2_IONS,
@@ -41,11 +42,12 @@ use crate::scoring::apex_dsp::SCRIBE_FLOOR;
 use crate::scoring::blocks::apex_evidence::{
     ApexEvidence,
     CoelutionScratch,
-    compute_apex_evidence,
+    compute_apex_evidence_with_traces,
 };
 use crate::scoring::blocks::apex_features::{
+    ApexFeatureScratch,
     ApexFeatures,
-    compute_apex_features,
+    compute_apex_features_with_traces,
     compute_weighted_score,
 };
 use crate::scoring::blocks::counts::ApexCounts;
@@ -289,10 +291,14 @@ pub struct TraceScorer {
     pub traces: ElutionTraces,
     buffers: TraceScorerBuffers,
     coel_scratch: CoelutionScratch,
+    feature_scratch: ApexFeatureScratch,
+    shape: Option<ShapeScratch>,
     cosine_profile: Vec<f32>,
     scribe_profile: Vec<f32>,
     cfg: ApexConfig,
 }
+
+pub const DEFAULT_DENOISE_TRACES: bool = true;
 
 #[derive(Debug)]
 struct TraceScorerBuffers {
@@ -310,7 +316,7 @@ struct TraceScorerBuffers {
     temp_raw_intensity_sum: Vec<f32>,
     /// Scribe pred-norm list, one entry per active expected fragment.
     /// Cleared and re-populated per peptide.
-    pred_norms: Vec<(usize, f32)>,
+    pred_norms: Vec<(u32, f32)>,
 }
 
 impl TraceScorerBuffers {
@@ -345,10 +351,16 @@ impl TraceScorerBuffers {
 
 impl TraceScorer {
     pub fn new(capacity: usize, max_frags: usize) -> Self {
+        Self::with_denoising(capacity, max_frags, false)
+    }
+
+    pub(super) fn with_denoising(capacity: usize, max_frags: usize, denoise_traces: bool) -> Self {
         Self {
             traces: ElutionTraces::new_with_capacity(capacity),
             buffers: TraceScorerBuffers::new(capacity, max_frags),
             coel_scratch: CoelutionScratch::with_frag_capacity(max_frags),
+            feature_scratch: ApexFeatureScratch::new(max_frags),
+            shape: denoise_traces.then(|| ShapeScratch::new(capacity, max_frags)),
             cosine_profile: Vec::with_capacity(capacity),
             scribe_profile: Vec::with_capacity(capacity),
             cfg: ApexConfig::default(),
@@ -382,6 +394,32 @@ impl TraceScorer {
         &mut self,
         scoring_ctx: &Extraction<T>,
     ) -> Result<(), DataProcessingError> {
+        self.compute_raw_traces(scoring_ctx)?;
+        if let Some(shape) = &mut self.shape {
+            let collector = &scoring_ctx.chromatograms;
+            let _ = collector.cycle_offset(); // Assert that both raw axes match.
+            let buffers = &mut self.buffers;
+            shape.refill(
+                &collector.fragments,
+                &self.traces.ms1_precursor_trace,
+                &buffers.pred_norms,
+                [
+                    &mut buffers.temp_ms2_dot_prod,
+                    &mut buffers.temp_ms2_norm_sq_obs,
+                    &mut buffers.temp_raw_intensity_sum,
+                ],
+            );
+        }
+        Ok(())
+    }
+
+    fn compute_raw_traces<T: KeyLike>(
+        &mut self,
+        scoring_ctx: &Extraction<T>,
+    ) -> Result<(), DataProcessingError> {
+        if let Some(shape) = &mut self.shape {
+            shape.invalidate();
+        }
         let n_cycles = scoring_ctx.chromatograms.num_cycles();
 
         self.traces.clear();
@@ -440,10 +478,17 @@ impl TraceScorer {
     /// [`crate::scoring::blocks::apex_evidence::compute_apex_evidence`],
     /// binding the profiles and scratch this scorer already owns.
     pub fn apex_evidence<T: KeyLike>(&mut self, scoring_ctx: &Extraction<T>) -> ApexEvidence {
-        compute_apex_evidence(
+        let fragments = &scoring_ctx.chromatograms.fragments;
+        let shape_rows = self
+            .shape
+            .as_ref()
+            .and_then(|shape| shape.view(fragments))
+            .map_or(&fragments.arr, |shape| shape.fragments);
+        compute_apex_evidence_with_traces(
             &self.cosine_profile,
             &self.scribe_profile,
-            &scoring_ctx.chromatograms.fragments,
+            fragments,
+            shape_rows,
             scoring_ctx
                 .expected_intensities
                 .fragment_intensities
@@ -457,10 +502,10 @@ impl TraceScorer {
     /// `evidence` from [`Self::apex_evidence`].
     /// `suggested` provides peak context for delta/baseline calculations.
     ///
-    /// Takes `&self`: everything here is cycle-local, so a caller may sweep
+    /// Reuses feature scratch across cycles and candidates. A caller may sweep
     /// every cycle off one `compute_traces` + one `apex_evidence`.
     pub fn score_at<T: KeyLike>(
-        &self,
+        &mut self,
         scoring_ctx: &Extraction<T>,
         evidence: &ApexEvidence,
         cycle: usize,
@@ -496,14 +541,17 @@ impl TraceScorer {
         // 11 features at effective apex
         let peak_width_cycles =
             super::apex_dsp::estimate_fwhm(&self.cosine_profile, effective_apex);
-        let features = compute_apex_features(
-            &scoring_ctx.chromatograms.fragments,
+        let fragments = &scoring_ctx.chromatograms.fragments;
+        let shape = self.shape.as_ref().and_then(|shape| shape.view(fragments));
+        let features = compute_apex_features_with_traces(
+            fragments,
             &scoring_ctx.chromatograms.precursors,
             &scoring_ctx.expected_intensities,
-            &self.cosine_profile,
-            &self.traces.ms1_precursor_trace,
+            (&self.cosine_profile, &self.traces.ms1_precursor_trace),
             effective_apex,
             peak_width_cycles,
+            shape,
+            &mut self.feature_scratch,
         );
 
         let score = compute_weighted_score(evidence.apex_evidence, &features);
@@ -569,7 +617,7 @@ impl TraceScorer {
         scoring_ctx: &Extraction<T>,
         rt_mapper: &dyn Fn(usize) -> u32,
     ) -> Result<ApexLocation, DataProcessingError> {
-        self.compute_traces(scoring_ctx)?;
+        self.compute_raw_traces(scoring_ctx)?;
         let cycle_offset = scoring_ctx.chromatograms.cycle_offset();
         self.suggest_apex(rt_mapper, cycle_offset)
     }
@@ -628,6 +676,7 @@ impl TraceScorer {
 
             let sqrt_exp = expected.sqrt();
             ms2_sum_exp += expected;
+            let row_idx = u32::try_from(row_idx).expect("fragment row index fits u32");
             pred_norms.push((row_idx, sqrt_exp));
             pred_sqrt_sum += sqrt_exp;
 
@@ -694,7 +743,7 @@ impl TraceScorer {
             for &(row_idx, pred_norm_i) in pred_norms.iter() {
                 let row = collector
                     .fragments
-                    .get_row_idx(row_idx)
+                    .get_row_idx(usize::try_from(row_idx).expect("fragment row index fits usize"))
                     .expect("row_idx from enumeration must be valid");
                 assert_cycle_width(row.len(), n_cycles);
                 for ((dst, &intensity), &inv) in self
@@ -982,4 +1031,167 @@ pub fn gaussblur_in_place(x: &mut [f32]) {
         prev_val = current_val;
     }
     x[len - 1] = (x[len - 1] * 1.5 + prev_val * 0.5) / NORM;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::scoring::apex_dsp::argmax;
+    use crate::scoring::pipeline::ScoringWorker;
+    use timscentroid::rt_mapping::CycleToRTMapping;
+    use timsquery::models::tolerance::RtTolerance;
+    use timsquery::models::{
+        Array2D,
+        MzMajorIntensityArray,
+    };
+    use timsquery::{
+        ResolvedRt,
+        RtSelection,
+    };
+
+    fn extraction(fragment: &[f32], precursor: &[f32]) -> Extraction<u8> {
+        let cycles = fragment.len();
+        assert_eq!(precursor.len(), cycles);
+        let rt = CycleToRTMapping::new((0..cycles).map(rt_ms).collect());
+        let window =
+            ResolvedRt::from_mapping(RtSelection::FullRun, &RtTolerance::Unrestricted, &rt)
+                .unwrap();
+        Extraction {
+            expected_intensities: ExpectedIntensities::try_from_pairs([(0_u8, 1.0)], [(0, 1.0)])
+                .unwrap(),
+            chromatograms: ChromatogramCollector {
+                mobility_ook0: 1.0,
+                rt: window,
+                precursor_mono_mz: 500.0,
+                precursor_charge: 2,
+                precursor_mz_limits: (500.0, 500.0),
+                precursors: MzMajorIntensityArray {
+                    arr: Array2D::from_flat_vector(precursor.to_vec(), 1, cycles).unwrap(),
+                    mz_order: vec![(0, 500.0)],
+                    cycle_offset: 0,
+                },
+                fragments: MzMajorIntensityArray {
+                    arr: Array2D::from_flat_vector(fragment.to_vec(), 1, cycles).unwrap(),
+                    mz_order: vec![(0_u8, 250.0)],
+                    cycle_offset: 0,
+                },
+                n_precursor_peaks_added: u64::try_from(cycles).unwrap(),
+                n_fragment_peaks_added: u64::try_from(cycles).unwrap(),
+                n_quad_windows_matched: 1,
+            },
+        }
+    }
+
+    fn rt_ms(cycle: usize) -> u32 {
+        u32::try_from(cycle).unwrap() * 1000
+    }
+
+    fn assert_raw_apex_fields_equal(smoothed: &ApexBlocks, raw: &ApexBlocks) {
+        assert_eq!(smoothed.joint_apex_cycle, raw.joint_apex_cycle);
+        assert_eq!(smoothed.retention_time_ms, raw.retention_time_ms);
+        assert_eq!(smoothed.evidence.cosine_au, raw.evidence.cosine_au);
+        assert_eq!(smoothed.evidence.scribe_au, raw.evidence.scribe_au);
+        assert_eq!(
+            smoothed.intensities.ms1_summed_intensity,
+            raw.intensities.ms1_summed_intensity
+        );
+        assert_eq!(
+            smoothed.intensities.ms2_summed_intensity,
+            raw.intensities.ms2_summed_intensity
+        );
+    }
+
+    #[test]
+    fn smoothing_changes_precursor_match_without_moving_joint_apex() {
+        let candidate = extraction(
+            &[0.0, 0.0, 0.0, 21.0, 0.0, 0.0, 0.0],
+            &[7.0, 0.0, 0.0, 8.0, 0.0, 0.0, 0.0],
+        );
+        let mut worker = ScoringWorker::with_denoising(7, 1, true);
+        let mut raw_worker = ScoringWorker::with_denoising(7, 1, false);
+        let raw = raw_worker.scorer.find_apex(&candidate, &rt_ms).unwrap();
+        let smoothed = worker.scorer.find_apex(&candidate, &rt_ms).unwrap();
+        let shape = worker
+            .scorer
+            .shape
+            .as_ref()
+            .unwrap()
+            .view(&candidate.chromatograms.fragments)
+            .unwrap();
+
+        assert_eq!(raw.joint_apex_cycle, 3);
+        assert_eq!(argmax(&worker.scorer.traces.ms1_precursor_trace), 3);
+        assert_eq!(argmax(shape.precursor), 0);
+        assert_raw_apex_fields_equal(&smoothed, &raw);
+        assert!((raw.features.precursor_apex_match - 23.0 / 30.0).abs() < 1e-6);
+        assert!((smoothed.features.precursor_apex_match - 4.0 / 15.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn worker_reuse_invalidates_shape_for_short_and_failed_refills() {
+        let long = extraction(
+            &[0.0, 0.0, 2.0, 0.0, 21.0, 0.0, 2.0, 0.0, 0.0],
+            &[7.0, 0.0, 0.0, 0.0, 8.0, 0.0, 0.0, 0.0, 0.0],
+        );
+        let short = extraction(&[0.0, 17.0, 2.0, 0.0], &[0.0, 10.0, 0.0, 1.0]);
+        let mut worker = ScoringWorker::with_denoising(9, 1, true);
+        let mut raw_worker = ScoringWorker::with_denoising(9, 1, false);
+        let smoothed = worker.scorer.find_apex(&long, &rt_ms).unwrap();
+        let raw = raw_worker.scorer.find_apex(&long, &rt_ms).unwrap();
+        assert_raw_apex_fields_equal(&smoothed, &raw);
+        assert!(
+            worker
+                .scorer
+                .shape
+                .as_ref()
+                .unwrap()
+                .view(&long.chromatograms.fragments)
+                .is_some()
+        );
+        assert!(raw_worker.scorer.shape.is_none());
+
+        let bypassed = worker.scorer.find_apex(&short, &rt_ms).unwrap();
+        let raw = raw_worker.scorer.find_apex(&short, &rt_ms).unwrap();
+        assert_raw_apex_fields_equal(&bypassed, &raw);
+        assert_eq!(
+            bypassed.features.nonlinear_feature_array(),
+            raw.features.nonlinear_feature_array()
+        );
+        assert_eq!(
+            bypassed.evidence.nonlinear_feature_array(),
+            raw.evidence.nonlinear_feature_array()
+        );
+        assert_eq!(bypassed.primary.main_score, raw.primary.main_score);
+        assert!(
+            worker
+                .scorer
+                .shape
+                .as_ref()
+                .unwrap()
+                .view(&short.chromatograms.fragments)
+                .is_none()
+        );
+
+        worker.scorer.compute_traces(&long).unwrap();
+        assert!(
+            worker
+                .scorer
+                .shape
+                .as_ref()
+                .unwrap()
+                .view(&long.chromatograms.fragments)
+                .is_some()
+        );
+        let invalid = extraction(&[f32::INFINITY; 9], &[0.0; 9]);
+        worker.scorer.compute_traces(&invalid).unwrap();
+        assert!(
+            worker
+                .scorer
+                .shape
+                .as_ref()
+                .unwrap()
+                .view(&invalid.chromatograms.fragments)
+                .is_none()
+        );
+    }
 }

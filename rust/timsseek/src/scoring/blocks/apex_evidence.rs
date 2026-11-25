@@ -112,6 +112,24 @@ pub fn compute_apex_evidence<T: KeyLike>(
     expected: &[(T, f32)],
     scratch: &mut CoelutionScratch,
 ) -> ApexEvidence {
+    compute_apex_evidence_with_traces(
+        cosine_profile,
+        scribe_profile,
+        fragments,
+        &fragments.arr,
+        expected,
+        scratch,
+    )
+}
+
+pub(crate) fn compute_apex_evidence_with_traces<T: KeyLike>(
+    cosine_profile: &[f32],
+    scribe_profile: &[f32],
+    fragments: &MzMajorIntensityArray<T, f32>,
+    shape_rows: &Array2D<f32>,
+    expected: &[(T, f32)],
+    scratch: &mut CoelutionScratch,
+) -> ApexEvidence {
     // Independent argmax on each profile
     let cos_apex = argmax(cosine_profile);
     let scr_apex = argmax(scribe_profile);
@@ -121,8 +139,24 @@ pub fn compute_apex_evidence<T: KeyLike>(
     let scr_au = area_uniqueness(scribe_profile, scr_apex, 5);
 
     // Coelution-gradient at each apex -- shares the same scratch.
-    let cos_cg = coelution_gradient(fragments, expected, cos_apex, 20, 10, scratch);
-    let scr_cg = coelution_gradient(fragments, expected, scr_apex, 20, 10, scratch);
+    let cos_cg = coelution_gradient(
+        &fragments.mz_order,
+        shape_rows,
+        expected,
+        cos_apex,
+        20,
+        10,
+        scratch,
+    );
+    let scr_cg = coelution_gradient(
+        &fragments.mz_order,
+        shape_rows,
+        expected,
+        scr_apex,
+        20,
+        10,
+        scratch,
+    );
 
     let apex_evidence = cos_au.au_score * cos_cg.combined * scr_au.au_score * scr_cg.combined;
 
@@ -174,14 +208,15 @@ fn area_uniqueness(signal: &[f32], apex: usize, hw: usize) -> AreaUniquenessResu
 ///
 /// Returns `combined = 1.0` if fewer than 2 active fragments in the window.
 fn coelution_gradient<T: KeyLike>(
-    fragments: &MzMajorIntensityArray<T, f32>,
+    fragment_order: &[(T, f64)],
+    shape_rows: &Array2D<f32>,
     expected: &[(T, f32)],
     apex: usize,
     coelution_hw: usize,
     gradient_hw: usize,
     scratch: &mut CoelutionScratch,
 ) -> CoelutionGradientResult {
-    let n_cycles = fragments.num_cycles();
+    let n_cycles = shape_rows.ncols();
     if n_cycles == 0 {
         // TODO this should be an error
         return CoelutionGradientResult {
@@ -211,7 +246,8 @@ fn coelution_gradient<T: KeyLike>(
 
     // Upper bound on active fragments; we fill contiguous rows and track
     // `n_active_coel` / `n_active_grad` ourselves.
-    let max_frags = fragments.num_ions();
+    let max_frags = fragment_order.len();
+    assert_eq!(shape_rows.nrows(), max_frags);
     scratch.coel_rows.reset_with_value(coel_len, max_frags, 0.0);
     scratch.grad_rows.reset_with_value(diff_len, max_frags, 0.0);
     scratch.weights.clear();
@@ -221,7 +257,7 @@ fn coelution_gradient<T: KeyLike>(
     let mut n_active_coel: usize = 0;
     let mut n_active_grad: usize = 0;
 
-    for ((key, _mz), chrom) in fragments.iter_mzs() {
+    for ((key, _mz), chrom) in fragment_order.iter().zip(shape_rows.iter_rows()) {
         let y_hat = linear_get(expected, key).unwrap_or(0.0);
         if y_hat <= 0.0 {
             continue;
@@ -401,7 +437,15 @@ mod tests {
         let expected: Vec<(String, f32)> = vec![("a".to_string(), 1.0), ("b".to_string(), 1.0)];
 
         let mut scratch = CoelutionScratch::with_frag_capacity(16);
-        let result = coelution_gradient(&fragments, &expected, 20, 20, 10, &mut scratch);
+        let result = coelution_gradient(
+            &fragments.mz_order,
+            &fragments.arr,
+            &expected,
+            20,
+            20,
+            10,
+            &mut scratch,
+        );
 
         // Identical traces => correlation should be ~1.0
         assert!(
@@ -437,7 +481,15 @@ mod tests {
         let expected: Vec<(String, f32)> = vec![("a".to_string(), 1.0), ("b".to_string(), 1.0)];
 
         let mut scratch = CoelutionScratch::with_frag_capacity(16);
-        let result = coelution_gradient(&fragments, &expected, 20, 20, 10, &mut scratch);
+        let result = coelution_gradient(
+            &fragments.mz_order,
+            &fragments.arr,
+            &expected,
+            20,
+            20,
+            10,
+            &mut scratch,
+        );
         // Anti-correlated: wcoel should be negative or near zero
         assert!(
             result.weighted_coelution < 0.5,
@@ -461,7 +513,15 @@ mod tests {
         let expected: Vec<(String, f32)> = vec![("a".to_string(), 1.0)];
 
         let mut scratch = CoelutionScratch::with_frag_capacity(16);
-        let result = coelution_gradient(&fragments, &expected, 20, 20, 10, &mut scratch);
+        let result = coelution_gradient(
+            &fragments.mz_order,
+            &fragments.arr,
+            &expected,
+            20,
+            20,
+            10,
+            &mut scratch,
+        );
         assert!(
             (result.combined - 1.0).abs() < 1e-6,
             "single fragment => combined should be 1.0, got {}",

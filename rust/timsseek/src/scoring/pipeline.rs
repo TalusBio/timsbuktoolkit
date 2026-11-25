@@ -146,8 +146,16 @@ pub struct ScoringWorker {
 
 impl ScoringWorker {
     pub fn new(num_cycles: usize, max_frags: usize) -> Self {
+        Self::with_denoising(num_cycles, max_frags, false)
+    }
+
+    pub(super) fn with_denoising(
+        num_cycles: usize,
+        max_frags: usize,
+        denoise_traces: bool,
+    ) -> Self {
         Self {
-            scorer: TraceScorer::new(num_cycles, max_frags),
+            scorer: TraceScorer::with_denoising(num_cycles, max_frags, denoise_traces),
             extraction: None,
             inner_collector: None,
             isotope_collector: None,
@@ -573,6 +581,9 @@ pub struct Scorer<I: ScorerQueriable> {
     /// m/z range where peptides were fragmented.
     /// Queries with precursors outside this range are filtered out.
     pub fragmented_range: TupleRange<f64>,
+
+    /// Smooth chromatograms for Phase 3 shape and coelution features.
+    pub denoise_traces: bool,
 }
 
 impl<I: ScorerQueriable> Scorer<I> {
@@ -1047,12 +1058,8 @@ impl<I: ScorerQueriable> Scorer<I> {
             let lims = TupleRange::try_new(tmp.0, tmp.1).expect("Should already be ordered");
             self.fragmented_range.intersects(lims)
         };
-        // Pre-scan so scratch capacity holds every peptide -- no realloc in hot path.
-        let max_frags = flats
-            .iter()
-            .map(|&f| get_item(f).fragment_count())
-            .max()
-            .unwrap_or(0);
+        // All Phase 3 extractions retain at most this many fragment rows.
+        let max_frags = TOP_N_FRAGMENTS;
 
         // One-shot count of pre-filter rejects. filter_fn is cheap (range check);
         // a second pass keeps the rayon hot loop free of synchronised counters.
@@ -1071,7 +1078,7 @@ impl<I: ScorerQueriable> Scorer<I> {
                         "worker init: ScoringWorker + IonSearchAccumulator"
                     );
                     (
-                        ScoringWorker::new(num_cycles, max_frags),
+                        ScoringWorker::with_denoising(num_cycles, max_frags, self.denoise_traces),
                         IonSearchAccumulator::default(),
                     )
                 },

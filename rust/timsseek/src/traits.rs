@@ -47,6 +47,7 @@ use timsquery::{
 ///     index: peaks,
 ///     broad_tolerance: broad_tol,
 ///     fragmented_range,
+///     denoise_traces: true,
 /// };
 ///
 /// // Scorer can now use ChromatogramCollector, SpectralCollector variants

@@ -20,6 +20,9 @@
 ## Number of peptides scored per chunk. Bigger = more parallelism, more RAM.
 chunk_size = 20000
 
+## Smooth extracted traces for chromatographic shape and coelution features.
+denoise_traces = true
+
 ## Decoy generation strategy.
 ## "if_missing"  -- generate ±CH2 mass-shift decoys when the library has none
 ## "force"       -- always generate decoys (replace any existing ones)

@@ -616,6 +616,7 @@ mod tests {
             index: EmptyIndex(CycleToRTMapping::new(vec![0, 1_000])),
             broad_tolerance: Default::default(),
             fragmented_range: (400.0, 600.0).try_into().unwrap(),
+            denoise_traces: true,
         };
         let batch: Vec<_> = library.geometry().flats().collect();
         let (scored, _, skips) = scorer.score_traced_batch(&library, &batch, None, &trace.phase3);

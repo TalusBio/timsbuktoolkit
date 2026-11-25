@@ -7,7 +7,10 @@
 //! (`compute_weighted_score`).
 //! Reusable numeric primitives it leans on live in `crate::scoring::apex_dsp`.
 
-use timsquery::models::MzMajorIntensityArray;
+use timsquery::models::{
+    Array2D,
+    MzMajorIntensityArray,
+};
 use timsquery::traits::KeyLike;
 use timsseek_macros::ScoreBlock;
 
@@ -15,9 +18,10 @@ use crate::models::ExpectedIntensities;
 use crate::models::query_item::linear_get;
 use crate::scoring::apex_dsp::{
     argmax,
-    build_gaussian_reference,
+    fill_gaussian_reference,
     pearson_correlation,
 };
+use crate::scoring::denoise::ShapeTraces;
 
 /// The 11 apex-local features.
 /// Stage: apex (computed while chromatogram buffers are live).
@@ -47,6 +51,29 @@ pub struct ApexFeatures {
     pub per_frag_gaussian_corr: f32,
 }
 
+const PEAK_SHAPE_HALF_WIDTH: usize = 10;
+const PRECURSOR_COELUTION_HALF_WIDTH: usize = 10;
+const GAUSSIAN_HALF_WIDTH: usize = 15;
+
+#[derive(Debug)]
+pub(in crate::scoring) struct ApexFeatureScratch {
+    left_flank: [f32; PEAK_SHAPE_HALF_WIDTH],
+    fragment_sum: [f32; 2 * PRECURSOR_COELUTION_HALF_WIDTH + 1],
+    gaussian: [f32; 2 * GAUSSIAN_HALF_WIDTH + 1],
+    ratios: Vec<f32>,
+}
+
+impl ApexFeatureScratch {
+    pub(in crate::scoring) fn new(fragment_capacity: usize) -> Self {
+        Self {
+            left_flank: [0.0; PEAK_SHAPE_HALF_WIDTH],
+            fragment_sum: [0.0; 2 * PRECURSOR_COELUTION_HALF_WIDTH + 1],
+            gaussian: [0.0; 2 * GAUSSIAN_HALF_WIDTH + 1],
+            ratios: Vec::with_capacity(fragment_capacity),
+        }
+    }
+}
+
 /// Compute all 11 apex-local features at the apex.
 ///
 /// `fragments` and `precursors` are the raw chromatogram data.
@@ -64,14 +91,47 @@ pub fn compute_apex_features<T: KeyLike + Default>(
     joint_apex: usize,
     peak_width_cycles: f32,
 ) -> ApexFeatures {
+    compute_apex_features_with_traces(
+        fragments,
+        precursors,
+        expected,
+        (cosine_profile, precursor_trace),
+        joint_apex,
+        peak_width_cycles,
+        None,
+        &mut ApexFeatureScratch::new(fragments.num_ions()),
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+pub(in crate::scoring) fn compute_apex_features_with_traces<T: KeyLike + Default>(
+    fragments: &MzMajorIntensityArray<T, f32>,
+    precursors: &MzMajorIntensityArray<i8, f32>,
+    expected: &ExpectedIntensities<T>,
+    raw_profiles: (&[f32], &[f32]),
+    joint_apex: usize,
+    peak_width_cycles: f32,
+    shape: Option<ShapeTraces<'_>>,
+    scratch: &mut ApexFeatureScratch,
+) -> ApexFeatures {
     let apex = joint_apex;
-    let n_cycles = cosine_profile.len();
+    let (raw_cosine, raw_precursor) = raw_profiles;
+    let n_cycles = raw_cosine.len();
+    let (shape_rows, cosine_profile, precursor_trace) = shape
+        .map_or((&fragments.arr, raw_cosine, raw_precursor), |shape| {
+            (shape.fragments, shape.cosine, shape.precursor)
+        });
 
     // ---- Peak Shape ----
-    let peak_shape = compute_peak_shape(cosine_profile, apex, 10);
+    let peak_shape = compute_peak_shape(cosine_profile, apex, &mut scratch.left_flank);
 
     // ---- Ratio CV ----
-    let ratio_cv = compute_ratio_cv(fragments, expected.fragment_intensities.as_slice(), apex);
+    let ratio_cv = compute_ratio_cv(
+        fragments,
+        expected.fragment_intensities.as_slice(),
+        apex,
+        &mut scratch.ratios,
+    );
 
     // ---- Centered Apex ----
     let centered_apex = if n_cycles > 0 {
@@ -82,31 +142,42 @@ pub fn compute_apex_features<T: KeyLike + Default>(
     };
 
     // ---- Precursor Coelution ----
-    let precursor_coelution =
-        compute_precursor_coelution(fragments, precursor_trace, apex, 10, n_cycles);
+    let precursor_coelution = compute_precursor_coelution(
+        shape_rows,
+        precursor_trace,
+        apex,
+        n_cycles,
+        &mut scratch.fragment_sum,
+    );
 
     // ---- Fragment Coverage ----
     let fragment_coverage = compute_fragment_coverage(fragments, apex);
 
     // ---- Precursor Apex Match ----
-    let precursor_apex_match = compute_precursor_apex_match(precursor_trace, apex, n_cycles);
+    let precursor_apex_match =
+        compute_precursor_apex_match(precursor_trace, raw_precursor, apex, n_cycles);
 
     // ---- XIC Quality ----
-    let xic_quality = compute_xic_quality(fragments, apex, 8);
+    let xic_quality = compute_xic_quality(shape_rows, apex, 8);
 
     // ---- Fragment Apex Agreement ----
-    let fragment_apex_agreement = compute_fragment_apex_agreement(fragments, apex);
+    let fragment_apex_agreement = compute_fragment_apex_agreement(shape_rows, apex);
 
     // ---- Isotope Correlation ----
     let isotope_correlation =
         compute_isotope_correlation(precursors, expected.precursor_intensities.as_slice(), apex);
 
     // ---- Gaussian Correlation ----
-    let gaussian_correlation =
-        compute_gaussian_correlation(cosine_profile, apex, 15, peak_width_cycles);
+    let gaussian_correlation = compute_gaussian_correlation(
+        cosine_profile,
+        apex,
+        peak_width_cycles,
+        &mut scratch.gaussian,
+    );
 
     // ---- Per-Fragment Gaussian Correlation ----
-    let per_frag_gaussian_corr = compute_per_frag_gaussian_corr(fragments, apex, 10);
+    let per_frag_gaussian_corr =
+        compute_per_frag_gaussian_corr(shape_rows, apex, 10, &mut scratch.gaussian);
 
     ApexFeatures {
         peak_shape,
@@ -154,7 +225,12 @@ pub fn compute_weighted_score(base: f32, features: &ApexFeatures) -> f32 {
 // ---------------------------------------------------------------------------
 
 /// Peak shape = 0.5 * symmetry + 0.5 * sharpness.
-fn compute_peak_shape(profile: &[f32], apex: usize, hw: usize) -> f32 {
+fn compute_peak_shape(
+    profile: &[f32],
+    apex: usize,
+    left_flank: &mut [f32; PEAK_SHAPE_HALF_WIDTH],
+) -> f32 {
+    let hw = PEAK_SHAPE_HALF_WIDTH;
     let n = profile.len();
     if n == 0 {
         return 0.5;
@@ -172,9 +248,15 @@ fn compute_peak_shape(profile: &[f32], apex: usize, hw: usize) -> f32 {
     }
 
     // Symmetry: Pearson correlation between left flank (reversed) and right flank
-    let left_rev: Vec<f32> = (0..flank_len).map(|i| profile[apex - 1 - i]).collect();
-    let right: Vec<f32> = (0..flank_len).map(|i| profile[apex + 1 + i]).collect();
-    let symmetry = pearson_correlation(&left_rev, &right).clamp(0.0, 1.0);
+    let left_rev = &mut left_flank[..flank_len];
+    for (dst, &value) in left_rev
+        .iter_mut()
+        .zip(profile[apex - flank_len..apex].iter().rev())
+    {
+        *dst = value;
+    }
+    let right = &profile[apex + 1..apex + 1 + flank_len];
+    let symmetry = pearson_correlation(left_rev, right).clamp(0.0, 1.0);
 
     // Sharpness: 1 - mean(edges) / peak
     let peak_val = profile[apex];
@@ -193,13 +275,15 @@ fn compute_ratio_cv<T: KeyLike>(
     fragments: &MzMajorIntensityArray<T, f32>,
     expected: &[(T, f32)],
     apex: usize,
+    ratios: &mut Vec<f32>,
 ) -> f32 {
     let n_cycles = fragments.num_cycles();
     if apex >= n_cycles {
         return 0.0;
     }
 
-    let mut ratios = Vec::new();
+    ratios.clear();
+    ratios.reserve(fragments.num_ions());
     for ((key, _mz), chrom) in fragments.iter_mzs() {
         let y_hat = linear_get(expected, key).unwrap_or(0.0);
         if y_hat > 0.0 && apex < chrom.len() && chrom[apex] > 0.0 {
@@ -222,13 +306,14 @@ fn compute_ratio_cv<T: KeyLike>(
 
 /// Precursor coelution: Pearson correlation between precursor trace and summed
 /// fragment trace in a +/-hw window around apex.
-fn compute_precursor_coelution<T: KeyLike>(
-    fragments: &MzMajorIntensityArray<T, f32>,
+fn compute_precursor_coelution(
+    fragments: &Array2D<f32>,
     precursor_trace: &[f32],
     apex: usize,
-    hw: usize,
     n_cycles: usize,
+    fragment_sum: &mut [f32; 2 * PRECURSOR_COELUTION_HALF_WIDTH + 1],
 ) -> f32 {
+    let hw = PRECURSOR_COELUTION_HALF_WIDTH;
     let lo = apex.saturating_sub(hw);
     let hi = (apex + hw + 1).min(n_cycles);
     if hi <= lo || hi > precursor_trace.len() {
@@ -237,8 +322,9 @@ fn compute_precursor_coelution<T: KeyLike>(
 
     // Sum fragment traces in the window
     let win_len = hi - lo;
-    let mut frag_sum = vec![0.0f32; win_len];
-    for ((_key, _mz), chrom) in fragments.iter_mzs() {
+    let frag_sum = &mut fragment_sum[..win_len];
+    frag_sum.fill(0.0);
+    for chrom in fragments.iter_rows() {
         let avail = chrom.len().saturating_sub(lo).min(win_len);
         let chrom_win = &chrom[lo..lo + avail];
         for (sum, &x) in frag_sum.iter_mut().zip(chrom_win.iter()) {
@@ -247,7 +333,7 @@ fn compute_precursor_coelution<T: KeyLike>(
     }
 
     let prec_win = &precursor_trace[lo..hi];
-    pearson_correlation(prec_win, &frag_sum).max(0.0)
+    pearson_correlation(prec_win, frag_sum).max(0.0)
 }
 
 /// Fragment coverage: fraction of fragments with nonzero intensity at apex.
@@ -269,13 +355,18 @@ fn compute_fragment_coverage<T: KeyLike>(
 }
 
 /// Precursor apex match = 0.5 * proximity + 0.5 * fraction.
-fn compute_precursor_apex_match(precursor_trace: &[f32], apex: usize, n_cycles: usize) -> f32 {
-    if precursor_trace.is_empty() || n_cycles == 0 {
+fn compute_precursor_apex_match(
+    precursor_shape: &[f32],
+    raw_precursor: &[f32],
+    apex: usize,
+    n_cycles: usize,
+) -> f32 {
+    if raw_precursor.is_empty() || n_cycles == 0 {
         return 0.0;
     }
 
     // Proximity: max(0, 1 - |t*_P - t*| / (T/4))
-    let prec_apex = argmax(precursor_trace);
+    let prec_apex = argmax(precursor_shape);
     let quarter = n_cycles as f32 / 4.0;
     let proximity = if quarter > 0.0 {
         (1.0 - (prec_apex as f32 - apex as f32).abs() / quarter).max(0.0)
@@ -284,9 +375,9 @@ fn compute_precursor_apex_match(precursor_trace: &[f32], apex: usize, n_cycles: 
     };
 
     // Fraction: P(t*) / sum(P)
-    let total_p: f32 = precursor_trace.iter().sum();
-    let fraction = if total_p > 0.0 && apex < precursor_trace.len() {
-        precursor_trace[apex] / total_p
+    let total_p: f32 = raw_precursor.iter().sum();
+    let fraction = if total_p > 0.0 && apex < raw_precursor.len() {
+        raw_precursor[apex] / total_p
     } else {
         0.0
     };
@@ -299,13 +390,9 @@ fn compute_precursor_apex_match(precursor_trace: &[f32], apex: usize, n_cycles: 
 ///   alignment = max(0, 1 - d_i / (w/2))
 ///   sharpness = 1 - mean(edges) / peak
 ///   xic_i = 0.5 * alignment + 0.5 * sharpness
-fn compute_xic_quality<T: KeyLike>(
-    fragments: &MzMajorIntensityArray<T, f32>,
-    apex: usize,
-    hw: usize,
-) -> f32 {
-    let n_cycles = fragments.num_cycles();
-    let n_frags = fragments.num_ions();
+fn compute_xic_quality(fragments: &Array2D<f32>, apex: usize, hw: usize) -> f32 {
+    let n_cycles = fragments.ncols();
+    let n_frags = fragments.nrows();
     if n_frags == 0 || n_cycles == 0 {
         return 0.0;
     }
@@ -321,7 +408,7 @@ fn compute_xic_quality<T: KeyLike>(
     let half_w = win_len as f32 / 2.0;
     let mut sum_quality = 0.0f32;
 
-    for ((_key, _mz), chrom) in fragments.iter_mzs() {
+    for chrom in fragments.iter_rows() {
         let window = &chrom[lo..hi];
 
         // Find local max in window
@@ -345,7 +432,7 @@ fn compute_xic_quality<T: KeyLike>(
 
         // Sharpness: 1 - mean(edges) / peak
         let edge_mean = (window[0] + window[win_len - 1]) * 0.5;
-        let sharpness = (1.0 - edge_mean / local_max_val).max(0.0);
+        let sharpness = (1.0 - edge_mean / local_max_val).clamp(0.0, 1.0);
 
         sum_quality += 0.5 * alignment + 0.5 * sharpness;
     }
@@ -355,17 +442,14 @@ fn compute_xic_quality<T: KeyLike>(
 
 /// Fragment apex agreement: fraction of fragments whose argmax is within +/-2
 /// of the joint apex.
-fn compute_fragment_apex_agreement<T: KeyLike>(
-    fragments: &MzMajorIntensityArray<T, f32>,
-    apex: usize,
-) -> f32 {
-    let n_frags = fragments.num_ions();
-    if n_frags == 0 {
+fn compute_fragment_apex_agreement(fragments: &Array2D<f32>, apex: usize) -> f32 {
+    let n_frags = fragments.nrows();
+    if n_frags == 0 || fragments.ncols() == 0 {
         return 0.0;
     }
 
     let mut count = 0u32;
-    for ((_key, _mz), chrom) in fragments.iter_mzs() {
+    for chrom in fragments.iter_rows() {
         // Single pass: find argmax and check if max > 0
         let (frag_apex, max_val) = chrom.iter().enumerate().fold(
             (0usize, 0.0f32),
@@ -435,7 +519,13 @@ fn compute_isotope_correlation(
 /// and an ideal Gaussian centered at the apex.
 ///
 /// sigma is estimated from the observed FWHM: sigma = FWHM / 2.355
-fn compute_gaussian_correlation(profile: &[f32], apex: usize, hw: usize, fwhm: f32) -> f32 {
+fn compute_gaussian_correlation(
+    profile: &[f32],
+    apex: usize,
+    fwhm: f32,
+    gaussian: &mut [f32; 2 * GAUSSIAN_HALF_WIDTH + 1],
+) -> f32 {
+    let hw = GAUSSIAN_HALF_WIDTH;
     let n = profile.len();
     if n == 0 {
         return 0.0;
@@ -449,22 +539,24 @@ fn compute_gaussian_correlation(profile: &[f32], apex: usize, hw: usize, fwhm: f
     }
 
     let sigma = (fwhm / 2.355).max(0.5);
-    let gaussian = build_gaussian_reference(win_len, lo, apex, sigma);
+    let gaussian = &mut gaussian[..win_len];
+    fill_gaussian_reference(gaussian, lo, apex, sigma);
 
     let window = &profile[lo..hi];
-    pearson_correlation(window, &gaussian).max(0.0)
+    pearson_correlation(window, gaussian).max(0.0)
 }
 
 /// Per-fragment Gaussian correlation: mean per-fragment correlation with a Gaussian
 /// reference (inspired by Beta-DIA).
 ///
 /// sigma = max(window_size / 6, 1)
-fn compute_per_frag_gaussian_corr<T: KeyLike>(
-    fragments: &MzMajorIntensityArray<T, f32>,
+fn compute_per_frag_gaussian_corr(
+    fragments: &Array2D<f32>,
     apex: usize,
     hw: usize,
+    gaussian: &mut [f32; 2 * GAUSSIAN_HALF_WIDTH + 1],
 ) -> f32 {
-    let n_cycles = fragments.num_cycles();
+    let n_cycles = fragments.ncols();
     if n_cycles == 0 {
         return 0.0;
     }
@@ -477,18 +569,19 @@ fn compute_per_frag_gaussian_corr<T: KeyLike>(
     }
 
     let sigma = (win_len as f32 / 6.0).max(1.0);
-    let gaussian = build_gaussian_reference(win_len, lo, apex, sigma);
+    let gaussian = &mut gaussian[..win_len];
+    fill_gaussian_reference(gaussian, lo, apex, sigma);
 
     let mut sum_corr = 0.0f32;
     let mut n_active = 0u32;
 
-    for ((_key, _mz), chrom) in fragments.iter_mzs() {
+    for chrom in fragments.iter_rows() {
         let max_val = chrom.iter().copied().fold(0.0f32, f32::max);
         if max_val <= 0.0 {
             continue;
         }
         let window = &chrom[lo..hi];
-        let corr = pearson_correlation(window, &gaussian).max(0.0);
+        let corr = pearson_correlation(window, gaussian).max(0.0);
         sum_corr += corr;
         n_active += 1;
     }
@@ -550,7 +643,7 @@ mod tests {
             ("c".to_string(), 3.0),
             ("d".to_string(), 4.0),
         ];
-        let cv = compute_ratio_cv(&fragments, &expected, 1);
+        let cv = compute_ratio_cv(&fragments, &expected, 1, &mut Vec::with_capacity(4));
         assert!(
             (cv - 1.0).abs() < 1e-6,
             "uniform ratios => cv should be 1.0, got {}",

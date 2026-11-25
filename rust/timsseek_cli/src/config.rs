@@ -13,6 +13,7 @@ use timsquery::{
 };
 use timsseek::ml::RescoreModel;
 use timsseek::scoring::CalibrationConfig;
+use timsseek::scoring::apex_finding::DEFAULT_DENOISE_TRACES;
 use timsseek::{
     DecoyPolicy,
     UnannotatedPeaks,
@@ -255,6 +256,13 @@ pub struct AnalysisConfig {
 
     #[serde(default)]
     pub rescore_model: RescoreModel,
+
+    #[serde(default = "default_denoise_traces")]
+    pub denoise_traces: bool,
+}
+
+fn default_denoise_traces() -> bool {
+    DEFAULT_DENOISE_TRACES
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -341,6 +349,7 @@ rt = "Unrestricted"
     fn parses_minimal_toml() {
         let c: Config = toml::from_str(MINIMAL_TOML).unwrap();
         assert_eq!(c.analysis.chunk_size, 20000);
+        assert!(c.analysis.denoise_traces);
         let tolerance = c.analysis.tolerance;
         assert_eq!(
             tolerance.ms1,
@@ -527,11 +536,19 @@ rt = "Unrestricted"
             "provenance is recorded by a run, so the template must not mention it"
         );
         assert!(c.analysis.raw_inputs.is_none());
+        assert_eq!(c.analysis.denoise_traces, DEFAULT_DENOISE_TRACES);
 
         assert_eq!(
             serde_json::to_string(&c.calibration).unwrap(),
             serde_json::to_string(&CalibrationConfig::default()).unwrap(),
             "[calibration] in default_config.toml drifted from CalibrationConfig::default()"
         );
+    }
+
+    #[test]
+    fn trace_denoising_can_be_disabled() {
+        let config = MINIMAL_TOML.replace("[analysis]", "[analysis]\ndenoise_traces = false");
+        let c: Config = toml::from_str(&config).unwrap();
+        assert!(!c.analysis.denoise_traces);
     }
 }

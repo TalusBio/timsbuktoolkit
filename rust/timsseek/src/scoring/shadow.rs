@@ -1433,6 +1433,7 @@ mod tests {
                 ..Default::default()
             },
             fragmented_range: (490.0, 510.0).try_into().unwrap(),
+            denoise_traces: false,
         };
         let run = scorer.prepare_shadows(None).unwrap().unwrap();
         let make = |row: usize| {
@@ -1577,6 +1578,7 @@ mod tests {
                 ..Default::default()
             },
             fragmented_range: (490.0, 510.0).try_into().unwrap(),
+            denoise_traces: false,
         };
         let run = scorer.prepare_shadows(None).unwrap().unwrap();
         let mut rows: Vec<_> = library

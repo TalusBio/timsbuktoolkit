@@ -3,6 +3,7 @@ pub mod apex;
 pub(crate) mod apex_dsp;
 pub mod apex_finding;
 pub mod blocks;
+mod denoise;
 pub mod extraction;
 pub mod offsets;
 pub mod parquet_writer;

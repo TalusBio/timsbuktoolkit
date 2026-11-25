@@ -1107,6 +1107,7 @@ mod tests {
                     ..Default::default()
                 },
                 fragmented_range: timsquery::utils::TupleRange::try_new(100.0, 1000.0).unwrap(),
+                denoise_traces: true,
             };
             let candidate = || CalibrantCandidate {
                 score: 20.0,

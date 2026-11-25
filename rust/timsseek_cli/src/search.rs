@@ -304,6 +304,7 @@ impl SearchRun<'_> {
             index,
             broad_tolerance: self.config.analysis.tolerance.clone(),
             fragmented_range,
+            denoise_traces: self.config.analysis.denoise_traces,
         };
 
         let file_stem = sample_name_from_uri(raw_uri).ok_or_else(|| errors::CliError::Io {
