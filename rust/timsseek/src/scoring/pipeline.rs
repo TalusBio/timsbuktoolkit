@@ -24,21 +24,29 @@
 //! 2. **Calibrated scoring** (Phase 3): Narrow calibrated extraction + `find_apex` + secondary query.
 
 use crate::data_sources::reference_library::{
+    ExpectedIntensity,
     RefQuery,
     ReferenceLibrary,
     RowHandles,
     ScoredIdentity,
 };
 use crate::errors::DataProcessingError;
+use crate::rt_calibration::{
+    CalibrationResult,
+    LibraryRT,
+    ObservedRTSeconds,
+};
 use crate::{
     IonAnnot,
     ScorerQueriable,
     timed,
 };
+use std::collections::HashMap;
 use std::hash::{
     Hash,
     Hasher,
 };
+use std::sync::Mutex;
 use timscentroid::rt_mapping::{
     MS1CycleIndex,
     RTIndex,
@@ -51,11 +59,13 @@ use timsquery::{
     ExtractionQuery,
     KeyLike,
     MzMobilityStatsCollector,
+    PeakTolerance,
     ResolvedRt,
     RtSelection,
     SpectralCollector,
     Tolerance,
 };
+use tracing::warn;
 
 use super::accumulator::IonSearchAccumulator;
 use super::apex_finding::{
@@ -65,6 +75,10 @@ use super::apex_finding::{
     RelativeIntensityCollector,
     TraceScorer,
 };
+use super::blocks::poisson::{
+    PoissonEvidence,
+    compute_poisson_evidence,
+};
 use super::hyperscore::single_lazyscore;
 use super::offsets::MzMobilityOffsets;
 use super::results::{
@@ -72,6 +86,7 @@ use super::results::{
     ScoredCandidate,
     ScoringFields,
 };
+pub use super::shadow::ShadowRun;
 use super::skip::{
     SkipCounts,
     SkipReason,
@@ -83,17 +98,41 @@ use super::timings::{
     ScoreTimings,
 };
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Phase3Stage {
+    #[default]
+    PrecursorRange,
+    ExpectedFragments,
+    Extraction,
+    Apex,
+    Finalize,
+    Scored,
+}
+
+/// One selected scoring slot's Phase 3 outcome. The caller preallocates slots
+/// so scoring records only requested candidates, including prefilter rejects.
+#[derive(Debug, Default)]
+pub struct Phase3Trace {
+    pub stage: Phase3Stage,
+    pub skip: Option<SkipReason>,
+    pub rt_window: Option<ResolvedRt>,
+    pub main_score: Option<f32>,
+    pub apex_rt_seconds: Option<f32>,
+    pub matched_fragments: Option<u8>,
+}
+
 struct CandidateIdentity {
+    flat: FlatIdx,
     handles: RowHandles,
     source_id: timsquery::models::OwnedSourceId,
     is_target: bool,
 }
-use crate::rt_calibration::{
-    CalibrationResult,
-    LibraryRT,
-    ObservedRTSeconds,
-};
-use tracing::warn;
+
+#[derive(Clone, Copy)]
+struct BatchScoring<'a, 'index> {
+    calibration: Option<&'a CalibrationResult>,
+    shadow: Option<&'a ShadowRun<'index>>,
+}
 
 /// Per-rayon-worker scoring state. Holds a `TraceScorer` plus reusable scratch:
 /// - `Extraction` slot (ChromatogramCollector reset-and-reused, not reallocated)
@@ -107,8 +146,16 @@ pub struct ScoringWorker {
 
 impl ScoringWorker {
     pub fn new(num_cycles: usize, max_frags: usize) -> Self {
+        Self::with_denoising(num_cycles, max_frags, false)
+    }
+
+    pub(super) fn with_denoising(
+        num_cycles: usize,
+        max_frags: usize,
+        denoise_traces: bool,
+    ) -> Self {
         Self {
-            scorer: TraceScorer::new(num_cycles, max_frags),
+            scorer: TraceScorer::with_denoising(num_cycles, max_frags, denoise_traces),
             extraction: None,
             inner_collector: None,
             isotope_collector: None,
@@ -361,6 +408,7 @@ impl CalibrantHeap {
 pub struct CalibrationConfig {
     pub n_calibrants: usize,
     pub grid_size: usize,
+    /// Accepted for older configs. The m/z mixture uses a fixed 3 sigma.
     pub mz_sigma: f32,
     pub mobility_sigma: f32,
     pub rt_sigma_factor: f32,
@@ -533,6 +581,9 @@ pub struct Scorer<I: ScorerQueriable> {
     /// m/z range where peptides were fragmented.
     /// Queries with precursors outside this range are filtered out.
     pub fragmented_range: TupleRange<f64>,
+
+    /// Smooth chromatograms for Phase 3 shape and coelution features.
+    pub denoise_traces: bool,
 }
 
 impl<I: ScorerQueriable> Scorer<I> {
@@ -635,6 +686,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         metadata: &super::apex_finding::CandidateMetadata,
         nqueries: u8,
         apex: ApexBlocks,
+        poisson: PoissonEvidence,
         inner_collector: &SpectralCollector<IonAnnot, MzMobilityStatsCollector>,
         isotope_collector: Option<&SpectralCollector<IonAnnot, f32>>,
     ) -> Result<ScoredCandidate, DataProcessingError> {
@@ -649,6 +701,7 @@ impl<I: ScorerQueriable> Scorer<I> {
             secondary_lazy,
             nqueries,
             apex,
+            poisson,
         });
 
         // No searchable mobility axis (mzML/FAIMS) → the observed mobility is a
@@ -656,7 +709,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         if !self.index.mobility_kind().is_scoreable() {
             scoring.neutralize_mobility();
         }
-        Ok(ScoredCandidate { scoring })
+        Ok(ScoredCandidate::new(scoring))
     }
 }
 
@@ -747,15 +800,25 @@ impl<I: ScorerQueriable> Scorer<I> {
         feature = "instrumentation",
         tracing::instrument(skip_all, level = "trace")
     )]
-    fn score_extraction(
+    fn score_extraction<const TRACE: bool>(
         &self,
         query: &RefQuery<'_>,
         identity: CandidateIdentity,
-        calibration: Option<&CalibrationResult>,
+        batch: BatchScoring<'_, '_>,
         worker: &mut ScoringWorker,
         timings: &mut ScoreTimings,
+        mut trace: Option<&mut Phase3Trace>,
     ) -> Result<ScoredCandidate, SkipReason> {
+        let calibration = batch.calibration;
+        let flat = identity.flat;
+        if TRACE && let Some(trace) = trace.as_deref_mut() {
+            trace.stage = Phase3Stage::ExpectedFragments;
+        }
         gate_expected_fragments(query)?;
+
+        if TRACE && let Some(trace) = trace.as_deref_mut() {
+            trace.stage = Phase3Stage::Extraction;
+        }
 
         let metadata = timed!(
             timings.extraction,
@@ -796,21 +859,56 @@ impl<I: ScorerQueriable> Scorer<I> {
                     }
                 }
             })
-        )?;
+        );
+        if TRACE
+            && let Some(trace) = trace.as_deref_mut()
+            && matches!(
+                metadata,
+                Ok(_) | Err(SkipReason::FragmentsOutsideScanRange | SkipReason::NoObservedSignal)
+            )
+        {
+            // These outcomes all reached a freshly reset collector.
+            trace.rt_window = Some(
+                worker
+                    .extraction
+                    .as_ref()
+                    .expect("extraction set by query")
+                    .chromatograms
+                    .rt,
+            );
+        }
+        let metadata = metadata?;
 
         let scoring_ctx = worker
             .extraction
             .as_ref()
             .expect("extraction set by build_extraction_into");
 
-        let apex_score = timed!(
+        if TRACE && let Some(trace) = trace.as_deref_mut() {
+            trace.stage = Phase3Stage::Apex;
+        }
+
+        let (apex_score, poisson) = timed!(
             timings.scoring,
             tracing::span!(tracing::Level::TRACE, "score_calibrated::apex_scoring").in_scope(
                 || {
-                    worker
+                    let apex = worker
                         .scorer
                         .find_apex(scoring_ctx, &|idx| self.map_rt_index_to_milis(idx))
-                        .map_err(|e| apex_error_to_skip(&e))
+                        .map_err(|e| apex_error_to_skip(&e))?;
+                    let poisson = calibration
+                        .and_then(CalibrationResult::poisson_gain)
+                        .map_or(PoissonEvidence::MISSING, |gain| {
+                            compute_poisson_evidence(
+                                &worker.scorer.traces.apex_profile,
+                                apex.joint_apex_cycle,
+                                (apex.counts.rising_cycles, apex.counts.falling_cycles),
+                                &scoring_ctx.chromatograms.fragments,
+                                query.iter_expected_fragments(),
+                                gain,
+                            )
+                        });
+                    Ok::<_, SkipReason>((apex, poisson))
                 },
             )
         )?;
@@ -851,6 +949,21 @@ impl<I: ScorerQueriable> Scorer<I> {
             .as_ref()
             .expect("extraction set by build_extraction_into");
         let nqueries = scoring_ctx.chromatograms.fragments.num_ions() as u8;
+        let shadow_context = batch.shadow.and_then(|shadow| {
+            shadow.context(
+                query,
+                flat,
+                scoring_ctx.chromatograms.cycle_offset(),
+                apex_score.joint_apex_cycle,
+                apex_score.peak_width_cycles,
+            )
+        });
+        if TRACE && let Some(trace) = trace {
+            trace.stage = Phase3Stage::Finalize;
+            trace.main_score = Some(apex_score.primary.main_score);
+            trace.apex_rt_seconds = Some(apex_score.retention_time_ms as f32 / 1000.0);
+            trace.matched_fragments = Some(nqueries);
+        }
         timed!(
             timings.assembly,
             tracing::span!(tracing::Level::TRACE, "score_calibrated::finalize").in_scope(|| {
@@ -858,9 +971,14 @@ impl<I: ScorerQueriable> Scorer<I> {
                     &metadata,
                     nqueries,
                     apex_score,
+                    poisson,
                     inner_collector,
                     isotope_collector,
                 )
+                .map(|mut candidate| {
+                    candidate.shadow_context = shadow_context;
+                    candidate
+                })
                 .map_err(|e| {
                     warn!("Error in scoring: {:?}", e);
                     finalize_error_to_skip(&e)
@@ -880,7 +998,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         flats: &[FlatIdx],
         calibration: &CalibrationResult,
     ) -> (Vec<ScoredCandidate>, ScoreTimings, SkipCounts) {
-        self.score_batch(lib, flats, Some(calibration))
+        self.score_shadow_batch(lib, flats, Some(calibration), None, None)
     }
 
     /// Score spectra over the acquisition's full RT range, without calibration
@@ -890,14 +1008,45 @@ impl<I: ScorerQueriable> Scorer<I> {
         lib: &ReferenceLibrary,
         flats: &[FlatIdx],
     ) -> (Vec<ScoredCandidate>, ScoreTimings, SkipCounts) {
-        self.score_batch(lib, flats, None)
+        self.score_shadow_batch(lib, flats, None, None, None)
     }
 
-    fn score_batch(
+    pub fn score_traced_batch(
         &self,
         lib: &ReferenceLibrary,
         flats: &[FlatIdx],
         calibration: Option<&CalibrationResult>,
+        traces: &HashMap<FlatIdx, Mutex<Phase3Trace>>,
+    ) -> (Vec<ScoredCandidate>, ScoreTimings, SkipCounts) {
+        self.score_shadow_batch(lib, flats, calibration, Some(traces), None)
+    }
+
+    /// Score a Phase 3 batch and capture the run-local shadow context.
+    pub fn score_shadow_batch(
+        &self,
+        lib: &ReferenceLibrary,
+        flats: &[FlatIdx],
+        calibration: Option<&CalibrationResult>,
+        traces: Option<&HashMap<FlatIdx, Mutex<Phase3Trace>>>,
+        shadow: Option<&ShadowRun<'_>>,
+    ) -> (Vec<ScoredCandidate>, ScoreTimings, SkipCounts) {
+        let batch = BatchScoring {
+            calibration,
+            shadow,
+        };
+        if traces.is_some() {
+            self.score_batch::<true>(lib, flats, batch, traces)
+        } else {
+            self.score_batch::<false>(lib, flats, batch, None)
+        }
+    }
+
+    fn score_batch<const TRACE: bool>(
+        &self,
+        lib: &ReferenceLibrary,
+        flats: &[FlatIdx],
+        batch: BatchScoring<'_, '_>,
+        traces: Option<&HashMap<FlatIdx, Mutex<Phase3Trace>>>,
     ) -> (Vec<ScoredCandidate>, ScoreTimings, SkipCounts) {
         let get_item = |f| lib.item_at(f);
         let num_cycles = self.num_cycles();
@@ -909,12 +1058,8 @@ impl<I: ScorerQueriable> Scorer<I> {
             let lims = TupleRange::try_new(tmp.0, tmp.1).expect("Should already be ordered");
             self.fragmented_range.intersects(lims)
         };
-        // Pre-scan so scratch capacity holds every peptide -- no realloc in hot path.
-        let max_frags = flats
-            .iter()
-            .map(|&f| get_item(f).fragment_count())
-            .max()
-            .unwrap_or(0);
+        // All Phase 3 extractions retain at most this many fragment rows.
+        let max_frags = TOP_N_FRAGMENTS;
 
         // One-shot count of pre-filter rejects. filter_fn is cheap (range check);
         // a second pass keeps the rayon hot loop free of synchronised counters.
@@ -933,25 +1078,49 @@ impl<I: ScorerQueriable> Scorer<I> {
                         "worker init: ScoringWorker + IonSearchAccumulator"
                     );
                     (
-                        ScoringWorker::new(num_cycles, max_frags),
+                        ScoringWorker::with_denoising(num_cycles, max_frags, self.denoise_traces),
                         IonSearchAccumulator::default(),
                     )
                 },
                 |(mut worker, acc), (_idx, &flat)| {
                     let q = get_item(flat);
+                    let mut trace = if TRACE {
+                        traces
+                            .expect("traced batch has trace slots")
+                            .get(&flat)
+                            .map(|entry| entry.lock().expect("trace slot poisoned"))
+                    } else {
+                        None
+                    };
                     if !filter_fn(&q) {
+                        if TRACE && let Some(trace) = trace.as_deref_mut() {
+                            trace.skip = Some(SkipReason::PrecursorOutOfFragmentedRange);
+                        }
                         return (worker, acc);
                     }
                     let _span =
                         tracing::span!(tracing::Level::TRACE, "score_calibrated_item").entered();
                     let mut t = ScoreTimings::default();
                     let identity = CandidateIdentity {
+                        flat,
                         handles: q.handles(),
                         source_id: q.output_id().to_owned_id(),
                         is_target: q.is_target(),
                     };
-                    let result =
-                        self.score_extraction(&q, identity, calibration, &mut worker, &mut t);
+                    let result = self.score_extraction::<TRACE>(
+                        &q,
+                        identity,
+                        batch,
+                        &mut worker,
+                        &mut t,
+                        trace.as_deref_mut(),
+                    );
+                    if TRACE && let Some(mut trace) = trace {
+                        match &result {
+                            Ok(_) => trace.stage = Phase3Stage::Scored,
+                            Err(reason) => trace.skip = Some(*reason),
+                        }
+                    }
                     (worker, acc.fold((result, t)))
                 },
                 |(wa, a), (_wb, b)| (wa, a.reduce(b)),
@@ -964,15 +1133,41 @@ impl<I: ScorerQueriable> Scorer<I> {
     /// Phase 1: Lightweight prescore -- broad extraction + find_apex_location only.
     /// Returns an [`ApexLocation`], whose `score` is the apex-profile peak
     /// value -- NOT the apex evidence (see `TraceScorer::suggest_apex`).
-    #[cfg_attr(
-        feature = "instrumentation",
-        tracing::instrument(skip_all, level = "trace")
-    )]
     pub fn prescore(
         &self,
         query: &RefQuery<'_>,
         worker: &mut ScoringWorker,
         timings: &mut PrescoreTimings,
+    ) -> Result<ApexLocation, SkipReason> {
+        self.prescore_with_windows(
+            query,
+            worker,
+            timings,
+            self.prescore_rt(),
+            &self.broad_tolerance.peak_tolerance(),
+        )
+    }
+
+    fn prescore_rt(&self) -> Option<ResolvedRt> {
+        ResolvedRt::from_mapping(
+            RtSelection::FullRun,
+            &self.broad_tolerance.rt,
+            self.index.ms1_cycle_mapping(),
+        )
+        .ok()
+    }
+
+    #[cfg_attr(
+        feature = "instrumentation",
+        tracing::instrument(name = "prescore", skip_all, level = "trace")
+    )]
+    fn prescore_with_windows(
+        &self,
+        query: &RefQuery<'_>,
+        worker: &mut ScoringWorker,
+        timings: &mut PrescoreTimings,
+        rt: Option<ResolvedRt>,
+        peak_tolerance: &PeakTolerance,
     ) -> Result<ApexLocation, SkipReason> {
         gate_expected_fragments(query)?;
 
@@ -981,17 +1176,9 @@ impl<I: ScorerQueriable> Scorer<I> {
             tracing::span!(tracing::Level::TRACE, "prescore::extraction").in_scope(|| {
                 super::extraction::build_extraction_into(
                     &mut worker.extraction,
-                    &ExtractionQuery::new(
-                        query,
-                        ResolvedRt::from_mapping(
-                            RtSelection::FullRun,
-                            &self.broad_tolerance.rt,
-                            self.index.ms1_cycle_mapping(),
-                        )
-                        .map_err(|_| SkipReason::RetentionTimeOutOfBounds)?,
-                    ),
+                    &ExtractionQuery::new(query, rt.ok_or(SkipReason::RetentionTimeOutOfBounds)?),
                     &self.index,
-                    &self.broad_tolerance.peak_tolerance(),
+                    peak_tolerance,
                     Some(TOP_N_FRAGMENTS),
                 )
             })
@@ -1047,6 +1234,8 @@ impl<I: ScorerQueriable> Scorer<I> {
         timings.skips.precursor_out_of_fragmented_range += precursor_oofr_count;
 
         let num_cycles = self.num_cycles();
+        let rt = self.prescore_rt();
+        let peak_tolerance = self.broad_tolerance.peak_tolerance();
         let max_frags = flats
             .iter()
             .map(|&f| get_item(f).fragment_count())
@@ -1080,7 +1269,7 @@ impl<I: ScorerQueriable> Scorer<I> {
                     return (worker, heap, t);
                 }
                 t.n_passed_filter += 1;
-                match self.prescore(&q, &mut worker, &mut t) {
+                match self.prescore_with_windows(&q, &mut worker, &mut t, rt, &peak_tolerance) {
                     Ok(loc) => {
                         let cand = CalibrantCandidate {
                             score: loc.score,

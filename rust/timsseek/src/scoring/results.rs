@@ -22,16 +22,19 @@ use super::blocks::lazy::{
     SecondaryLazyScores,
 };
 use super::blocks::mobility::Mobility;
+use super::blocks::poisson::PoissonEvidence;
 use super::blocks::primary::PrimaryScores;
 use super::blocks::relative_intensities::RelativeIntensities;
 use super::blocks::result_meta::ResultMeta;
 use super::blocks::rt::Rt;
+use super::blocks::shadow::ShadowScores;
 use super::blocks::{
     SchemaSink,
     ScoreBlock,
 };
 use super::offsets::MzMobilityOffsets;
 use super::pipeline::SecondaryLazyScoresRaw;
+use super::shadow::ShadowContext;
 
 /// Inputs for the finalize-stage assembly of [`ScoringFields`]. Constructing
 /// this struct IS the completeness guarantee: a score that needs data not yet
@@ -43,6 +46,7 @@ pub struct FinalizeInputs<'a> {
     pub rel_inten: RelativeIntensityCollector,
     pub secondary_lazy: SecondaryLazyScoresRaw,
     pub nqueries: u8,
+    pub poisson: PoissonEvidence,
     /// Apex-stage blocks, moved in at zero cost.
     pub apex: ApexBlocks,
 }
@@ -98,6 +102,10 @@ pub struct ScoringFields {
     pub ion_errors: IonErrors,
     #[block]
     pub rel_intensities: RelativeIntensities,
+    #[block]
+    pub shadow: ShadowScores,
+    #[block]
+    pub poisson: PoissonEvidence,
 }
 
 impl ScoringFields {
@@ -120,6 +128,8 @@ impl ScoringFields {
             intensities: inp.apex.intensities,
             ion_errors: IonErrors::compute(inp.offsets),
             rel_intensities: RelativeIntensities::from_collector(&inp.rel_inten),
+            shadow: ShadowScores::default(),
+            poisson: inp.poisson,
         }
     }
 
@@ -138,6 +148,8 @@ impl ScoringFields {
 #[derive(Debug, Clone, Serialize)]
 pub struct ScoredCandidate {
     pub scoring: ScoringFields,
+    #[serde(skip)]
+    pub(super) shadow_context: Option<ShadowContext>,
 }
 
 /// After target-decoy competition.
@@ -205,6 +217,14 @@ impl FinalResult {
 // ---------------------------------------------------------------------------
 
 impl ScoredCandidate {
+    /// Construct a candidate from scoring fields without run-local apex context.
+    pub fn new(scoring: ScoringFields) -> Self {
+        Self {
+            scoring,
+            shadow_context: None,
+        }
+    }
+
     /// Convert a competition winner into a `CompetedCandidate`.
     pub fn into_competed(self) -> CompetedCandidate {
         CompetedCandidate {

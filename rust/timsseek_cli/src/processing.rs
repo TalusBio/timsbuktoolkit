@@ -7,7 +7,8 @@ use crate::artifacts::{
 };
 use indicatif::ProgressIterator;
 use timsquery::IndexedTimstofPeaks;
-use timsseek::ScorerQueriable;
+use timsquery::models::aggregators::spectrum_agg::ObservedSpectrum;
+use timsquery::models::tolerance::MzTolerance;
 use timsseek::data_sources::reference_library::ReferenceLibrary;
 use timsseek::errors::TimsSeekError;
 use timsseek::ml::qvalues::{
@@ -19,8 +20,14 @@ use timsseek::ml::{
     RescoreModel,
     rescore_with,
 };
-use timsseek::rt_calibration::CalibrationResult;
-use timsseek::scoring::pipeline::Scorer;
+use timsseek::rt_calibration::{
+    CalibrationResult,
+    MzFitOutcome,
+};
+use timsseek::scoring::pipeline::{
+    Scorer,
+    ShadowRun,
+};
 use timsseek::scoring::timings::{
     TimedStep,
     make_progress_bar,
@@ -33,6 +40,10 @@ use timsseek::scoring::{
     ScoredCandidate,
     SkipCounts,
 };
+use timsseek::{
+    IonAnnot,
+    ScorerQueriable,
+};
 use tracing::{
     debug,
     info,
@@ -40,6 +51,12 @@ use tracing::{
 };
 
 mod calibration;
+pub(crate) mod precursor_trace;
+
+use precursor_trace::{
+    PrecursorTrace,
+    TraceSelection,
+};
 
 use calibration::{
     build_precursor_fragment_lookup,
@@ -110,6 +127,7 @@ fn execute_raw_pipeline<I: ScorerQueriable>(
     library: &ReferenceLibrary,
     pipeline: &Scorer<I>,
     options: &PipelineOptions<'_>,
+    mut trace: Option<PrecursorTrace<'_>>,
 ) -> Result<PipelineReport, TimsSeekError> {
     info!(
         "No decoys: raw spectrum scoring over full acquisition RT; calibration, competition, rescoring and q-value filtering disabled"
@@ -127,16 +145,40 @@ fn execute_raw_pipeline<I: ScorerQueriable>(
         ..Default::default()
     };
     let mut timings = ScoreTimings::default();
+    let shadow = pipeline.prepare_shadows(None)?;
+    let mut shadow_rows = shadow.as_ref().map(|_| Vec::default());
     for batch in library.chunks(options.chunk_size) {
-        let (rows, timing, skips) = pipeline.score_raw_batch(library, &batch);
+        let (rows, timing, skips) = pipeline.score_shadow_batch(
+            library,
+            &batch,
+            None,
+            trace.as_ref().map(|trace| &trace.phase3),
+            shadow.as_ref(),
+        );
         timings += timing;
         report.phase3_skips += skips;
         report.total_scored += rows.len();
+        if let Some(shadow_rows) = &mut shadow_rows {
+            shadow_rows.reserve(rows.len());
+            shadow_rows.extend(rows);
+        } else {
+            for row in rows {
+                writer.add_raw(row).map_err(io_error)?;
+            }
+        }
+    }
+    if let Some((shadow, mut rows)) = shadow.zip(shadow_rows) {
+        let step = TimedStep::begin("Phase 3.5: Shadow scores");
+        shadow.score(&mut rows, library)?;
+        step.finish();
         for row in rows {
             writer.add_raw(row).map_err(io_error)?;
         }
     }
     writer.close().map_err(io_error)?;
+    if let Some(trace) = &mut trace {
+        trace.write(library, &path, true)?;
+    }
     report.phase3_extraction_thread_ms = timings.extraction.as_millis() as u64;
     report.phase3_scoring_thread_ms = timings.scoring.as_millis() as u64;
     report.phase3_spectral_query_thread_ms = timings.spectral_query.as_millis() as u64;
@@ -159,20 +201,40 @@ pub struct PipelineOptions<'a> {
     pub calibration: &'a CalibrationConfig,
     pub no_feature_stats: bool,
     pub rescore_model: RescoreModel,
+    pub trace_selection: Option<&'a TraceSelection>,
 }
 
-pub fn execute_pipeline<I: ScorerQueriable>(
+fn mz_fit_summary(tolerance: &MzTolerance, outcome: Option<MzFitOutcome>) -> String {
+    let (estimate, status) = match outcome {
+        Some(MzFitOutcome::Fitted(fit)) => (Some(fit), ""),
+        Some(MzFitOutcome::Fallback { estimate, .. }) => (estimate, ", fallback"),
+        None => (None, ""),
+    };
+    match estimate {
+        Some(fit) => format!(
+            "{tolerance:?} (mu={:+.3} ppm, sigma={:.3} ppm, bg={:.3}{status})",
+            fit.mu, fit.sigma, fit.background_fraction,
+        ),
+        None => format!("{tolerance:?} (mu=n/a, sigma=n/a, bg=n/a{status})"),
+    }
+}
+
+pub fn execute_pipeline<I>(
     speclib: &ReferenceLibrary,
     calib_lib: Option<&ReferenceLibrary>,
     pipeline: &Scorer<I>,
     options: &PipelineOptions<'_>,
-) -> std::result::Result<PipelineReport, TimsSeekError> {
+) -> std::result::Result<PipelineReport, TimsSeekError>
+where
+    I: ScorerQueriable + for<'a> timsquery::QueriableData<ObservedSpectrum<'a, IonAnnot>>,
+{
+    let mut trace = options.trace_selection.map(PrecursorTrace::new);
     if !matches!(
         speclib.geometry().capabilities().decoys,
         timsquery::models::capabilities::DecoyStrategy::MassShift { .. }
     ) && speclib.geometry().n_stored_decoys() == 0
     {
-        return execute_raw_pipeline(speclib, pipeline, options);
+        return execute_raw_pipeline(speclib, pipeline, options, trace);
     }
     let PipelineOptions {
         chunk_size,
@@ -181,6 +243,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         calibration: calib_config,
         no_feature_stats,
         rescore_model,
+        ..
     } = *options;
     // === PHASE 1: Broad prescore -> collect top calibrants ===
     // Use calibration library if provided, otherwise fall back to main speclib
@@ -229,7 +292,7 @@ pub fn execute_pipeline<I: ScorerQueriable>(
 
     // === PHASE 2: Calibration (fit RT + measure errors + derive tolerances) ===
     info!("Phase 2: Calibration...");
-    let step = TimedStep::begin("Phase 2: Calibrate");
+    let step = TimedStep::begin_deferred("Phase 2: Calibrate");
     let calibration = {
         match calibrate_from_phase1(
             calibrants,
@@ -268,9 +331,11 @@ pub fn execute_pipeline<I: ScorerQueriable>(
             summary.in_ridge_ratio * 100.0,
         );
     }
+    let fits = calibration.mz_fits();
     println!(
-        "  m/z: {:?}   mobility: {}   RT fit: {}",
-        calibration.mz_tolerance(),
+        "  MS1 m/z: {}   MS2 m/z: {}   mobility: {}   RT fit: {}",
+        mz_fit_summary(calibration.ms1_mz_tolerance(), fits.map(|f| f.ms1)),
+        mz_fit_summary(calibration.ms2_mz_tolerance(), fits.map(|f| f.ms2)),
         if pipeline.index.mobility_kind().is_scoreable() {
             format!("{:?}", calibration.mobility_tolerance())
         } else {
@@ -294,28 +359,38 @@ pub fn execute_pipeline<I: ScorerQueriable>(
 
     calib_dash_hook::show_final(&mut calib_dash_state, &calibration);
 
+    let shadow = pipeline.prepare_shadows(Some(&calibration))?;
+
     // === PHASE 3: Narrow scoring with calibrated tolerances ===
     info!("Phase 3: Scoring with calibrated extraction...");
     timscentroid::indexing::reset_for_each_peak_funnel();
     let step = TimedStep::begin("Phase 3: Score");
     let mut phase3_timings = ScoreTimings::default();
-    let (results, phase3_skips) = phase3_score(
+    let (mut results, phase3_skips) = phase3_score(
         speclib,
         pipeline,
         &calibration,
         chunk_size,
         &mut phase3_timings,
+        trace.as_ref(),
+        shadow.as_ref(),
     );
     step.finish_with(format_args!("{} peptides", results.len()));
     alloc_track::snap!("Phase 3: Score");
     timscentroid::indexing::dump_for_each_peak_funnel("Phase 3");
     timscentroid::indexing::reset_for_each_peak_funnel();
+    if let Some(shadow) = shadow {
+        let step = TimedStep::begin("Phase 3.5: Shadow scores");
+        shadow.score(&mut results, speclib)?;
+        step.finish();
+        timscentroid::indexing::reset_for_each_peak_funnel();
+    }
 
     let total_scored = results.len();
 
     // === PHASE 4: Target-decoy competition ===
     let step = TimedStep::begin("Phase 4: Compete");
-    let mut competed = target_decoy_compete(results, speclib);
+    let mut competed = target_decoy_compete(results, speclib, trace.as_mut());
     competed.sort_unstable_by(|x, y| {
         y.scoring
             .primary
@@ -374,7 +449,12 @@ pub fn execute_pipeline<I: ScorerQueriable>(
                 path: out_path_pq.clone().into(),
                 source: e,
             })?;
-    for res in data.into_iter() {
+    if let Some(trace) = &mut trace {
+        for res in &data {
+            trace.final_q(&res.scoring, res.qvalue, res.qvalue <= max_qvalue);
+        }
+    }
+    for res in data {
         if res.qvalue <= max_qvalue {
             pq_writer.add(res).map_err(|e| TimsSeekError::Io {
                 path: out_path_pq.clone().into(),
@@ -386,6 +466,9 @@ pub fn execute_pipeline<I: ScorerQueriable>(
         path: out_path_pq.clone().into(),
         source: e,
     })?;
+    if let Some(trace) = &mut trace {
+        trace.write(speclib, &out_path_pq, false)?;
+    }
     let phase6_ms = step.finish().as_millis() as u64;
     alloc_track::snap!("Phase 6: Write output");
     info!("Wrote final results to {:?}", out_path_pq);
@@ -445,6 +528,8 @@ fn phase3_score<I: ScorerQueriable>(
     calibration: &CalibrationResult,
     chunk_size: usize,
     timings: &mut ScoreTimings,
+    trace: Option<&PrecursorTrace<'_>>,
+    shadow: Option<&ShadowRun<'_>>,
 ) -> (Vec<ScoredCandidate>, SkipCounts) {
     let total_peptides = speclib.len();
     let n_chunks = total_peptides.div_ceil(chunk_size);
@@ -456,8 +541,13 @@ fn phase3_score<I: ScorerQueriable>(
     // Chunk the flat index space `0..len` and hand each range to the batch
     // scorer, which drives the lazy flyweight by index.
     for batch in speclib.chunks(chunk_size).progress_with(pb) {
-        let (batch_results, batch_timings, batch_skips) =
-            pipeline.score_calibrated_batch(speclib, &batch, calibration);
+        let (batch_results, batch_timings, batch_skips) = pipeline.score_shadow_batch(
+            speclib,
+            &batch,
+            Some(calibration),
+            trace.map(|trace| &trace.phase3),
+            shadow,
+        );
         *timings += batch_timings;
         skips += batch_skips;
         results.extend(batch_results);
@@ -485,7 +575,11 @@ fn phase3_score<I: ScorerQueriable>(
 )]
 /// Group complete peptide structure + charge + m/z, then retain the best score,
 /// preferring a target on ties. Incomparable chemistry stays row-specific.
-fn dedup_by_sequence(results: &mut Vec<ScoredCandidate>, library: &ReferenceLibrary) {
+fn dedup_by_sequence(
+    results: &mut Vec<ScoredCandidate>,
+    library: &ReferenceLibrary,
+    mut on_drop: impl FnMut(&ScoredCandidate, &ScoredCandidate),
+) {
     let chemistry_cmp = |a: &ScoredCandidate, b: &ScoredCandidate| {
         let a = &a.scoring.identity;
         let b = &b.scoring.identity;
@@ -560,7 +654,13 @@ fn dedup_by_sequence(results: &mut Vec<ScoredCandidate>, library: &ReferenceLibr
             )
             .then(a.scoring.identity.row.cmp(&b.scoring.identity.row))
     });
-    results.dedup_by(|a, b| key_cmp(a, b).is_eq());
+    results.dedup_by(|later, kept| {
+        let duplicate = key_cmp(later, kept).is_eq();
+        if duplicate {
+            on_drop(later, kept);
+        }
+        duplicate
+    });
 }
 
 /// Targets discarded because another target won their competition, which is the
@@ -592,6 +692,7 @@ fn targets_beaten_by_targets(sorted: &[ScoredCandidate]) -> usize {
 fn target_decoy_compete(
     mut results: Vec<ScoredCandidate>,
     library: &ReferenceLibrary,
+    mut trace: Option<&mut PrecursorTrace<'_>>,
 ) -> Vec<CompetedCandidate> {
     // TODO: re-implement so we dont drop results but instead just flag them as rejected (maybe
     // a slice where we push rejected results to the end and keep the trailing slice as the "active")
@@ -616,7 +717,13 @@ fn target_decoy_compete(
         "First 10 result before deduplication for seq+charge+mz: {:#?}",
         glimpse_result_head(&results)
     );
-    dedup_by_sequence(&mut results, library);
+    if let Some(trace) = &mut trace {
+        dedup_by_sequence(&mut results, library, |loser, winner| {
+            trace.dropped(&loser.scoring, &winner.scoring, true);
+        });
+    } else {
+        dedup_by_sequence(&mut results, library, |_, _| {});
+    }
     debug!(
         "First 10 result after deduplication for seq+charge+mz: {:#?}",
         glimpse_result_head(&results)
@@ -630,11 +737,29 @@ fn target_decoy_compete(
         results.len()
     );
 
+    let score_cmp = |a: &ScoredCandidate, b: &ScoredCandidate| {
+        a.scoring
+            .primary
+            .main_score
+            .partial_cmp(&b.scoring.primary.main_score)
+            .expect("NaN main_score should have been filtered during Phase 3 scoring")
+    };
+    let competition_groups =
+        results.chunk_by(|a, b| a.scoring.identity.competes_with(&b.scoring.identity));
+    if let Some(trace) = &mut trace {
+        for group in competition_groups.clone() {
+            let winner = group
+                .iter()
+                .max_by(|a, b| score_cmp(a, b))
+                .expect("chunk_by yields non-empty runs");
+            trace.won(&winner.scoring);
+            for loser in group.iter().filter(|&row| !std::ptr::eq(row, winner)) {
+                trace.dropped(&loser.scoring, &winner.scoring, false);
+            }
+        }
+    }
     // Each run is one competition. Keep only its highest-scoring member.
-    let group_lens: Vec<usize> = results
-        .chunk_by(|a, b| a.scoring.identity.competes_with(&b.scoring.identity))
-        .map(<[_]>::len)
-        .collect();
+    let group_lens: Vec<usize> = competition_groups.map(<[_]>::len).collect();
 
     info!(
         "Number of results after t/d competition: {}",
@@ -656,13 +781,7 @@ fn target_decoy_compete(
             members
                 .by_ref()
                 .take(len)
-                .max_by(|a, b| {
-                    a.scoring
-                        .primary
-                        .main_score
-                        .partial_cmp(&b.scoring.primary.main_score)
-                        .expect("NaN main_score should have been filtered during Phase 3 scoring")
-                })
+                .max_by(score_cmp)
                 .expect("chunk_by yields non-empty runs")
                 .into_competed()
         })
@@ -727,7 +846,7 @@ mod tests {
     }
     fn compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandidate> {
         let library = fixture_library(&mut results);
-        target_decoy_compete(results, &library)
+        target_decoy_compete(results, &library, None)
     }
 
     use super::*;
@@ -746,12 +865,12 @@ mod tests {
         // All fixtures tie on score so the (seq, score, is_target) tiebreak arm
         // is what orders them.
         scoring.primary.main_score = 5.0;
-        ScoredCandidate { scoring }
+        ScoredCandidate::new(scoring)
     }
 
     fn survivors(mut results: Vec<ScoredCandidate>) -> Vec<(String, u64, bool)> {
         let library = fixture_library(&mut results);
-        dedup_by_sequence(&mut results, &library);
+        dedup_by_sequence(&mut results, &library, |_, _| {});
         results
             .iter()
             .map(|c| {
@@ -775,7 +894,7 @@ mod tests {
         different_charge.scoring.primary.main_score = 6.0;
         let mut rows = vec![a, different_charge, b];
         let library = fixture_library(&mut rows);
-        dedup_by_sequence(&mut rows, &library);
+        dedup_by_sequence(&mut rows, &library, |_, _| {});
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().all(|r| r.scoring.identity.is_target));
         assert_eq!(rows[0].scoring.identity.precursor_charge, 2);
@@ -792,7 +911,7 @@ mod tests {
             candidate("PEPTIDE", 500.0, true, 4),
         ];
         let library = fixture_library(&mut rows);
-        dedup_by_sequence(&mut rows, &library);
+        dedup_by_sequence(&mut rows, &library, |_, _| {});
         assert_eq!(rows.len(), 5);
     }
 

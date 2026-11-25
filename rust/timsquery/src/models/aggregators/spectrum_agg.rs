@@ -164,6 +164,20 @@ impl<T: KeyLike, V: Default + ValueLike> HasQueryData<T> for SpectralCollector<T
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MsLevel {
+    Ms1,
+    Ms2,
+}
+
+/// Collect spectral statistics and visit individual matched peaks with their
+/// reference m/z and observed m/z. MS1 control channels (negative isotopes)
+/// still accumulate statistics but are excluded from the observer.
+pub struct ObservedSpectrum<'a, T: KeyLike> {
+    pub spectrum: &'a mut SpectralCollector<T, MzMobilityStatsCollector>,
+    pub observe_peak: &'a mut (dyn FnMut(MsLevel, f64, f32) + Send + Sync),
+}
+
 #[derive(Debug, Clone, Copy, Default)]
 pub struct MzMobilityStatsCollector {
     // TODO: Make this guy smaller ... this is a surpirsingly

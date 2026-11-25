@@ -135,12 +135,10 @@ pub fn estimate_fwhm(profile: &[f32], apex: usize) -> f32 {
     (left_dist + right_dist).max(1.0)
 }
 
-/// Build a Gaussian reference vector centered at `apex` within window `[lo, lo+win_len)`.
-pub fn build_gaussian_reference(win_len: usize, lo: usize, apex: usize, sigma: f32) -> Vec<f32> {
-    (0..win_len)
-        .map(|i| {
-            let t = (lo + i) as f32 - apex as f32;
-            (-t * t / (2.0 * sigma * sigma)).exp()
-        })
-        .collect()
+/// Fill a Gaussian reference centered at `apex` within the window starting at `lo`.
+pub fn fill_gaussian_reference(output: &mut [f32], lo: usize, apex: usize, sigma: f32) {
+    for (i, value) in output.iter_mut().enumerate() {
+        let t = (lo + i) as f32 - apex as f32;
+        *value = (-t * t / (2.0 * sigma * sigma)).exp();
+    }
 }

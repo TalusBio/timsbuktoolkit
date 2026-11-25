@@ -31,6 +31,12 @@ pub struct WindowCycleIndex {
     pub index: u32,
 }
 
+impl From<MS1CycleIndex> for WindowCycleIndex {
+    fn from(cycle: MS1CycleIndex) -> Self {
+        Self { index: cycle.index }
+    }
+}
+
 pub trait RTIndex:
     Copy + PartialEq + Eq + PartialOrd + Ord + std::fmt::Debug + Send + Sync + Debug
 {
@@ -164,6 +170,36 @@ impl<T: RTIndex> CycleToRTMapping<T> {
     }
 }
 
+/// Fill gaps between acquired frames by interpolating their RTs. Keep the
+/// leading baseline at zero and extend the last RT over any trailing gaps.
+pub(crate) fn fill_missing_cycle_rts(rts: &mut [u32], frame_present: &[bool]) {
+    assert_eq!(rts.len(), frame_present.len());
+    let mut gap_start = 0;
+    if frame_present.first() == Some(&false) {
+        rts[0] = 0;
+        gap_start = 1;
+    }
+    let mut previous_rt = 0;
+    for (end, _) in frame_present
+        .iter()
+        .enumerate()
+        .filter(|&(_, present)| *present)
+    {
+        let end_rt = rts[end];
+        let gap = &mut rts[gap_start..end];
+        let steps = u32::try_from(gap.len() + 1).expect("cycle count fits u32");
+        let delta = u64::from(end_rt - previous_rt);
+        for (rt, step) in gap.iter_mut().zip(1..steps) {
+            let offset = delta * u64::from(step) / u64::from(steps);
+            *rt = previous_rt + u32::try_from(offset).expect("bounded by the RT delta");
+        }
+        previous_rt = end_rt;
+        gap_start = end + 1;
+    }
+    rts[gap_start..].fill(previous_rt);
+    assert!(rts.is_sorted());
+}
+
 #[derive(Debug)]
 pub enum RTMappingError {
     IndexOutOfBounds,
@@ -246,6 +282,25 @@ mod tests {
         assert_eq!(serialized, "99");
         let deserialized: WindowCycleIndex = serde_json::from_str(&serialized).unwrap();
         assert_eq!(deserialized.index, 99);
+    }
+
+    #[test]
+    fn missing_cycle_rts_fill_leading_interior_and_trailing_gaps() {
+        // Missing slots hold garbage; only acquired cycles carry real RTs.
+        let present = [false, false, true, false, false, false, true, false, false];
+        let mut rts = [9, 9, 300, 9, 9, 9, 700, 9, 9];
+        fill_missing_cycle_rts(&mut rts, &present);
+        // Leading: ramp up from a zero baseline. Interior: linear in steps of
+        // 400/4. Trailing: hold the last acquired RT.
+        assert_eq!(rts, [0, 150, 300, 400, 500, 600, 700, 700, 700]);
+
+        let mut rts = [100, 200, 300];
+        fill_missing_cycle_rts(&mut rts, &[true; 3]);
+        assert_eq!(rts, [100, 200, 300]);
+
+        let mut rts = [9, 9];
+        fill_missing_cycle_rts(&mut rts, &[false; 2]);
+        assert_eq!(rts, [0, 0]);
     }
 
     #[test]

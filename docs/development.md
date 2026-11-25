@@ -50,11 +50,17 @@ center on detected apex RT and observed mobility.
 Results format 6 removes the unused competition-group margin columns. Format 5
 added `library_rt_axis` Parquet metadata. Unavailable library
 RT, calibrated RT and RT residuals are NaN; observed apex RT remains seconds.
-Calibration format v4 records the input library axis and effective tolerance
-enums; an empty RT snapshot means no RT fit, while residuals can still contain
-m/z and mobility calibration. Older calibration files
-must be regenerated. Explicit `rt_seconds` JSON/Python inputs remain seconds. JSON `rt_axis` is
-preserved whether optional precursor/fragment labels are supplied or filled in.
+Calibration format v5 records separate MS1 and MS2 m/z tolerances, per-level
+peak-error distributions, and Gaussian + uniform fit diagnostics. Each ppm
+window is the fitted Gaussian center ± three standard deviations, clipped to
+the extraction window. A fit needs at least 32 in-window samples. Fits without
+a usable Gaussian component and absolute-Da windows keep the configured
+tolerance. The file records the input library axis and effective tolerance
+enums. An empty RT snapshot means no RT fit, and residuals can still contain
+m/z and mobility calibration. Readers also accept v4, where the saved m/z
+tolerance applies to both levels. Explicit `rt_seconds` JSON/Python inputs remain
+seconds. JSON `rt_axis` is preserved whether optional precursor/fragment labels are
+supplied or filled in.
 Rust source geometry exposes `LibraryRT<f32>` through `Target` and `OwnedTarget`.
 `ExtractionQuery` borrows that geometry with a separately resolved acquisition
 window. `RtSelection::Centered(ObservedRTSeconds(...))` or `FullRun` resolves

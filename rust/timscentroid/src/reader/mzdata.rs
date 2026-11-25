@@ -141,6 +141,7 @@ struct WindowAccum {
     mz_start: f32,
     mz_end: f32,
     peaks: Vec<IndexedPeak<WindowCycleIndex>>,
+    frame_present: Vec<bool>,
 }
 
 /// Build an `IndexedTimstofPeaks` from an mzML file. Peer to
@@ -218,10 +219,17 @@ pub fn from_mzml_file(
                     mz_start,
                     mz_end,
                     peaks: Vec::new(),
+                    frame_present: Vec::with_capacity(cycle_rts_ms.len()),
                 });
                 windows.len() - 1
             });
-            push_peaks(&spec, WindowCycleIndex::new(c), &mut windows[slot].peaks);
+            let window = &mut windows[slot];
+            let cycle_idx = c as usize;
+            if window.frame_present.len() <= cycle_idx {
+                window.frame_present.resize(cycle_idx + 1, false);
+            }
+            window.frame_present[cycle_idx] = true;
+            push_peaks(&spec, WindowCycleIndex::new(c), &mut window.peaks);
         }
     }
 
@@ -256,7 +264,7 @@ pub fn from_mzml_file(
     );
 
     let mut ms2_window_groups = Vec::with_capacity(windows.len());
-    for w in windows {
+    for mut w in windows {
         if w.peaks.is_empty() {
             continue; // IndexedPeakGroup::new cannot handle an empty peak list
         }
@@ -269,12 +277,13 @@ pub fn from_mzml_file(
             0.0,
             2.0,
         )));
+        w.frame_present.resize(cycle_rts_ms.len(), false);
         let (group, _stats) = IndexedPeakGroup::new(
             w.peaks,
             CycleToRTMapping::new(cycle_rts_ms.clone()),
             BUCKET_SIZE,
         );
-        ms2_window_groups.push((scheme, group));
+        ms2_window_groups.push((scheme, group.with_frame_presence(w.frame_present)));
     }
 
     if ms2_window_groups.is_empty() {
@@ -350,6 +359,7 @@ mod tests {
             mz_start,
             mz_end,
             peaks: Vec::new(),
+            frame_present: Vec::new(),
         }
     }
 

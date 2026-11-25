@@ -35,6 +35,7 @@ use crate::rt_mapping::{
     MS1CycleIndex,
     RTIndex,
     WindowCycleIndex,
+    fill_missing_cycle_rts,
 };
 use crate::utils::OptionallyRestricted::{
     Restricted,
@@ -434,6 +435,16 @@ impl IndexedTimstofPeaks {
         &self.ms1_peaks.cycle_to_rt_ms
     }
 
+    /// MS2 peak groups in stable index order.
+    pub fn ms2_window_groups(
+        &self,
+    ) -> &[(
+        QuadrupoleIsolationScheme,
+        IndexedPeakGroup<WindowCycleIndex>,
+    )] {
+        &self.ms2_window_groups
+    }
+
     pub fn rt_ms_to_cycle_index(&self, rt_ms: u32) -> MS1CycleIndex {
         self.ms1_peaks.cycle_to_rt_ms.ms_to_closest_index(rt_ms)
     }
@@ -456,6 +467,7 @@ impl IndexedTimstofPeaks {
             calibration,
             |meta| matches!(meta.ms_level(), MSLevel::MS1),
             centroiding_config,
+            false,
         )
     }
 
@@ -492,6 +504,7 @@ impl IndexedTimstofPeaks {
                 calibration,
                 filter,
                 centroiding_config,
+                true,
             );
 
             let im_converter = calibration.im_converter_median().unwrap();
@@ -751,6 +764,21 @@ pub struct IndexedPeakGroup<T: RTIndex> {
     pub(crate) bucket_mz_ranges: Vec<TupleRange<f32>>,
     pub(crate) bucket_size: usize,
     pub(crate) cycle_to_rt_ms: CycleToRTMapping<T>,
+    /// Absent for dense groups and older indices without frame presence data.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) frame_present: Option<Vec<bool>>,
+}
+
+impl IndexedPeakGroup<WindowCycleIndex> {
+    /// Whether a frame was acquired in this group at the given cycle.
+    pub fn has_frame(&self, cycle: WindowCycleIndex) -> bool {
+        let index = cycle.index();
+        index < self.cycle_to_rt_ms.len()
+            && self
+                .frame_present
+                .as_ref()
+                .is_none_or(|present| present[index])
+    }
 }
 
 /// Statistics about an IndexedPeakGroup.
@@ -1361,6 +1389,7 @@ impl<T: RTIndex> IndexedPeakGroup<T> {
             bucket_size,
             bucket_mz_ranges,
             cycle_to_rt_ms,
+            frame_present: None,
         };
         let stats = IndexedPeakGroupStats {
             num_peaks: tmp.num_peaks(),
@@ -1389,6 +1418,14 @@ impl<T: RTIndex> IndexedPeakGroup<T> {
         self.cols.view()
     }
 
+    /// Set one presence flag per cycle on a group whose RT mapping is already built.
+    #[doc(hidden)]
+    pub fn with_frame_presence(mut self, frame_present: Vec<bool>) -> Self {
+        assert_eq!(frame_present.len(), self.cycle_to_rt_ms.len());
+        self.frame_present = Some(frame_present);
+        self
+    }
+
     /// Rebuild the bucket layout at a different `new_bucket_size`.
     ///
     /// Consumes `self` and returns a new `IndexedPeakGroup` with the
@@ -1406,6 +1443,7 @@ impl<T: RTIndex> IndexedPeakGroup<T> {
         let Self {
             cols,
             cycle_to_rt_ms,
+            frame_present,
             ..
         } = self;
         let (mz, intensity, mobility, cycle_index) = cols.into_parts();
@@ -1431,6 +1469,7 @@ impl<T: RTIndex> IndexedPeakGroup<T> {
             bucket_mz_ranges,
             bucket_size: new_bucket_size,
             cycle_to_rt_ms,
+            frame_present,
         }
     }
 
@@ -1442,6 +1481,7 @@ impl<T: RTIndex> IndexedPeakGroup<T> {
             bucket_mz_ranges,
             bucket_size,
             cycle_to_rt_ms,
+            ..
         } = self;
         (cols, cycle_to_rt_ms.unpack(), bucket_size, bucket_mz_ranges)
     }
@@ -1485,6 +1525,7 @@ impl<T: RTIndex> IndexedPeakGroup<T> {
         frame_reader: &TdfFrameReader,
         cycles: &CycleTable,
         filter: impl Fn(&FrameInfo) -> bool + Sync,
+        allow_gaps: bool,
     ) -> Vec<(usize, u32, u32)> {
         let mut indices: Vec<_> = frame_reader.iter_indices().collect();
         indices.sort_unstable();
@@ -1516,6 +1557,7 @@ impl<T: RTIndex> IndexedPeakGroup<T> {
                 last_pushed_cycle = Some(cycle_index);
             }
         }
+        // MS1 defines the cycle axis. Individual MS2 groups can omit cycles.
         out.as_slice().windows(2).for_each(|w| {
             // Note: These are assertions instead of errors because
             // they are invariants I am checking, not recoverable errors, none of the logic
@@ -1535,12 +1577,15 @@ impl<T: RTIndex> IndexedPeakGroup<T> {
                 w[0],
                 w[1],
             );
-            assert!(
-                w[1].1 - w[0].1 == 1,
-                "Cycle indices should be continuous without gaps, found gap between {} and {}",
-                w[0].1,
-                w[1].1,
-            );
+            if !allow_gaps {
+                assert_eq!(
+                    w[1].1 - w[0].1,
+                    1,
+                    "MS1 cycle indices must be consecutive: {} and {}",
+                    w[0].1,
+                    w[1].1,
+                );
+            }
         });
 
         out
@@ -1554,9 +1599,10 @@ impl<T: RTIndex> IndexedPeakGroup<T> {
         calibration: &RunCalibration,
         filter: impl Fn(&FrameInfo) -> bool + Sync,
         centroiding_config: CentroidingConfig,
+        allow_gaps: bool,
     ) -> (Self, IndexedPeakGroupBuildingStats) {
         // I dont like this allocation but its not that big of a deal RN ...
-        let indices = Self::get_frame_indices_matching(frame_reader, cycles, filter);
+        let indices = Self::get_frame_indices_matching(frame_reader, cycles, filter, allow_gaps);
 
         // I am still not sure what I prefer here ...
         // On the greater schme of things allocating a vec for every frame is not thaaaat bad
@@ -1631,18 +1677,28 @@ impl<T: RTIndex> IndexedPeakGroup<T> {
         // inner_vec.shrink_to_fit();
         let mut inner_vec = _x.2;
         inner_vec.shrink_to_fit();
-        let mut cycle_to_rt_ms: Vec<_> = Vec::with_capacity(indices.len());
+        let cycle_count = indices.last().map_or(0, |&(_, cycle, _)| {
+            usize::try_from(cycle).expect("cycle index fits usize") + 1
+        });
+        let mut cycle_to_rt_ms = vec![0; cycle_count];
+        let mut frame_present = allow_gaps.then(|| vec![false; cycle_count]);
         for (_i, cycle_idx, rt_ms) in indices {
-            if cycle_to_rt_ms.len() <= cycle_idx as usize {
-                cycle_to_rt_ms.resize(cycle_idx as usize + 1, 0);
+            let cycle_idx = usize::try_from(cycle_idx).expect("cycle index fits usize");
+            cycle_to_rt_ms[cycle_idx] = rt_ms;
+            if let Some(present) = &mut frame_present {
+                present[cycle_idx] = true;
             }
-            cycle_to_rt_ms[cycle_idx as usize] = rt_ms;
         }
-        // In theory there should be no zeros ...
+        if let Some(present) = &frame_present {
+            fill_missing_cycle_rts(&mut cycle_to_rt_ms, present);
+        }
 
         // 2**12 = 4096 peaks per bucket
         let cycle_mapping = CycleToRTMapping::new(cycle_to_rt_ms);
-        let (out, stats) = IndexedPeakGroup::new(inner_vec, cycle_mapping, 2usize.pow(12));
+        let (mut out, stats) = IndexedPeakGroup::new(inner_vec, cycle_mapping, 2usize.pow(12));
+        if let Some(present) = frame_present {
+            out = out.with_frame_presence(present);
+        }
         (
             out,
             IndexedPeakGroupBuildingStats {
@@ -1833,6 +1889,70 @@ mod tests {
                 cycle_index: T::new(cycle_index),
             })
             .collect()
+    }
+
+    #[test]
+    fn ms2_rt_mapping_stays_sorted_with_a_gap() {
+        let present = vec![true, false, true];
+        let mut rts = vec![100, 0, 300];
+        fill_missing_cycle_rts(&mut rts, &present);
+        assert!(rts.is_sorted());
+        assert_eq!(rts, [100, 200, 300]);
+
+        let (ms1, _) = IndexedPeakGroup::new(
+            tuples_to_peaks(&[(500.0, 1.0, 1.0, 0)]),
+            CycleToRTMapping::<MS1CycleIndex>::new(rts.clone()),
+            4,
+        );
+        let (ms2, _) = IndexedPeakGroup::new(
+            tuples_to_peaks(&[(300.0, 1.0, 1.0, 0), (300.0, 1.0, 1.0, 2)]),
+            CycleToRTMapping::new(rts),
+            4,
+        );
+        let scheme = QuadrupoleIsolationScheme::from_xxyy([(490.0, 510.0, 0.9, 1.1)].into_iter());
+        let index =
+            IndexedTimstofPeaks::from_parts(ms1, vec![(scheme, ms2.with_frame_presence(present))]);
+        let dir = tempfile::tempdir().unwrap();
+        index.save_to_directory(dir.path()).unwrap();
+
+        let assert_gap = || {
+            let loaded = IndexedTimstofPeaks::load_from_storage(crate::StorageLocation::from_path(
+                dir.path(),
+            ))
+            .unwrap()
+            .rebucket(8);
+            let group = &loaded.ms2_window_groups()[0].1;
+            let cycle = WindowCycleIndex::new(1);
+            assert_eq!(group.cycle_to_rt_ms.clone().unpack(), [100, 200, 300]);
+            assert_eq!(group.cycle_to_rt_ms.ms_to_closest_index(200), cycle);
+            assert!(group.has_frame(WindowCycleIndex::new(0)));
+            assert!(!group.has_frame(cycle));
+            assert!(group.has_frame(WindowCycleIndex::new(2)));
+        };
+        assert_gap();
+
+        let path = dir.path().join("metadata.json");
+        let mut metadata: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
+        let group = metadata["ms2_window_groups"][0]["group_info"]
+            .as_object_mut()
+            .unwrap();
+        group.remove("frame_present").unwrap();
+        group.insert(
+            "cycle_to_rt_ms".to_owned(),
+            serde_json::json!([100, u32::MAX, 300]),
+        );
+        std::fs::write(&path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        assert_gap();
+
+        // A legacy cache whose acquired RTs go backwards cannot be repaired.
+        metadata["ms2_window_groups"][0]["group_info"]["cycle_to_rt_ms"] =
+            serde_json::json!([300, u32::MAX, 100]);
+        std::fs::write(&path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        assert!(
+            IndexedTimstofPeaks::load_from_storage(crate::StorageLocation::from_path(dir.path()))
+                .is_err()
+        );
     }
 
     #[test]

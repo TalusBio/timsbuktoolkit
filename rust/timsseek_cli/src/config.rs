@@ -13,6 +13,7 @@ use timsquery::{
 };
 use timsseek::ml::RescoreModel;
 use timsseek::scoring::CalibrationConfig;
+use timsseek::scoring::apex_finding::DEFAULT_DENOISE_TRACES;
 use timsseek::{
     DecoyPolicy,
     UnannotatedPeaks,
@@ -39,6 +40,8 @@ pub struct Config {
     #[serde(default = "CalibrationConfig::default")]
     pub calibration: CalibrationConfig,
     pub output: Option<OutputConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<DiagnosticsConfig>,
     #[serde(default)]
     pub staging: Option<StagingConfig>,
     #[serde(default)]
@@ -60,6 +63,13 @@ pub struct Config {
     /// declared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library_provenance: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct DiagnosticsConfig {
+    /// Local TSV with modified sequence and charge.
+    pub trace_precursors: Option<std::path::PathBuf>,
 }
 
 /// The slice of a configuration file `build-library` reads.
@@ -246,6 +256,13 @@ pub struct AnalysisConfig {
 
     #[serde(default)]
     pub rescore_model: RescoreModel,
+
+    #[serde(default = "default_denoise_traces")]
+    pub denoise_traces: bool,
+}
+
+fn default_denoise_traces() -> bool {
+    DEFAULT_DENOISE_TRACES
 }
 
 #[derive(Debug, Serialize, Deserialize, Clone)]
@@ -332,6 +349,44 @@ rt = "Unrestricted"
     fn parses_minimal_toml() {
         let c: Config = toml::from_str(MINIMAL_TOML).unwrap();
         assert_eq!(c.analysis.chunk_size, 20000);
+        assert!(c.analysis.denoise_traces);
+        let disabled = MINIMAL_TOML.replace("[analysis]", "[analysis]\ndenoise_traces = false");
+        assert!(
+            !toml::from_str::<Config>(&disabled)
+                .unwrap()
+                .analysis
+                .denoise_traces
+        );
+        let tolerance = c.analysis.tolerance;
+        assert_eq!(
+            tolerance.ms1,
+            timsquery::models::tolerance::MzTolerance::Ppm((15.0, 15.0))
+        );
+        assert_eq!(tolerance.ms2, tolerance.ms1);
+    }
+
+    #[test]
+    fn level_specific_tolerances_override_shared_defaults() {
+        use timsquery::models::tolerance::MzTolerance;
+
+        let shared = "ms = { Ppm = [15.0, 15.0] }";
+        let overrides = "ms1 = { Ppm = [2.0, 3.0] }\nms2 = { Absolute = [0.02, 0.03] }";
+        for replacement in [overrides.to_owned(), format!("{shared}\n{overrides}")] {
+            let toml = MINIMAL_TOML.replace(shared, &replacement);
+            let config: Config = toml::from_str(&toml).unwrap();
+            assert_eq!(config.analysis.tolerance.ms1, MzTolerance::Ppm((2.0, 3.0)));
+            assert_eq!(
+                config.analysis.tolerance.ms2,
+                MzTolerance::Absolute((0.02, 0.03))
+            );
+        }
+        let toml = MINIMAL_TOML.replace(shared, &format!("{shared}\nms2 = {{ Ppm = [4.0, 5.0] }}"));
+        let config: Config = toml::from_str(&toml).unwrap();
+        assert_eq!(
+            config.analysis.tolerance.ms1,
+            MzTolerance::Ppm((15.0, 15.0))
+        );
+        assert_eq!(config.analysis.tolerance.ms2, MzTolerance::Ppm((4.0, 5.0)));
     }
 
     #[test]
@@ -476,6 +531,10 @@ rt = "Unrestricted"
         // leaves them for the CLI flags to fill.
         assert!(c.input.is_none(), "[input] must be commented out");
         assert!(c.output.is_none(), "[output] must be commented out");
+        assert!(
+            c.diagnostics.is_none(),
+            "[diagnostics] must be commented out"
+        );
         assert!(c.staging.is_none(), "[staging] must be commented out");
         assert!(c.library.is_none(), "[library] must be commented out");
         assert!(c.sequences.is_none(), "[sequences] must be commented out");
@@ -484,6 +543,7 @@ rt = "Unrestricted"
             "provenance is recorded by a run, so the template must not mention it"
         );
         assert!(c.analysis.raw_inputs.is_none());
+        assert_eq!(c.analysis.denoise_traces, DEFAULT_DENOISE_TRACES);
 
         assert_eq!(
             serde_json::to_string(&c.calibration).unwrap(),

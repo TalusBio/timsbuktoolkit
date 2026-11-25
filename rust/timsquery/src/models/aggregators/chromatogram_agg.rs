@@ -6,6 +6,7 @@ use serde::Serialize;
 
 use crate::errors::DataProcessingError;
 use crate::models::base::{
+    Array2D,
     ArrayElement,
     Chromatogram,
     MzMajorIntensityArray,
@@ -65,15 +66,51 @@ pub struct ChromatogramCollector<T: KeyLike, V: ArrayElement + ValueLike> {
 }
 
 impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
+    /// Initialize a reusable collector with storage for the largest query.
+    ///
+    /// # Panics
+    /// Panics if the initial query exceeds the reserved row or cycle bounds.
+    pub fn new_with_capacity(
+        query: &ExtractionQuery<'_, impl Target<Label = T>>,
+        ref_rt_ms: &CycleToRTMapping<MS1CycleIndex>,
+        max_precursors: usize,
+        max_fragments: usize,
+        max_cycles: usize,
+    ) -> Result<Self, DataProcessingError> {
+        let mut collector = Self {
+            mobility_ook0: query.mobility_center(),
+            rt: query.rt(),
+            precursor_mono_mz: 0.0,
+            precursor_charge: 0,
+            precursor_mz_limits: (0.0, 0.0),
+            precursors: MzMajorIntensityArray {
+                arr: Array2D::with_capacity(max_cycles, max_precursors),
+                mz_order: Vec::with_capacity(max_precursors),
+                cycle_offset: 0,
+            },
+            fragments: MzMajorIntensityArray {
+                arr: Array2D::with_capacity(max_cycles, max_fragments),
+                mz_order: Vec::with_capacity(max_fragments),
+                cycle_offset: 0,
+            },
+            n_precursor_peaks_added: 0,
+            n_fragment_peaks_added: 0,
+            n_quad_windows_matched: 0,
+        };
+        assert!(query.source().precursor_count() <= max_precursors);
+        assert!(query.source().fragment_count() <= max_fragments);
+        let (_, num_cycles) = Self::query_cycles(query.rt(), ref_rt_ms);
+        assert!(num_cycles <= max_cycles);
+        collector.try_reset_with(query, ref_rt_ms)?;
+        Ok(collector)
+    }
+
     pub fn new(
         query: &ExtractionQuery<'_, impl Target<Label = T>>,
         ref_rt_ms: &CycleToRTMapping<MS1CycleIndex>,
     ) -> Result<Self, DataProcessingError> {
         let eg = query.source();
-        let rt_range_ms = query.rt().range_millis();
-        let start = ref_rt_ms.ms_to_closest_index(rt_range_ms.start());
-        let end = ref_rt_ms.ms_to_closest_index(rt_range_ms.end());
-        let num_cycles = end.index() - start.index() + 1;
+        let (start, num_cycles) = Self::query_cycles(query.rt(), ref_rt_ms);
 
         let precursor_order: Vec<_> = eg.iter_precursors().collect();
         let fragment_order: Vec<_> = eg
@@ -87,11 +124,9 @@ impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
             return Err(DataProcessingError::ExpectedNonEmptyData);
         }
 
-        let precursors =
-            MzMajorIntensityArray::try_new_empty(precursor_order, num_cycles, start.index())
-                .expect("Already checked non-empty");
-        let fragments =
-            MzMajorIntensityArray::try_new_empty(fragment_order, num_cycles, start.index())?;
+        let precursors = MzMajorIntensityArray::try_new_empty(precursor_order, num_cycles, start)
+            .expect("Already checked non-empty");
+        let fragments = MzMajorIntensityArray::try_new_empty(fragment_order, num_cycles, start)?;
         Ok(Self {
             mobility_ook0: query.mobility_center(),
             rt: query.rt(),
@@ -112,10 +147,7 @@ impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
         ref_rt_ms: &CycleToRTMapping<MS1CycleIndex>,
     ) -> Result<(), DataProcessingError> {
         let eg = query.source();
-        let rt_range_ms = query.rt().range_millis();
-        let start = ref_rt_ms.ms_to_closest_index(rt_range_ms.start());
-        let end = ref_rt_ms.ms_to_closest_index(rt_range_ms.end());
-        let num_cycles = end.index() - start.index() + 1;
+        let (start, num_cycles) = Self::query_cycles(query.rt(), ref_rt_ms);
 
         if eg.precursor_count() == 0 && eg.fragment_count() == 0 {
             return Err(DataProcessingError::ExpectedNonEmptyData);
@@ -133,13 +165,24 @@ impl<T: KeyLike, V: ValueLike + ArrayElement> ChromatogramCollector<T, V> {
         self.n_fragment_peaks_added = 0;
         self.n_quad_windows_matched = 0;
         self.precursors
-            .clear_with_order(eg.iter_precursors(), num_cycles, start.index());
+            .clear_with_order(eg.iter_precursors(), num_cycles, start);
         self.fragments.clear_with_order(
             eg.iter_fragments_refs().map(|(k, v)| (k.clone(), v)),
             num_cycles,
-            start.index(),
+            start,
         );
         Ok(())
+    }
+
+    /// First cycle and inclusive cycle count of a resolved chromatogram query.
+    pub fn query_cycles(
+        rt: ResolvedRt,
+        ref_rt_ms: &CycleToRTMapping<MS1CycleIndex>,
+    ) -> (usize, usize) {
+        let range = rt.range_millis();
+        let start = ref_rt_ms.ms_to_closest_index(range.start()).index();
+        let end = ref_rt_ms.ms_to_closest_index(range.end()).index();
+        (start, end - start + 1)
     }
 
     pub fn iter_mut_precursors(

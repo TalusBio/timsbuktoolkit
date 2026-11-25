@@ -142,7 +142,8 @@ impl PyTolerance {
     ) -> Self {
         Self {
             inner: timsquery::Tolerance {
-                ms: mz.inner.clone(),
+                ms1: mz.inner,
+                ms2: mz.inner,
                 rt: rt.inner.clone(),
                 mobility: mobility.inner.clone(),
                 quad: quad.inner.clone(),
@@ -158,11 +159,12 @@ impl PyTolerance {
         }
     }
 
-    /// Return a new Tolerance with the m/z tolerance replaced.
+    /// Return a new Tolerance with both m/z tolerances replaced.
     fn with_mz(&self, mz: &PyMzTolerance) -> Self {
         Self {
             inner: timsquery::Tolerance {
-                ms: mz.inner.clone(),
+                ms1: mz.inner,
+                ms2: mz.inner,
                 ..self.inner.clone()
             },
         }

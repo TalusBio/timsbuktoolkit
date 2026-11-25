@@ -272,6 +272,11 @@ impl MinMax {
 }
 
 impl QuadrupoleIsolationScheme {
+    /// Indexed isolation geometry in stable shape order.
+    pub fn shapes(&self) -> &[RingShape] {
+        &self.ring_shapes
+    }
+
     /// Returns true if the given mz and im ranges intersect any of the
     /// isolation rings.
     pub fn intersects(&self, mz_range: (f64, f64), im_range: (f64, f64)) -> bool {

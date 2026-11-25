@@ -33,16 +33,46 @@ use timscentroid::utils::{
 /// in terms of positive values. For instance, here a tolerance of (1,1) on a value
 /// of 10 means a range of (9,11) while in some software the same range would be defined
 /// as (-1,1).
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+#[derive(Debug, Clone, Serialize, PartialEq)]
 pub struct Tolerance {
-    pub ms: MzTolerance,
-    #[serde(default)]
+    pub ms1: MzTolerance,
+    pub ms2: MzTolerance,
     pub rt: RtTolerance,
     pub mobility: MobilityTolerance,
     pub quad: QuadTolerance,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+impl<'de> Deserialize<'de> for Tolerance {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        #[derive(Deserialize)]
+        struct Input {
+            ms: Option<MzTolerance>,
+            ms1: Option<MzTolerance>,
+            ms2: Option<MzTolerance>,
+            #[serde(default)]
+            rt: RtTolerance,
+            mobility: MobilityTolerance,
+            quad: QuadTolerance,
+        }
+
+        let input = Input::deserialize(deserializer)?;
+        Ok(Self {
+            ms1: input
+                .ms1
+                .or(input.ms)
+                .ok_or_else(|| serde::de::Error::missing_field("ms1 (or shared ms)"))?,
+            ms2: input
+                .ms2
+                .or(input.ms)
+                .ok_or_else(|| serde::de::Error::missing_field("ms2 (or shared ms)"))?,
+            rt: input.rt,
+            mobility: input.mobility,
+            quad: input.quad,
+        })
+    }
+}
+
+#[derive(Debug, Copy, Clone, Serialize, Deserialize, PartialEq)]
 pub enum MzTolerance {
     #[serde(alias = "da")]
     Absolute((f64, f64)),
@@ -80,7 +110,8 @@ pub enum QuadTolerance {
 impl Default for Tolerance {
     fn default() -> Self {
         Tolerance {
-            ms: MzTolerance::Ppm((20.0, 20.0)),
+            ms1: MzTolerance::Ppm((20.0, 20.0)),
+            ms2: MzTolerance::Ppm((20.0, 20.0)),
             rt: RtTolerance::Unrestricted,
             mobility: MobilityTolerance::Pct((3.0, 3.0)),
             quad: QuadTolerance::Absolute((0.1, 0.1)),
@@ -100,9 +131,7 @@ impl Tolerance {
     const MZ_RANGE_INVARIANT: &str =
         "m/z tolerance produced an inverted range: low + high must be >= 0";
 
-    /// Calculate m/z tolerance range (primary method, returns f64).
-    ///
-    /// This is the canonical m/z range method. All other m/z methods delegate to this.
+    /// Calculate the MS1 m/z tolerance range (returns f64).
     ///
     /// # Arguments
     ///
@@ -134,14 +163,14 @@ impl Tolerance {
     /// assert!(range.start() < range.end());
     /// ```
     pub fn mz_range(&self, mz: f64) -> TupleRange<f64> {
-        self.peak_tolerance().mz_range(mz)
+        self.ms1.mz_range(mz)
     }
 
-    /// Calculate m/z tolerance range (convenience method, returns f32).
+    /// Calculate the MS1 m/z tolerance range (convenience method, returns f32).
     ///
     /// Same as [`mz_range`](Self::mz_range) but accepts and returns `f32`.
     pub fn mz_range_f32(&self, mz: f32) -> TupleRange<f32> {
-        self.peak_tolerance().mz_range_f32(mz)
+        self.ms1.mz_range_f32(mz)
     }
 
     // ============================================================================
@@ -390,14 +419,16 @@ impl Tolerance {
 /// Peak-domain tolerances. RT is already resolved on the extraction query.
 #[derive(Debug, Clone, PartialEq)]
 pub struct PeakTolerance {
-    pub ms: MzTolerance,
+    pub ms1: MzTolerance,
+    pub ms2: MzTolerance,
     pub mobility: MobilityTolerance,
     pub quad: QuadTolerance,
 }
 impl Tolerance {
     pub fn peak_tolerance(&self) -> PeakTolerance {
         PeakTolerance {
-            ms: self.ms.clone(),
+            ms1: self.ms1,
+            ms2: self.ms2,
             mobility: self.mobility.clone(),
             quad: self.quad.clone(),
         }
@@ -408,9 +439,9 @@ impl Default for PeakTolerance {
         Tolerance::default().peak_tolerance()
     }
 }
-impl PeakTolerance {
+impl MzTolerance {
     pub fn mz_range(&self, mz: f64) -> TupleRange<f64> {
-        match self.ms {
+        match *self {
             MzTolerance::Absolute((low, high)) => (mz - low, mz + high)
                 .try_into()
                 .expect(Tolerance::MZ_RANGE_INVARIANT),
@@ -428,7 +459,9 @@ impl PeakTolerance {
         let tmp = self.mz_range(mz as f64);
         (tmp.start() as f32, tmp.end() as f32).try_into().unwrap()
     }
+}
 
+impl PeakTolerance {
     pub fn mobility_range(&self, mobility: f32) -> OptionallyRestricted<TupleRange<f32>> {
         match self.mobility {
             MobilityTolerance::Absolute((low, high)) => {

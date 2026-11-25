@@ -1,29 +1,44 @@
 use indicatif::ProgressIterator;
+use timscentroid::rt_mapping::RTIndex;
 use timsquery::models::FlatIdx;
+use timsquery::models::aggregators::spectrum_agg::ObservedSpectrum;
 use timsquery::models::tolerance::RtTolerance;
 use timsquery::traits::Target;
 use timsquery::{
+    ChromatogramCollector,
+    ExtractionQuery,
     MzMobilityStatsCollector,
+    PeakTolerance,
+    ResolvedRt,
+    RtSelection,
     SpectralCollector,
 };
-use timsseek::data_sources::reference_library::ReferenceLibrary;
+use timsseek::data_sources::reference_library::{
+    MAX_FRAGMENTS,
+    MAX_PRECURSORS,
+    ReferenceLibrary,
+};
 use timsseek::rt_calibration::{
     CALIBRANT_WEIGHT,
     CalibRtError,
     CalibratedGrid,
     CalibrationResult,
     DerivationParams,
-    DimensionErrors,
     ErrorStats,
     LibraryRT,
+    MzErrorSamples,
     Point,
     RTCalibration,
     RidgeSummary,
     ridge_half_width_interp,
 };
+use timsseek::scoring::blocks::poisson::CalibrantGainScratch;
 use timsseek::scoring::offsets::MzMobilityOffsets;
 use timsseek::scoring::pipeline::Scorer;
-use timsseek::scoring::timings::make_progress_bar;
+use timsseek::scoring::timings::{
+    TimedStep,
+    make_progress_bar,
+};
 use timsseek::scoring::{
     CALIBRANT_HEAP_GROUPS,
     CALIBRANT_RT_BANDS,
@@ -477,9 +492,14 @@ pub(super) mod calib_dash_hook {
                 return;
             };
             let (
-                timsquery::models::tolerance::MzTolerance::Ppm(mz),
+                timsquery::models::tolerance::MzTolerance::Ppm(ms1_mz),
+                timsquery::models::tolerance::MzTolerance::Ppm(ms2_mz),
                 timsquery::models::tolerance::MobilityTolerance::Pct(mobility),
-            ) = (calibration.mz_tolerance(), calibration.mobility_tolerance())
+            ) = (
+                calibration.ms1_mz_tolerance(),
+                calibration.ms2_mz_tolerance(),
+                calibration.mobility_tolerance(),
+            )
             else {
                 return;
             };
@@ -490,8 +510,9 @@ pub(super) mod calib_dash_hook {
             d.show_final(
                 calib_dash::FitRecording::from_state(calibration.state()),
                 calib_dash::ToleranceSummary {
-                    mz_ppm: *mz,
-                    mobility_pct: (mobility.0 as f64, mobility.1 as f64),
+                    ms1_mz_ppm: (-ms1_mz.0, ms1_mz.1),
+                    ms2_mz_ppm: (-ms2_mz.0, ms2_mz.1),
+                    mobility_pct: (-f64::from(mobility.0), f64::from(mobility.1)),
                     rt_seconds: rt_tolerance_seconds,
                     n_calibrants: calibration.errors().rt_seconds.n,
                 },
@@ -692,13 +713,16 @@ fn count_shared_fragments(a: &[i64], b: &[i64]) -> usize {
 
 const MIN_SHARED_FRAGMENTS: usize = 5;
 
-pub(super) fn calibrate_from_phase1<I: ScorerQueriable>(
+pub(super) fn calibrate_from_phase1<I>(
     candidates: Vec<CalibrantCandidate>,
     phase1_lib: &ReferenceLibrary,
     main_lookup: Option<&PrecursorFragmentLookup>,
     pipeline: &Scorer<I>,
     config: &CalibrationConfig,
-) -> Result<CalibrationResult, CalibRtError> {
+) -> Result<CalibrationResult, CalibRtError>
+where
+    I: ScorerQueriable + for<'a> timsquery::QueriableData<ObservedSpectrum<'a, IonAnnot>>,
+{
     // === Step A: Fit iRT -> RT curve ===
     // With a separate calib lib, the curve's x-axis is the main speclib's iRT
     // (matched via shared fragments). We keep this per-candidate so later
@@ -782,9 +806,12 @@ pub(super) fn calibrate_from_phase1<I: ScorerQueriable>(
             config.calibration_query_rt_window_minutes,
         )));
 
-    let mut mz_errors_ppm: Vec<f32> = Vec::with_capacity(candidates.len());
+    let mut mz_samples = MzErrorSamples::default();
     let mut mobility_errors_pct: Vec<f32> = Vec::with_capacity(candidates.len());
     let mut rt_residuals_seconds: Vec<f32> = Vec::with_capacity(candidates.len());
+    let mut accepted = Vec::with_capacity(candidates.len());
+    let cycle_mapping = pipeline.index.ms1_cycle_mapping();
+    let peak_tolerance = query_tolerance.peak_tolerance();
 
     let mut n_off_ridge = 0usize;
     for (candidate, library_rt_opt) in candidates.iter().zip(library_rt_for_candidate.iter()) {
@@ -814,30 +841,33 @@ pub(super) fn calibrate_from_phase1<I: ScorerQueriable>(
             rt_residuals_seconds.push(residual);
         }
 
+        let rt = ResolvedRt::from_mapping(
+            RtSelection::Centered(candidate.apex_rt),
+            &query_tolerance.rt,
+            cycle_mapping,
+        )
+        .expect("calibrant apex inside acquisition");
+        accepted.push((candidate.speclib_index, rt));
         // No clone: build collector from the flyweight (Target) + rt override.
         let mut agg: SpectralCollector<IonAnnot, MzMobilityStatsCollector> =
-            SpectralCollector::new(&timsquery::ExtractionQuery::new(
-                &item,
-                timsquery::ResolvedRt::from_mapping(
-                    timsquery::RtSelection::Centered(candidate.apex_rt),
-                    &query_tolerance.rt,
-                    pipeline.index.ms1_cycle_mapping(),
-                )
-                .expect("calibrant apex inside acquisition"),
-            ));
-        pipeline
-            .index
-            .add_query(&mut agg, &query_tolerance.peak_tolerance());
+            SpectralCollector::new(&ExtractionQuery::new(&item, rt));
+        pipeline.index.add_query(
+            &mut ObservedSpectrum {
+                spectrum: &mut agg,
+                observe_peak: &mut |level, reference, observed| {
+                    mz_samples.observe_peak(level, reference, observed);
+                },
+            },
+            &peak_tolerance,
+        );
+        mz_samples.finish_calibrant();
 
         let expected_mob = item.mobility_ook0() as f64;
         let offsets = MzMobilityOffsets::new(&agg, expected_mob);
-        let Some((mz_err_ppm, mob_err_pct)) = offsets.weighted_ms1() else {
+        let Some((_, mob_err_pct)) = offsets.weighted_ms1() else {
             continue;
         };
 
-        if mz_err_ppm.is_finite() {
-            mz_errors_ppm.push(mz_err_ppm);
-        }
         // Mobility is NaN for a non-searchable-axis run (mzML/no-IM lib); don't
         // let it poison the MAD-based mobility tolerance (unused there anyway).
         if pipeline.index.mobility_kind().is_scoreable() && mob_err_pct.is_finite() {
@@ -845,45 +875,119 @@ pub(super) fn calibrate_from_phase1<I: ScorerQueriable>(
         }
     }
 
-    info!(
-        "m/z measurements: {}/{} candidates (dropped {} off-ridge)",
-        mz_errors_ppm.len(),
-        candidates.len(),
-        n_off_ridge,
-    );
-
     // === Step C: Derive tolerances from error distributions ===
-    let errors = DimensionErrors {
-        mz_ppm: ErrorStats::from_slice(&mz_errors_ppm),
-        mobility_pct: ErrorStats::from_slice(&mobility_errors_pct),
-        rt_seconds: ErrorStats::from_slice(&rt_residuals_seconds),
-    };
     let mut derivation = DerivationParams::default();
-    derivation.sigma.mz = config.mz_sigma;
     derivation.sigma.mobility = config.mobility_sigma;
     derivation.sigma.rt = config.rt_sigma_factor;
     derivation.floors.rt_minutes = config.min_rt_tolerance_minutes;
 
+    let [ms1_samples, ms2_samples] = mz_samples.samples();
+    let poisson_gain =
+        measure_poisson_gain(&pipeline.index, phase1_lib, &accepted, &peak_tolerance);
     info!(
-        "Calibration measurements: m/z={}, mobility={}, RT={}; off-ridge={}",
-        errors.mz_ppm.n, errors.mobility_pct.n, errors.rt_seconds.n, n_off_ridge,
+        "Calibration measurements: MS1 m/z={}, MS2 m/z={}, mobility={}, RT={}; off-ridge={}",
+        ms1_samples.len(),
+        ms2_samples.len(),
+        mobility_errors_pct.len(),
+        rt_residuals_seconds.len(),
+        n_off_ridge,
     );
     Ok(CalibrationResult::from_measurements(
         cal_state,
         &pipeline.broad_tolerance,
-        errors,
+        [ms1_samples, ms2_samples],
+        ErrorStats::from_slice(&mobility_errors_pct),
+        ErrorStats::from_slice(&rt_residuals_seconds),
         derivation,
-    ))
+    )
+    .with_poisson_gain(poisson_gain))
+}
+
+fn measure_poisson_gain<I: ScorerQueriable>(
+    index: &I,
+    library: &ReferenceLibrary,
+    accepted: &[(FlatIdx, ResolvedRt)],
+    tolerance: &PeakTolerance,
+) -> Option<f64> {
+    let &(first_row, first_rt) = accepted.first()?;
+    let step = TimedStep::begin_deferred("  Poisson gain");
+    let mapping = index.ms1_cycle_mapping();
+    assert!(u32::try_from(mapping.len()).is_ok());
+    let max_cycles = accepted
+        .iter()
+        .map(|&(_, rt)| ChromatogramCollector::<IonAnnot, f32>::query_cycles(rt, mapping).1)
+        .max()
+        .expect("accepted calibrants are nonempty");
+    assert!((1..=mapping.len()).contains(&max_cycles));
+
+    let first_item = library.item_at(first_row);
+    let mut chromatograms = ChromatogramCollector::<IonAnnot, f32>::new_with_capacity(
+        &ExtractionQuery::new(&first_item, first_rt),
+        mapping,
+        MAX_PRECURSORS,
+        MAX_FRAGMENTS,
+        max_cycles,
+    )
+    .expect("validated calibrant geometry");
+    let mut scratch = CalibrantGainScratch::new();
+    let mut samples = Vec::with_capacity(accepted.len());
+    for &(row, rt) in accepted {
+        let item = library.item_at(row);
+        let query = ExtractionQuery::new(&item, rt);
+        chromatograms
+            .try_reset_with(&query, mapping)
+            .expect("validated calibrant geometry");
+        debug_assert!(chromatograms.num_cycles() <= max_cycles);
+        index.add_query(&mut chromatograms, tolerance);
+        let apex_rt = rt.center().expect("calibrant query has an observed center");
+        let apex = mapping
+            .ms_to_closest_index((apex_rt.0 * 1000.0).round() as u32)
+            .index();
+        if let Some(gain) = apex
+            .checked_sub(chromatograms.cycle_offset())
+            .and_then(|apex| scratch.measure(&chromatograms.fragments, apex))
+        {
+            samples.push(gain);
+        }
+    }
+    assert!(samples.len() <= accepted.len());
+    let gain = median_poisson_gain(&mut samples);
+    step.finish_with(format_args!("{} gain samples", samples.len()));
+    info!(?gain, n = samples.len(), "Poisson intensity gain");
+    gain
+}
+
+fn median_poisson_gain(samples: &mut [f64]) -> Option<f64> {
+    const MIN_GAIN_CALIBRANTS: usize = 16;
+    if samples.len() < MIN_GAIN_CALIBRANTS {
+        return None;
+    }
+    debug_assert!(samples.iter().all(|&gain| gain.is_finite() && gain >= 0.0));
+    let (_, &mut median, _) = samples.select_nth_unstable_by(samples.len() / 2, f64::total_cmp);
+    (median > 0.0).then_some(median)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
+    #[test]
+    fn gain_requires_sixteen_samples_and_uses_positive_upper_median() {
+        let mut gains = [0.0; 16];
+        gains[..8].fill(2.0);
+        assert_eq!(median_poisson_gain(&mut gains[..15]), None);
+        assert_eq!(median_poisson_gain(&mut gains), Some(2.0));
+        gains.fill(0.0);
+        gains[..7].fill(2.0);
+        assert_eq!(median_poisson_gain(&mut gains), None);
+    }
+
     struct TestIndex {
         rt: timscentroid::rt_mapping::CycleToRTMapping<timscentroid::rt_mapping::MS1CycleIndex>,
         queries: std::sync::Mutex<Vec<(f32, timsquery::PeakTolerance)>>,
         mobility_kind: timscentroid::MobilityKind,
+        /// Intensity of every fragment at a global MS1 cycle; `None` adds nothing.
+        fragment_trace: Option<fn(usize) -> f32>,
     }
 
     impl timsseek::traits::MappableRTCycles for TestIndex {
@@ -901,9 +1005,18 @@ mod tests {
     impl timsquery::QueriableData<timsquery::ChromatogramCollector<IonAnnot, f32>> for TestIndex {
         fn add_query(
             &self,
-            _: &mut timsquery::ChromatogramCollector<IonAnnot, f32>,
+            query: &mut timsquery::ChromatogramCollector<IonAnnot, f32>,
             _: &timsquery::PeakTolerance,
         ) {
+            let Some(trace) = self.fragment_trace else {
+                return;
+            };
+            let offset = query.cycle_offset();
+            for (_, mut chromatogram) in query.iter_mut_fragments() {
+                for cycle in offset..offset + chromatogram.len() {
+                    chromatogram.add_at_index(u32::try_from(cycle).unwrap(), trace(cycle));
+                }
+            }
         }
     }
     impl timsquery::QueriableData<SpectralCollector<IonAnnot, f32>> for TestIndex {
@@ -917,15 +1030,38 @@ mod tests {
     impl timsquery::QueriableData<SpectralCollector<IonAnnot, MzMobilityStatsCollector>> for TestIndex {
         fn add_query(
             &self,
-            agg: &mut SpectralCollector<IonAnnot, MzMobilityStatsCollector>,
+            _: &mut SpectralCollector<IonAnnot, MzMobilityStatsCollector>,
+            _: &timsquery::PeakTolerance,
+        ) {
+        }
+    }
+    impl timsquery::QueriableData<ObservedSpectrum<'_, IonAnnot>> for TestIndex {
+        fn add_query(
+            &self,
+            query: &mut ObservedSpectrum<'_, IonAnnot>,
             tolerance: &timsquery::PeakTolerance,
         ) {
+            use timsquery::models::aggregators::spectrum_agg::MsLevel;
+
             self.queries
                 .lock()
                 .unwrap()
-                .push((agg.rt.center().unwrap().0, tolerance.clone()));
-            for ((_, mz), values) in agg.iter_mut_precursors() {
-                values.add(100.0, mz * (1.0 + 4e-6), 1.01);
+                .push((query.spectrum.rt.center().unwrap().0, tolerance.clone()));
+            for ((label, mz), values) in query.spectrum.iter_mut_precursors() {
+                for ppm in [2.0, 6.0] {
+                    let observed = mz * (1.0 + ppm * 1e-6);
+                    values.add(100.0, observed, 1.01);
+                    if label >= 0 {
+                        (query.observe_peak)(MsLevel::Ms1, mz, observed as f32);
+                    }
+                }
+            }
+            for ((_, &mz), values) in query.spectrum.iter_mut_fragments() {
+                for ppm in [-12.0, 0.0, 6.0] {
+                    let observed = mz * (1.0 + ppm * 1e-6);
+                    values.add(100.0, observed, 1.01);
+                    (query.observe_peak)(MsLevel::Ms2, mz, observed as f32);
+                }
             }
         }
     }
@@ -974,13 +1110,16 @@ mod tests {
                     rt: timscentroid::rt_mapping::CycleToRTMapping::new(vec![0, 30_000, 60_000]),
                     queries: Default::default(),
                     mobility_kind,
+                    fragment_trace: None,
                 },
                 broad_tolerance: timsquery::Tolerance {
-                    ms: MzTolerance::Ppm((20.0, 25.0)),
+                    ms1: MzTolerance::Ppm((20.0, 25.0)),
+                    ms2: MzTolerance::Ppm((30.0, 35.0)),
                     mobility: MobilityTolerance::Pct((6.0, 7.0)),
                     ..Default::default()
                 },
                 fragmented_range: timsquery::utils::TupleRange::try_new(100.0, 1000.0).unwrap(),
+                denoise_traces: true,
             };
             let candidate = || CalibrantCandidate {
                 score: 20.0,
@@ -992,10 +1131,12 @@ mod tests {
             let calibration =
                 calibrate_from_phase1(vec![candidate()], &lib, None, &pipeline, &config).unwrap();
             assert!(!calibration.has_rt_calibration());
-            assert_eq!(calibration.errors().mz_ppm.n, 1);
+            assert_eq!(calibration.errors().ms1_mz_ppm.n, 6); // Two peaks per isotope (M+0..M+2).
+            assert_eq!(calibration.errors().ms2_mz_ppm.n, 3);
             assert_eq!(calibration.errors().mobility_pct.n, expected_mobility_count);
             assert_eq!(calibration.errors().rt_seconds.n, 0);
-            assert!((calibration.errors().mz_ppm.mean - 4.0).abs() < 0.01);
+            assert!((calibration.errors().ms1_mz_ppm.mean - 4.0).abs() < 0.1);
+            assert!((calibration.errors().ms2_mz_ppm.mad - 6.0).abs() < 0.1);
             if expected_mobility_count > 0 {
                 assert!((calibration.errors().mobility_pct.mean - 1.0).abs() < 0.01);
             } else {
@@ -1011,7 +1152,7 @@ mod tests {
             let queries = pipeline.index.queries.lock().unwrap();
             assert_eq!(queries.len(), 1);
             assert_eq!(queries[0].0, 30.0);
-            assert_eq!(queries[0].1.ms, pipeline.broad_tolerance.ms);
+            assert_eq!(queries[0].1, pipeline.broad_tolerance.peak_tolerance());
             drop(queries);
             // Empty main-library lookup must not suppress auxiliary-library mass calibration.
             let calibration = calibrate_from_phase1(
@@ -1022,14 +1163,76 @@ mod tests {
                 &config,
             )
             .unwrap();
-            assert_eq!(calibration.errors().mz_ppm.n, 1);
+            assert_eq!(calibration.errors().ms1_mz_ppm.n, 6);
+            assert_eq!(calibration.errors().ms2_mz_ppm.n, 3);
             assert!(!calibration.has_rt_calibration());
             // Prescore actually visits RT-free rows rather than returning early.
             if library_rt.is_none() {
                 let (_, timings, _) = phase1_prescore(&lib, &pipeline, 10, &config, None, None);
                 assert_eq!(timings.n_passed_filter, 1);
+                assert_eq!(pipeline.index.queries.lock().unwrap().len(), 2);
             }
         }
+    }
+
+    #[test]
+    fn poisson_gain_reads_the_window_centred_on_the_calibrant_apex() {
+        use timsquery::models::{
+            Row,
+            TargetCapabilities,
+            TargetColumnsBuilder,
+        };
+        use timsseek::rt_calibration::ObservedRTSeconds;
+
+        // A spike at cycle 10 (10 s). The 5-cycle window centred on it is
+        // [100, 100, 200, 100, 100]: fourth difference 600, weight 10600.
+        // A window off by one cycle gives 160000 / 8600 instead.
+        const APEX: usize = 10;
+        let index = TestIndex {
+            rt: timscentroid::rt_mapping::CycleToRTMapping::new(
+                (0..20).map(|cycle| cycle * 1000).collect(),
+            ),
+            queries: Default::default(),
+            mobility_kind: timscentroid::MobilityKind::Ook0,
+            fragment_trace: Some(|cycle| if cycle == APEX { 200.0 } else { 100.0 }),
+        };
+        let mut builder =
+            TargetColumnsBuilder::with_capabilities(TargetCapabilities::default_diann());
+        let fragments = [(IonAnnot::try_from("y1").unwrap(), 300.0)];
+        builder.push_row(Row {
+            precursor_mz: 500.0,
+            charge: 2,
+            mobility: 1.0,
+            frags: &fragments,
+            ..Default::default()
+        });
+        let lib = ReferenceLibrary::try_from(timsquery::serde::TargetTable::Mzpaf {
+            geom: builder
+                .seal(timsquery::models::capabilities::DecoyPolicy::Never)
+                .unwrap(),
+            frag_intens: Some(vec![1.0]),
+        })
+        .unwrap();
+        let row = lib.geometry().flats().next().unwrap();
+        // +-5 s around the apex: the extraction starts at cycle 5, so the
+        // apex must be shifted into collector-local coordinates.
+        let rt = ResolvedRt::resolve(
+            RtSelection::Centered(ObservedRTSeconds(10.0)),
+            &RtTolerance::Minutes((5.0 / 60.0, 5.0 / 60.0)),
+            timsquery::utils::TupleRange::try_new(ObservedRTSeconds(0.0), ObservedRTSeconds(19.0))
+                .unwrap(),
+        )
+        .unwrap();
+        let tolerance = PeakTolerance::default();
+
+        let accepted = vec![(row, rt); 16];
+        let gain = measure_poisson_gain(&index, &lib, &accepted, &tolerance).unwrap();
+        assert!((gain - 600.0 * 600.0 / 10600.0).abs() < 1e-9, "{gain}");
+        // One calibrant short of the minimum: no gain.
+        assert_eq!(
+            measure_poisson_gain(&index, &lib, &accepted[..15], &tolerance),
+            None
+        );
     }
 
     #[test]

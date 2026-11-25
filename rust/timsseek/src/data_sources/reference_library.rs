@@ -27,6 +27,9 @@ use crate::fragment_mass::isotope_dist_from_mass;
 use crate::models::DecoyMarking;
 use crate::scoring::plan;
 
+pub const MAX_FRAGMENTS: usize = u8::MAX as usize;
+pub const MAX_PRECURSORS: usize = 3;
+
 #[derive(Debug, Clone)]
 pub struct ReferenceLibrary {
     geom: TargetColumns<IonAnnot>,
@@ -138,7 +141,7 @@ impl ReferenceLibrary {
                 }
                 // The scoring envelope currently supplies exactly three isotope bins.
                 let IsotopeStrategy::FromComposition { n_isotopes } = geom.capabilities().isotopes;
-                if n_isotopes > 3 {
+                if usize::from(n_isotopes) > MAX_PRECURSORS {
                     return Err(TargetReadingError::InvalidLibrary {
                         message: format!(
                             "requested {n_isotopes} precursor isotopes; scoring supports at most 3"
@@ -147,8 +150,18 @@ impl ReferenceLibrary {
                 }
                 let mut seen = HashSet::new();
                 for (row_index, row) in geom.rows().enumerate() {
+                    let labels = geom.frag_labels(row);
+                    if labels.len() > MAX_FRAGMENTS {
+                        return Err(TargetReadingError::InvalidLibrary {
+                            message: format!(
+                                "source {:?}, row {row_index}: {} fragments exceeds the scoring limit of {MAX_FRAGMENTS}",
+                                geom.output_id(row),
+                                labels.len(),
+                            ),
+                        });
+                    }
                     seen.clear();
-                    for &label in geom.frag_labels(row) {
+                    for &label in labels {
                         if !seen.insert(label) {
                             return Err(TargetReadingError::InvalidLibrary {
                                 message: format!(

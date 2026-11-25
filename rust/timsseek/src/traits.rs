@@ -47,6 +47,7 @@ use timsquery::{
 ///     index: peaks,
 ///     broad_tolerance: broad_tol,
 ///     fragmented_range,
+///     denoise_traces: true,
 /// };
 ///
 /// // Scorer can now use ChromatogramCollector, SpectralCollector variants
@@ -81,6 +82,11 @@ pub trait MappableRTCycles {
     /// The run's mobility-axis kind. Gates the mobility score features: a
     /// non-`Ook0` run neutralizes them (see `ScoringFields::neutralize_mobility`).
     fn mobility_kind(&self) -> &timscentroid::MobilityKind;
+
+    /// Direct single-window access for the optional shadow scoring pass.
+    fn eager_index(&self) -> Option<&timscentroid::IndexedTimstofPeaks> {
+        None
+    }
 }
 
 impl MappableRTCycles for timscentroid::IndexedTimstofPeaks {
@@ -93,6 +99,10 @@ impl MappableRTCycles for timscentroid::IndexedTimstofPeaks {
     fn mobility_kind(&self) -> &timscentroid::MobilityKind {
         self.mobility_kind()
     }
+
+    fn eager_index(&self) -> Option<&timscentroid::IndexedTimstofPeaks> {
+        Some(self)
+    }
 }
 
 impl MappableRTCycles for timsquery::serde::IndexedPeaksHandle {
@@ -104,5 +114,12 @@ impl MappableRTCycles for timsquery::serde::IndexedPeaksHandle {
 
     fn mobility_kind(&self) -> &timscentroid::MobilityKind {
         self.mobility_kind()
+    }
+
+    fn eager_index(&self) -> Option<&timscentroid::IndexedTimstofPeaks> {
+        match self {
+            Self::Eager(index) => Some(index),
+            Self::Lazy(_) => None,
+        }
     }
 }

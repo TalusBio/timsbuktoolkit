@@ -8,6 +8,10 @@
 use base64::Engine;
 use timscentroid::MobilityKind;
 use timscentroid::reader::mzdata::from_mzml_file;
+use timscentroid::rt_mapping::{
+    RTIndex,
+    WindowCycleIndex,
+};
 
 /// base64 of a little-endian f64 array (mzML `64-bit float`, no compression).
 fn b64_f64(vals: &[f64]) -> String {
@@ -78,7 +82,7 @@ fn spectrum(
 }
 
 fn synthetic_dia_mzml() -> String {
-    // 2 cycles; each = MS1 then two MS2 windows [400,402] and [402,404].
+    // The second window [402,404] starts one cycle after the first.
     let mut specs = String::new();
     let mut idx = 0;
     for (cycle, rt) in [(0usize, 0.10_f64), (1, 0.13)] {
@@ -92,6 +96,9 @@ fn synthetic_dia_mzml() -> String {
         ));
         idx += 1;
         for (lo, hi) in [(400.0, 402.0), (402.0, 404.0)] {
+            if cycle == 0 && lo == 402.0 {
+                continue;
+            }
             specs.push_str(&spectrum(
                 idx,
                 &format!("scan=cyc{cycle}_w{lo}"),
@@ -130,6 +137,10 @@ fn ingests_synthetic_dia_mzml() {
     // Two distinct isolation windows, two MS1 cycles.
     assert_eq!(idx.n_ms2_window_groups(), 2, "expected 2 windows");
     assert_eq!(idx.ms1_cycle_mapping().len(), 2, "expected 2 cycles");
+    let groups = idx.ms2_window_groups();
+    assert!(groups[0].1.has_frame(WindowCycleIndex::new(0)));
+    assert!(!groups[1].1.has_frame(WindowCycleIndex::new(0)));
+    assert!(groups[1].1.has_frame(WindowCycleIndex::new(1)));
     // RT stored in ms, monotonic (0.10 min → 6000 ms, 0.13 min → 7800 ms).
     let rts = idx.ms1_cycle_mapping().clone().unpack();
     assert!(

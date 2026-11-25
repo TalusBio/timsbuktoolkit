@@ -20,6 +20,9 @@
 ## Number of peptides scored per chunk. Bigger = more parallelism, more RAM.
 chunk_size = 20000
 
+## Smooth extracted traces for chromatographic shape and coelution features.
+denoise_traces = true
+
 ## Decoy generation strategy.
 ## "if_missing"  -- generate ±CH2 mass-shift decoys when the library has none
 ## "force"       -- always generate decoys (replace any existing ones)
@@ -56,6 +59,7 @@ rescore_model = "mlp"
 ## Extraction tolerances for the broad first-pass scoring (pre-calibration).
 ## Each field is an externally-tagged enum:
 ##   ms       : { Ppm = [left, right] } | { Absolute = [left, right] }
+##   ms1, ms2 : optional per-level overrides with the same syntax as ms
 ##   mobility : "Unrestricted" | { Pct = [left, right] } | { Absolute = [left, right] }
 ##   quad     : { Absolute = [left, right] }
 ##   rt       : "Unrestricted" | { Minutes = [before, after] } | { Pct = [before, after] }
@@ -80,11 +84,10 @@ grid_size = 100
 ## DP lookback width during pathfinding (larger = smoother curve, slower fit).
 dp_lookback = 30
 
-## Tolerance-derivation sigma multipliers; `1.4826 * MAD` is the robust stdev
-## stand-in. mz_sigma / mobility_sigma give median-offset bounds
-## (`median ± sigma * 1.4826 * MAD`, asymmetric); rt_sigma_factor is a plain
-## half-width with NO median offset, floored by `min_rt_tolerance_minutes`.
-## mz_sigma 3.0 over 1.5: +12.6% sensitivity on an Astral run.
+## m/z calibration uses the Gaussian center ± 3 standard deviations from a
+## Gaussian + uniform fit. mz_sigma is accepted for older configs.
+## Mobility uses median ± mobility_sigma * 1.4826 * MAD. RT uses
+## rt_sigma_factor * 1.4826 * MAD, floored by min_rt_tolerance_minutes.
 mz_sigma                 = 3.0
 mobility_sigma           = 3.0
 rt_sigma_factor          = 3.0
@@ -163,3 +166,6 @@ calibration_query_rt_window_minutes = 0.083333336   # 5 seconds (5 / 60)
 # max_prefix_keys = 256
 # save_sidecar = false
 # stale_sweep_age_hours = 24
+
+# [diagnostics]
+# trace_precursors = "precursors.tsv" # modified and charge columns, tab-separated

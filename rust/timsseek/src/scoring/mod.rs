@@ -3,6 +3,7 @@ pub mod apex;
 pub(crate) mod apex_dsp;
 pub mod apex_finding;
 pub mod blocks;
+mod denoise;
 pub mod extraction;
 pub mod offsets;
 pub mod parquet_writer;
@@ -10,8 +11,10 @@ pub mod pipeline;
 pub mod plan;
 pub mod results;
 mod scores;
+mod shadow;
 pub mod skip;
 pub mod timings;
+mod window_map;
 
 pub use scores::hyperscore;
 

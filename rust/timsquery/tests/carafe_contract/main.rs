@@ -142,7 +142,8 @@ fn carafe_tolerance_spellings_deserialize() {
 
     // Asymmetric by design: the edges encode a calibration offset (README).
     // Collapsing them to one symmetric tolerance recentres every window.
-    assert_eq!(tol.ms, MzTolerance::Ppm((13.0, 17.0)));
+    assert_eq!(tol.ms1, MzTolerance::Ppm((13.0, 17.0)));
+    assert_eq!(tol.ms2, tol.ms1);
     assert_eq!(tol.rt, RtTolerance::Minutes((0.1, 0.1)));
     assert_eq!(tol.mobility, MobilityTolerance::Pct((3.0, 3.0)));
     assert_eq!(tol.quad, QuadTolerance::Absolute((0.1, 0.1)));
@@ -163,15 +164,18 @@ fn a_negative_low_tolerance_edge_is_accepted() {
     }"#,
     )
     .expect("a negative low edge must deserialize");
-    assert_eq!(tol.ms, MzTolerance::Ppm((-2.0, 32.0)));
+    assert_eq!(tol.ms1, MzTolerance::Ppm((-2.0, 32.0)));
+    assert_eq!(tol.ms2, tol.ms1);
 
-    let range = tol.mz_range(1000.0);
-    assert!(
-        range.start() > 1000.0 && range.end() > range.start(),
-        "expected a well-formed window above the target, got {:?}..{:?}",
-        range.start(),
-        range.end()
-    );
+    for ms in [tol.ms1, tol.ms2] {
+        let range = ms.mz_range(1000.0);
+        assert!(
+            range.start() > 1000.0 && range.end() > range.start(),
+            "expected a well-formed window above the target, got {:?}..{:?}",
+            range.start(),
+            range.end()
+        );
+    }
 }
 
 /// An `id` keeps the shape the caller sent: an integer comes back an integer,

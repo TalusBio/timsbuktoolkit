@@ -1362,8 +1362,12 @@ fn tolerance_lines(
     match tolerances {
         Some(t) => {
             lines.push(Line::raw(format!(
-                "m/z tolerance: {} ppm",
-                fmt_interval(t.mz_ppm)
+                "MS1 m/z tolerance: {} ppm",
+                fmt_interval(t.ms1_mz_ppm)
+            )));
+            lines.push(Line::raw(format!(
+                "MS2 m/z tolerance: {} ppm",
+                fmt_interval(t.ms2_mz_ppm)
             )));
             lines.push(Line::raw(format!(
                 "mobility tolerance: {} %",
@@ -1761,7 +1765,8 @@ mod tests {
         app.set_final(
             rec,
             ToleranceSummary {
-                mz_ppm: (-8.5, 9.5),
+                ms1_mz_ppm: (-8.5, 9.5),
+                ms2_mz_ppm: (-6.5, 7.5),
                 mobility_pct: (-3.0, 3.0),
                 rt_seconds: 12.5,
                 n_calibrants: 42,
@@ -2173,7 +2178,7 @@ mod tests {
     }
 
     /// Reporting `-8.5 .. +9.5` as `±9.5` understates one side by two ppm and
-    /// `±8.5` overstates the other -- the reason `mz_ppm` is a pair at all.
+    /// `±8.5` overstates the other.
     #[test]
     fn fmt_interval_collapses_only_the_symmetric_case() {
         assert_eq!(fmt_interval((-3.0, 3.0)), "±3.0");
