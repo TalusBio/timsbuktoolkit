@@ -265,50 +265,22 @@ pub fn stream_process_batches<L: KeyLike + Display + DecoyShift>(
     let file = File::create(output_path)?;
     let writer = BufWriter::new(file);
 
-    match serialization_format {
-        SerializationFormat::PrettyJson => {
-            let ser = JsonStreamSerializer::new(writer, SerializationFormat::PrettyJson);
-            process_and_serialize(
-                geom,
-                aggregator_use,
-                index,
-                tolerance,
-                ser,
-                total_batches,
-                batch_size,
-                serialization_start,
-                output_path,
-            )?;
-        }
-        SerializationFormat::Json => {
-            let ser = JsonStreamSerializer::new(writer, SerializationFormat::Json);
-            process_and_serialize(
-                geom,
-                aggregator_use,
-                index,
-                tolerance,
-                ser,
-                total_batches,
-                batch_size,
-                serialization_start,
-                output_path,
-            )?;
-        }
-        SerializationFormat::Ndjson => {
-            let ser = JsonStreamSerializer::new(writer, SerializationFormat::Ndjson);
-            process_and_serialize(
-                geom,
-                aggregator_use,
-                index,
-                tolerance,
-                ser,
-                total_batches,
-                batch_size,
-                serialization_start,
-                output_path,
-            )?;
-        }
-    }
+    let ser = JsonStreamSerializer::new(writer, serialization_format);
+    process_and_serialize(
+        geom,
+        aggregator_use,
+        index,
+        tolerance,
+        ser,
+        total_batches,
+        batch_size,
+    )?;
+    let serialization_elapsed = serialization_start.elapsed();
+    println!("Wrote to {}", output_path.display());
+    println!(
+        "Total processing and serialization took {:#?}",
+        serialization_elapsed
+    );
     Ok(())
 }
 
@@ -316,7 +288,7 @@ pub fn stream_process_batches<L: KeyLike + Display + DecoyShift>(
 /// Each batch materializes `QueryRef` flyweights over the shared arena (no row
 /// data is copied) and feeds them to the extraction collectors.
 #[instrument(skip_all)]
-pub fn process_and_serialize<L: KeyLike + Display + DecoyShift>(
+fn process_and_serialize<L: KeyLike + Display + DecoyShift>(
     geom: &TargetColumns<L>,
     aggregator_use: PossibleAggregator,
     index: &IndexedTimstofPeaks,
@@ -324,8 +296,6 @@ pub fn process_and_serialize<L: KeyLike + Display + DecoyShift>(
     mut ser: JsonStreamSerializer<impl Write>,
     total_batches: usize,
     batch_size: usize,
-    serialization_start: Instant,
-    output_path: &Path,
 ) -> Result<(), CliError> {
     let mut last_progress = Instant::now();
     let progress_interval = Duration::from_secs(2);
@@ -355,12 +325,6 @@ pub fn process_and_serialize<L: KeyLike + Display + DecoyShift>(
     }
 
     ser.finish()?;
-    let serialization_elapsed = serialization_start.elapsed();
-    println!("Wrote to {}", output_path.display());
-    println!(
-        "Total processing and serialization took {:#?}",
-        serialization_elapsed
-    );
     Ok(())
 }
 

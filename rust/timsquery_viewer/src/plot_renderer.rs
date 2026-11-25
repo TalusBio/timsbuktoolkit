@@ -417,18 +417,22 @@ pub struct MS2Spectrum {
     pub fragment_labels: Vec<String>,
 }
 
+pub(crate) struct ChromatogramPlotOptions<'a> {
+    pub(crate) mode: PlotMode,
+    pub(crate) link_group_id: Option<&'a str>,
+    pub(crate) show_header: bool,
+}
+
 /// Renders a chromatogram plot using egui_plot with custom zoom/pan controls
 /// Returns the clicked RT (in seconds) if the plot was clicked
 ///
 /// If `link_group_id` is provided, the X-axis will be linked to other plots with the same ID
 /// If `show_header` is false, the elution group ID and reference RT/mobility labels are not shown
 /// If `auto_zoom_frame_counter` is greater than 0, the plot bounds will be reset to show the full data range, and the counter will be decremented
-pub fn render_chromatogram_plot(
+pub(crate) fn render_chromatogram_plot(
     ui: &mut egui::Ui,
     chromatogram: &ChromatogramLines,
-    mode: PlotMode,
-    link_group_id: Option<&str>,
-    show_header: bool,
+    options: ChromatogramPlotOptions<'_>,
     auto_zoom_frame_counter: &mut u8,
     auto_zoom_mode: &AutoZoomMode,
     // Lines to add vertical markers for
@@ -436,6 +440,11 @@ pub fn render_chromatogram_plot(
     // Apex score for PeakApex auto-zoom mode
     apex_score: Option<&ApexBlocks>,
 ) -> Option<f64> {
+    let ChromatogramPlotOptions {
+        mode,
+        link_group_id,
+        show_header,
+    } = options;
     let mut clicked_rt = None;
 
     // Optionally show header information

@@ -70,6 +70,65 @@ jobs:
       - name: Check timsseek_cli with the calib-dashboard feature
         run: cargo check --verbose -p timsseek_cli --features calib-dashboard --all-targets
 
+  rust-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: true
+          cache-key: task-rust-tests
+          rustflags: ''
+      - name: Run default workspace tests
+        run: cargo test -- --nocapture
+      - name: Run rescore dashboard tests
+        run: cargo test -p rescore_dash -- --nocapture
+
+  python-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+      - name: Run Python tests
+        run: uv run python -m pytest
+
+  clippy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Setup Clippy
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          components: clippy
+          cache: true
+          cache-key: task-clippy
+          rustflags: ''
+      # Match the targets and dependency scope implied by Taskfile.yml's first Clippy invocation.
+      - name: Lint default workspace targets
+        run: cargo clippy --all-targets --no-deps -- -D warnings
+      - name: Lint rescore dashboard targets
+        run: cargo clippy -p rescore_dash --all-targets -- -D warnings
+      - name: Lint timsseek_cli with the dashboard feature
+        run: cargo clippy -p timsseek_cli --features dashboard --all-targets -- -D warnings
+
+  doc:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+      - name: Setup Rust
+        uses: actions-rust-lang/setup-rust-toolchain@v1
+        with:
+          cache: true
+          cache-key: task-doc
+          rustflags: ''
+      - name: Build workspace documentation
+        env:
+          RUSTDOCFLAGS: -D warnings
+        run: cargo doc --workspace --no-deps
+
   # The PSI-MS `spectrum origin type` subtree is vendored as generated Rust
   # (`rust/timsquery/src/serde/psims_origin_type.rs`), because no crate in the
   # tree carries the PSI-MS vocabulary and the reader needs `is_a` to tell a
@@ -107,6 +166,8 @@ jobs:
       - name: rustfmt
         run: cargo +nightly fmt --all -- --check
       - uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
       - name: ruff format
         run: uv run ruff format --check
 
