@@ -49,6 +49,24 @@ pub enum SkipReason {
     InvariantViolation,
 }
 
+impl SkipReason {
+    pub fn as_str(self) -> &'static str {
+        match self {
+            Self::PrecursorOutOfFragmentedRange => "precursor outside fragmentation range",
+            Self::RetentionTimeOutOfBounds => "retention time out of bounds",
+            Self::NoExpectedFragments => "no expected fragments",
+            Self::FragmentsOutsideScanRange => "fragments outside scan range",
+            Self::NoObservedSignal => "no observed signal",
+            Self::ApexEmptyData => "empty apex data",
+            Self::ApexInsufficientData => "insufficient apex data",
+            Self::ApexNonFiniteScore => "non-finite apex score",
+            Self::CalibrantNanScore => "NaN calibrant score",
+            Self::FinalizeError => "finalization error",
+            Self::InvariantViolation => "invariant violation",
+        }
+    }
+}
+
 /// Map the timsquery-level error into a `SkipReason` sub-bucket.
 fn classify_tq_error(err: &TQDataProcessingError) -> SkipReason {
     match err {
@@ -172,18 +190,33 @@ impl SkipCounts {
         [
             (
                 precursor_out_of_fragmented_range,
-                "precursor outside fragmentation range",
+                SkipReason::PrecursorOutOfFragmentedRange.as_str(),
             ),
-            (retention_time_out_of_bounds, "retention time out of bounds"),
-            (no_expected_fragments, "no expected fragments"),
-            (fragments_outside_scan_range, "fragments outside scan range"),
-            (no_observed_signal, "no observed signal"),
-            (apex_empty_data, "empty apex data"),
-            (apex_insufficient_data, "insufficient apex data"),
-            (apex_non_finite_score, "non-finite apex score"),
-            (calibrant_nan_score, "NaN calibrant score"),
-            (finalize_error, "finalization error"),
-            (invariant_violation, "invariant violation"),
+            (
+                retention_time_out_of_bounds,
+                SkipReason::RetentionTimeOutOfBounds.as_str(),
+            ),
+            (
+                no_expected_fragments,
+                SkipReason::NoExpectedFragments.as_str(),
+            ),
+            (
+                fragments_outside_scan_range,
+                SkipReason::FragmentsOutsideScanRange.as_str(),
+            ),
+            (no_observed_signal, SkipReason::NoObservedSignal.as_str()),
+            (apex_empty_data, SkipReason::ApexEmptyData.as_str()),
+            (
+                apex_insufficient_data,
+                SkipReason::ApexInsufficientData.as_str(),
+            ),
+            (
+                apex_non_finite_score,
+                SkipReason::ApexNonFiniteScore.as_str(),
+            ),
+            (calibrant_nan_score, SkipReason::CalibrantNanScore.as_str()),
+            (finalize_error, SkipReason::FinalizeError.as_str()),
+            (invariant_violation, SkipReason::InvariantViolation.as_str()),
         ]
     }
 }

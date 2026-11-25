@@ -30,6 +30,7 @@ use crate::output_sink::{
     OutputSink,
     sample_name_from_uri,
 };
+use crate::processing::precursor_trace::TraceSelection;
 use crate::run_inputs::{
     LibrarySource,
     ResolvedInputs,
@@ -232,6 +233,7 @@ struct SearchRun<'a> {
     speclib: &'a timsseek::data_sources::reference_library::ReferenceLibrary,
     calib_lib: Option<&'a timsseek::data_sources::reference_library::ReferenceLibrary>,
     config: &'a Config,
+    trace_selection: Option<&'a TraceSelection>,
     sink: &'a OutputSink,
     overwrite: bool,
     max_qvalue: f32,
@@ -330,6 +332,7 @@ impl SearchRun<'_> {
             calibration: &self.config.calibration,
             no_feature_stats: self.no_feature_stats,
             rescore_model: self.config.analysis.rescore_model,
+            trace_selection: self.trace_selection,
         };
         let report = processing::run_pipeline(
             self.speclib,
@@ -589,6 +592,18 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
         write_config_used(&config, &config_output_path)?;
     }
 
+    let trace_selection = config
+        .diagnostics
+        .as_ref()
+        .and_then(|diagnostics| diagnostics.trace_precursors.as_deref())
+        .map(|path| {
+            TraceSelection::read(path, &speclib).map_err(|source| errors::CliError::Io {
+                source: source.to_string(),
+                path: Some(path.display().to_string()),
+            })
+        })
+        .transpose()?;
+
     let total_files = validated.raw_inputs.len();
     info!("Processing {} raw input(s)", total_files);
     let search_run = SearchRun {
@@ -597,6 +612,7 @@ pub(crate) fn search(args: &SearchArgs) -> std::result::Result<(), errors::CliEr
         speclib: &speclib,
         calib_lib: calib_lib.as_ref(),
         config: &config,
+        trace_selection: trace_selection.as_ref(),
         sink: &sink,
         overwrite: validated.overwrite,
         max_qvalue: args.max_qvalue,

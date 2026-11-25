@@ -48,6 +48,12 @@ use tracing::{
 };
 
 mod calibration;
+pub(crate) mod precursor_trace;
+
+use precursor_trace::{
+    PrecursorTrace,
+    TraceSelection,
+};
 
 use calibration::{
     build_precursor_fragment_lookup,
@@ -118,6 +124,7 @@ fn execute_raw_pipeline<I: ScorerQueriable>(
     library: &ReferenceLibrary,
     pipeline: &Scorer<I>,
     options: &PipelineOptions<'_>,
+    mut trace: Option<PrecursorTrace<'_>>,
 ) -> Result<PipelineReport, TimsSeekError> {
     info!(
         "No decoys: raw spectrum scoring over full acquisition RT; calibration, competition, rescoring and q-value filtering disabled"
@@ -136,7 +143,10 @@ fn execute_raw_pipeline<I: ScorerQueriable>(
     };
     let mut timings = ScoreTimings::default();
     for batch in library.chunks(options.chunk_size) {
-        let (rows, timing, skips) = pipeline.score_raw_batch(library, &batch);
+        let (rows, timing, skips) = match &trace {
+            Some(trace) => pipeline.score_traced_batch(library, &batch, None, &trace.phase3),
+            None => pipeline.score_raw_batch(library, &batch),
+        };
         timings += timing;
         report.phase3_skips += skips;
         report.total_scored += rows.len();
@@ -145,6 +155,9 @@ fn execute_raw_pipeline<I: ScorerQueriable>(
         }
     }
     writer.close().map_err(io_error)?;
+    if let Some(trace) = &mut trace {
+        trace.write(library, &path, true)?;
+    }
     report.phase3_extraction_thread_ms = timings.extraction.as_millis() as u64;
     report.phase3_scoring_thread_ms = timings.scoring.as_millis() as u64;
     report.phase3_spectral_query_thread_ms = timings.spectral_query.as_millis() as u64;
@@ -167,6 +180,7 @@ pub struct PipelineOptions<'a> {
     pub calibration: &'a CalibrationConfig,
     pub no_feature_stats: bool,
     pub rescore_model: RescoreModel,
+    pub trace_selection: Option<&'a TraceSelection>,
 }
 
 fn mz_fit_summary(tolerance: &MzTolerance, outcome: Option<MzFitOutcome>) -> String {
@@ -193,12 +207,13 @@ pub fn execute_pipeline<I>(
 where
     I: ScorerQueriable + for<'a> timsquery::QueriableData<ObservedSpectrum<'a, IonAnnot>>,
 {
+    let mut trace = options.trace_selection.map(PrecursorTrace::new);
     if !matches!(
         speclib.geometry().capabilities().decoys,
         timsquery::models::capabilities::DecoyStrategy::MassShift { .. }
     ) && speclib.geometry().n_stored_decoys() == 0
     {
-        return execute_raw_pipeline(speclib, pipeline, options);
+        return execute_raw_pipeline(speclib, pipeline, options, trace);
     }
     let PipelineOptions {
         chunk_size,
@@ -207,6 +222,7 @@ where
         calibration: calib_config,
         no_feature_stats,
         rescore_model,
+        ..
     } = *options;
     // === PHASE 1: Broad prescore -> collect top calibrants ===
     // Use calibration library if provided, otherwise fall back to main speclib
@@ -333,6 +349,7 @@ where
         &calibration,
         chunk_size,
         &mut phase3_timings,
+        trace.as_ref(),
     );
     step.finish_with(format_args!("{} peptides", results.len()));
     alloc_track::snap!("Phase 3: Score");
@@ -343,7 +360,7 @@ where
 
     // === PHASE 4: Target-decoy competition ===
     let step = TimedStep::begin("Phase 4: Compete");
-    let mut competed = target_decoy_compete(results, speclib);
+    let mut competed = target_decoy_compete(results, speclib, trace.as_mut());
     competed.sort_unstable_by(|x, y| {
         y.scoring
             .primary
@@ -402,7 +419,12 @@ where
                 path: out_path_pq.clone().into(),
                 source: e,
             })?;
-    for res in data.into_iter() {
+    if let Some(trace) = &mut trace {
+        for res in &data {
+            trace.final_q(&res.scoring, res.qvalue, res.qvalue <= max_qvalue);
+        }
+    }
+    for res in data {
         if res.qvalue <= max_qvalue {
             pq_writer.add(res).map_err(|e| TimsSeekError::Io {
                 path: out_path_pq.clone().into(),
@@ -414,6 +436,9 @@ where
         path: out_path_pq.clone().into(),
         source: e,
     })?;
+    if let Some(trace) = &mut trace {
+        trace.write(speclib, &out_path_pq, false)?;
+    }
     let phase6_ms = step.finish().as_millis() as u64;
     alloc_track::snap!("Phase 6: Write output");
     info!("Wrote final results to {:?}", out_path_pq);
@@ -473,6 +498,7 @@ fn phase3_score<I: ScorerQueriable>(
     calibration: &CalibrationResult,
     chunk_size: usize,
     timings: &mut ScoreTimings,
+    trace: Option<&PrecursorTrace<'_>>,
 ) -> (Vec<ScoredCandidate>, SkipCounts) {
     let total_peptides = speclib.len();
     let n_chunks = total_peptides.div_ceil(chunk_size);
@@ -484,8 +510,12 @@ fn phase3_score<I: ScorerQueriable>(
     // Chunk the flat index space `0..len` and hand each range to the batch
     // scorer, which drives the lazy flyweight by index.
     for batch in speclib.chunks(chunk_size).progress_with(pb) {
-        let (batch_results, batch_timings, batch_skips) =
-            pipeline.score_calibrated_batch(speclib, &batch, calibration);
+        let (batch_results, batch_timings, batch_skips) = match trace {
+            Some(trace) => {
+                pipeline.score_traced_batch(speclib, &batch, Some(calibration), &trace.phase3)
+            }
+            None => pipeline.score_calibrated_batch(speclib, &batch, calibration),
+        };
         *timings += batch_timings;
         skips += batch_skips;
         results.extend(batch_results);
@@ -513,7 +543,11 @@ fn phase3_score<I: ScorerQueriable>(
 )]
 /// Group complete peptide structure + charge + m/z, then retain the best score,
 /// preferring a target on ties. Incomparable chemistry stays row-specific.
-fn dedup_by_sequence(results: &mut Vec<ScoredCandidate>, library: &ReferenceLibrary) {
+fn dedup_by_sequence(
+    results: &mut Vec<ScoredCandidate>,
+    library: &ReferenceLibrary,
+    mut on_drop: impl FnMut(&ScoredCandidate, &ScoredCandidate),
+) {
     let chemistry_cmp = |a: &ScoredCandidate, b: &ScoredCandidate| {
         let a = &a.scoring.identity;
         let b = &b.scoring.identity;
@@ -588,7 +622,13 @@ fn dedup_by_sequence(results: &mut Vec<ScoredCandidate>, library: &ReferenceLibr
             )
             .then(a.scoring.identity.row.cmp(&b.scoring.identity.row))
     });
-    results.dedup_by(|a, b| key_cmp(a, b).is_eq());
+    results.dedup_by(|later, kept| {
+        let duplicate = key_cmp(later, kept).is_eq();
+        if duplicate {
+            on_drop(later, kept);
+        }
+        duplicate
+    });
 }
 
 /// Targets discarded because another target won their competition, which is the
@@ -620,6 +660,7 @@ fn targets_beaten_by_targets(sorted: &[ScoredCandidate]) -> usize {
 fn target_decoy_compete(
     mut results: Vec<ScoredCandidate>,
     library: &ReferenceLibrary,
+    mut trace: Option<&mut PrecursorTrace<'_>>,
 ) -> Vec<CompetedCandidate> {
     // TODO: re-implement so we dont drop results but instead just flag them as rejected (maybe
     // a slice where we push rejected results to the end and keep the trailing slice as the "active")
@@ -644,7 +685,13 @@ fn target_decoy_compete(
         "First 10 result before deduplication for seq+charge+mz: {:#?}",
         glimpse_result_head(&results)
     );
-    dedup_by_sequence(&mut results, library);
+    if let Some(trace) = &mut trace {
+        dedup_by_sequence(&mut results, library, |loser, winner| {
+            trace.dropped(&loser.scoring, &winner.scoring, true);
+        });
+    } else {
+        dedup_by_sequence(&mut results, library, |_, _| {});
+    }
     debug!(
         "First 10 result after deduplication for seq+charge+mz: {:#?}",
         glimpse_result_head(&results)
@@ -658,11 +705,29 @@ fn target_decoy_compete(
         results.len()
     );
 
+    let score_cmp = |a: &ScoredCandidate, b: &ScoredCandidate| {
+        a.scoring
+            .primary
+            .main_score
+            .partial_cmp(&b.scoring.primary.main_score)
+            .expect("NaN main_score should have been filtered during Phase 3 scoring")
+    };
+    let competition_groups =
+        results.chunk_by(|a, b| a.scoring.identity.competes_with(&b.scoring.identity));
+    if let Some(trace) = &mut trace {
+        for group in competition_groups.clone() {
+            let winner = group
+                .iter()
+                .max_by(|a, b| score_cmp(a, b))
+                .expect("chunk_by yields non-empty runs");
+            trace.won(&winner.scoring);
+            for loser in group.iter().filter(|&row| !std::ptr::eq(row, winner)) {
+                trace.dropped(&loser.scoring, &winner.scoring, false);
+            }
+        }
+    }
     // Each run is one competition. Keep only its highest-scoring member.
-    let group_lens: Vec<usize> = results
-        .chunk_by(|a, b| a.scoring.identity.competes_with(&b.scoring.identity))
-        .map(<[_]>::len)
-        .collect();
+    let group_lens: Vec<usize> = competition_groups.map(<[_]>::len).collect();
 
     info!(
         "Number of results after t/d competition: {}",
@@ -684,13 +749,7 @@ fn target_decoy_compete(
             members
                 .by_ref()
                 .take(len)
-                .max_by(|a, b| {
-                    a.scoring
-                        .primary
-                        .main_score
-                        .partial_cmp(&b.scoring.primary.main_score)
-                        .expect("NaN main_score should have been filtered during Phase 3 scoring")
-                })
+                .max_by(score_cmp)
                 .expect("chunk_by yields non-empty runs")
                 .into_competed()
         })
@@ -755,7 +814,7 @@ mod tests {
     }
     fn compete(mut results: Vec<ScoredCandidate>) -> Vec<CompetedCandidate> {
         let library = fixture_library(&mut results);
-        target_decoy_compete(results, &library)
+        target_decoy_compete(results, &library, None)
     }
 
     use super::*;
@@ -779,7 +838,7 @@ mod tests {
 
     fn survivors(mut results: Vec<ScoredCandidate>) -> Vec<(String, u64, bool)> {
         let library = fixture_library(&mut results);
-        dedup_by_sequence(&mut results, &library);
+        dedup_by_sequence(&mut results, &library, |_, _| {});
         results
             .iter()
             .map(|c| {
@@ -803,7 +862,7 @@ mod tests {
         different_charge.scoring.primary.main_score = 6.0;
         let mut rows = vec![a, different_charge, b];
         let library = fixture_library(&mut rows);
-        dedup_by_sequence(&mut rows, &library);
+        dedup_by_sequence(&mut rows, &library, |_, _| {});
         assert_eq!(rows.len(), 2);
         assert!(rows.iter().all(|r| r.scoring.identity.is_target));
         assert_eq!(rows[0].scoring.identity.precursor_charge, 2);
@@ -820,7 +879,7 @@ mod tests {
             candidate("PEPTIDE", 500.0, true, 4),
         ];
         let library = fixture_library(&mut rows);
-        dedup_by_sequence(&mut rows, &library);
+        dedup_by_sequence(&mut rows, &library, |_, _| {});
         assert_eq!(rows.len(), 5);
     }
 

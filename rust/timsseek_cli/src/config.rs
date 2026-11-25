@@ -39,6 +39,8 @@ pub struct Config {
     #[serde(default = "CalibrationConfig::default")]
     pub calibration: CalibrationConfig,
     pub output: Option<OutputConfig>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub diagnostics: Option<DiagnosticsConfig>,
     #[serde(default)]
     pub staging: Option<StagingConfig>,
     #[serde(default)]
@@ -60,6 +62,13 @@ pub struct Config {
     /// declared.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub library_provenance: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone)]
+#[serde(deny_unknown_fields)]
+pub struct DiagnosticsConfig {
+    /// Local TSV with modified sequence and charge.
+    pub trace_precursors: Option<std::path::PathBuf>,
 }
 
 /// The slice of a configuration file `build-library` reads.
@@ -506,6 +515,10 @@ rt = "Unrestricted"
         // leaves them for the CLI flags to fill.
         assert!(c.input.is_none(), "[input] must be commented out");
         assert!(c.output.is_none(), "[output] must be commented out");
+        assert!(
+            c.diagnostics.is_none(),
+            "[diagnostics] must be commented out"
+        );
         assert!(c.staging.is_none(), "[staging] must be commented out");
         assert!(c.library.is_none(), "[library] must be commented out");
         assert!(c.sequences.is_none(), "[sequences] must be commented out");

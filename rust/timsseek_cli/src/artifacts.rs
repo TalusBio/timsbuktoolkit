@@ -17,6 +17,7 @@ use crate::output_sink::{
 };
 
 pub(crate) const RESULTS_PARQUET: &str = "results.parquet";
+pub(crate) const PRECURSOR_TRACE_TSV: &str = "precursor_trace.tsv";
 pub(crate) const PERFORMANCE_REPORT: &str = "performance_report.json";
 pub(crate) const FEATURE_STATS_TSV: &str = "results.feature_stats.tsv";
 pub(crate) const FEATURE_IMPORTANCE_TSV: &str = "results.feature_importance.tsv";
@@ -26,8 +27,8 @@ pub(crate) const CONFIG_USED: &str = "config_used.json";
 /// Written once per run, at the root of the output destination.
 pub(crate) const RUN_ARTIFACTS: &[&str] = &[RUN_REPORT, CONFIG_USED];
 
-/// Written into a per-sample subdirectory of the output destination. The two
-/// feature sidecars appear only when feature stats are enabled.
+/// Written into a per-sample subdirectory of the output destination.
+/// Feature and trace sidecars appear only when enabled.
 ///
 /// The collision probe and the overwrite cleanup both read the whole list,
 /// whatever the current run is configured to write: a sidecar from an earlier
@@ -35,6 +36,7 @@ pub(crate) const RUN_ARTIFACTS: &[&str] = &[RUN_REPORT, CONFIG_USED];
 /// reads as though it described those.
 pub(crate) const PER_SAMPLE_ARTIFACTS: &[&str] = &[
     RESULTS_PARQUET,
+    PRECURSOR_TRACE_TSV,
     PERFORMANCE_REPORT,
     FEATURE_STATS_TSV,
     FEATURE_IMPORTANCE_TSV,

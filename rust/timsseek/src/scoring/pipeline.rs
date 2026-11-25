@@ -35,10 +35,12 @@ use crate::{
     ScorerQueriable,
     timed,
 };
+use std::collections::HashMap;
 use std::hash::{
     Hash,
     Hasher,
 };
+use std::sync::Mutex;
 use timscentroid::rt_mapping::{
     MS1CycleIndex,
     RTIndex,
@@ -83,6 +85,29 @@ use super::timings::{
     PrescoreTimings,
     ScoreTimings,
 };
+
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Phase3Stage {
+    #[default]
+    PrecursorRange,
+    ExpectedFragments,
+    Extraction,
+    Apex,
+    Finalize,
+    Scored,
+}
+
+/// One selected scoring slot's Phase 3 outcome. The caller preallocates slots
+/// so scoring records only requested candidates, including prefilter rejects.
+#[derive(Debug, Default)]
+pub struct Phase3Trace {
+    pub stage: Phase3Stage,
+    pub skip: Option<SkipReason>,
+    pub rt_window: Option<ResolvedRt>,
+    pub main_score: Option<f32>,
+    pub apex_rt_seconds: Option<f32>,
+    pub matched_fragments: Option<u8>,
+}
 
 struct CandidateIdentity {
     handles: RowHandles,
@@ -749,15 +774,23 @@ impl<I: ScorerQueriable> Scorer<I> {
         feature = "instrumentation",
         tracing::instrument(skip_all, level = "trace")
     )]
-    fn score_extraction(
+    fn score_extraction<const TRACE: bool>(
         &self,
         query: &RefQuery<'_>,
         identity: CandidateIdentity,
         calibration: Option<&CalibrationResult>,
         worker: &mut ScoringWorker,
         timings: &mut ScoreTimings,
+        mut trace: Option<&mut Phase3Trace>,
     ) -> Result<ScoredCandidate, SkipReason> {
+        if TRACE && let Some(trace) = trace.as_deref_mut() {
+            trace.stage = Phase3Stage::ExpectedFragments;
+        }
         gate_expected_fragments(query)?;
+
+        if TRACE && let Some(trace) = trace.as_deref_mut() {
+            trace.stage = Phase3Stage::Extraction;
+        }
 
         let metadata = timed!(
             timings.extraction,
@@ -798,12 +831,34 @@ impl<I: ScorerQueriable> Scorer<I> {
                     }
                 }
             })
-        )?;
+        );
+        if TRACE
+            && let Some(trace) = trace.as_deref_mut()
+            && matches!(
+                metadata,
+                Ok(_) | Err(SkipReason::FragmentsOutsideScanRange | SkipReason::NoObservedSignal)
+            )
+        {
+            // These outcomes all reached a freshly reset collector.
+            trace.rt_window = Some(
+                worker
+                    .extraction
+                    .as_ref()
+                    .expect("extraction set by query")
+                    .chromatograms
+                    .rt,
+            );
+        }
+        let metadata = metadata?;
 
         let scoring_ctx = worker
             .extraction
             .as_ref()
             .expect("extraction set by build_extraction_into");
+
+        if TRACE && let Some(trace) = trace.as_deref_mut() {
+            trace.stage = Phase3Stage::Apex;
+        }
 
         let apex_score = timed!(
             timings.scoring,
@@ -853,6 +908,12 @@ impl<I: ScorerQueriable> Scorer<I> {
             .as_ref()
             .expect("extraction set by build_extraction_into");
         let nqueries = scoring_ctx.chromatograms.fragments.num_ions() as u8;
+        if TRACE && let Some(trace) = trace {
+            trace.stage = Phase3Stage::Finalize;
+            trace.main_score = Some(apex_score.primary.main_score);
+            trace.apex_rt_seconds = Some(apex_score.retention_time_ms as f32 / 1000.0);
+            trace.matched_fragments = Some(nqueries);
+        }
         timed!(
             timings.assembly,
             tracing::span!(tracing::Level::TRACE, "score_calibrated::finalize").in_scope(|| {
@@ -882,7 +943,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         flats: &[FlatIdx],
         calibration: &CalibrationResult,
     ) -> (Vec<ScoredCandidate>, ScoreTimings, SkipCounts) {
-        self.score_batch(lib, flats, Some(calibration))
+        self.score_batch::<false>(lib, flats, Some(calibration), None)
     }
 
     /// Score spectra over the acquisition's full RT range, without calibration
@@ -892,14 +953,25 @@ impl<I: ScorerQueriable> Scorer<I> {
         lib: &ReferenceLibrary,
         flats: &[FlatIdx],
     ) -> (Vec<ScoredCandidate>, ScoreTimings, SkipCounts) {
-        self.score_batch(lib, flats, None)
+        self.score_batch::<false>(lib, flats, None, None)
     }
 
-    fn score_batch(
+    pub fn score_traced_batch(
         &self,
         lib: &ReferenceLibrary,
         flats: &[FlatIdx],
         calibration: Option<&CalibrationResult>,
+        traces: &HashMap<FlatIdx, Mutex<Phase3Trace>>,
+    ) -> (Vec<ScoredCandidate>, ScoreTimings, SkipCounts) {
+        self.score_batch::<true>(lib, flats, calibration, Some(traces))
+    }
+
+    fn score_batch<const TRACE: bool>(
+        &self,
+        lib: &ReferenceLibrary,
+        flats: &[FlatIdx],
+        calibration: Option<&CalibrationResult>,
+        traces: Option<&HashMap<FlatIdx, Mutex<Phase3Trace>>>,
     ) -> (Vec<ScoredCandidate>, ScoreTimings, SkipCounts) {
         let get_item = |f| lib.item_at(f);
         let num_cycles = self.num_cycles();
@@ -941,7 +1013,18 @@ impl<I: ScorerQueriable> Scorer<I> {
                 },
                 |(mut worker, acc), (_idx, &flat)| {
                     let q = get_item(flat);
+                    let mut trace = if TRACE {
+                        traces
+                            .expect("traced batch has trace slots")
+                            .get(&flat)
+                            .map(|entry| entry.lock().expect("trace slot poisoned"))
+                    } else {
+                        None
+                    };
                     if !filter_fn(&q) {
+                        if TRACE && let Some(trace) = trace.as_deref_mut() {
+                            trace.skip = Some(SkipReason::PrecursorOutOfFragmentedRange);
+                        }
                         return (worker, acc);
                     }
                     let _span =
@@ -952,8 +1035,20 @@ impl<I: ScorerQueriable> Scorer<I> {
                         source_id: q.output_id().to_owned_id(),
                         is_target: q.is_target(),
                     };
-                    let result =
-                        self.score_extraction(&q, identity, calibration, &mut worker, &mut t);
+                    let result = self.score_extraction::<TRACE>(
+                        &q,
+                        identity,
+                        calibration,
+                        &mut worker,
+                        &mut t,
+                        trace.as_deref_mut(),
+                    );
+                    if TRACE && let Some(mut trace) = trace {
+                        match &result {
+                            Ok(_) => trace.stage = Phase3Stage::Scored,
+                            Err(reason) => trace.skip = Some(*reason),
+                        }
+                    }
                     (worker, acc.fold((result, t)))
                 },
                 |(wa, a), (_wb, b)| (wa, a.reduce(b)),

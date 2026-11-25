@@ -30,6 +30,7 @@ tracing-profile = { git = "https://github.com/jspaezp/tracing-profile.git" , bra
 
 # Workspace-inherited deps
 clap = { workspace = true, features = ["derive"] }
+csv = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 serde = { workspace = true }

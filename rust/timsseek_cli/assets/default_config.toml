@@ -163,3 +163,6 @@ calibration_query_rt_window_minutes = 0.083333336   # 5 seconds (5 / 60)
 # max_prefix_keys = 256
 # save_sidecar = false
 # stale_sweep_age_hours = 24
+
+# [diagnostics]
+# trace_precursors = "precursors.tsv" # modified and charge columns, tab-separated

@@ -8126,6 +8126,7 @@ dependencies = [
  "calib_dash",
  "chrono",
  "clap",
+ "csv",
  "indicatif",
  "mimalloc",
  "msspeculator-core",
