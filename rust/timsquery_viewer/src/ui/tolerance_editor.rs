@@ -9,8 +9,11 @@ use timsquery::models::tolerance::{
 
 /// Renders the tolerance editor UI
 pub fn render_tolerance_editor(ui: &mut egui::Ui, tolerance: &mut Tolerance) {
-    ui.collapsing("M/Z Tolerance", |ui| {
-        render_mz_tolerance(ui, &mut tolerance.ms);
+    ui.collapsing("MS1 m/z tolerance", |ui| {
+        render_mz_tolerance(ui, &mut tolerance.ms1);
+    });
+    ui.collapsing("MS2 m/z tolerance", |ui| {
+        render_mz_tolerance(ui, &mut tolerance.ms2);
     });
 
     ui.collapsing("RT Tolerance", |ui| {

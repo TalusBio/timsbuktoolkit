@@ -107,7 +107,8 @@ pub enum CalibrationMessage {
 /// before accurate RT calibration is available.
 fn broad_calibration_tolerance() -> Tolerance {
     Tolerance {
-        ms: MzTolerance::Ppm((15.0, 15.0)),
+        ms1: MzTolerance::Ppm((15.0, 15.0)),
+        ms2: MzTolerance::Ppm((15.0, 15.0)),
         rt: RtTolerance::Unrestricted,
         mobility: MobilityTolerance::Pct((5.0, 5.0)),
         quad: QuadTolerance::Absolute((0.1, 0.1)),
@@ -1097,11 +1098,14 @@ impl ViewerCalibrationState {
             if let Some(residuals) = &self.residuals {
                 ui.horizontal(|ui| {
                     ui.label(format!(
-                        "m/z: {:?}; mobility: {:?}",
-                        residuals.tolerance.ms, residuals.tolerance.mobility,
+                        "MS1 m/z: {:?} | MS2 m/z: {:?} | mobility: {:?}",
+                        residuals.tolerance.ms1,
+                        residuals.tolerance.ms2,
+                        residuals.tolerance.mobility,
                     ));
                     if ui.button("Apply saved tolerances").clicked() {
-                        tolerance.ms = residuals.tolerance.ms.clone();
+                        tolerance.ms1 = residuals.tolerance.ms1;
+                        tolerance.ms2 = residuals.tolerance.ms2;
                         tolerance.mobility = residuals.tolerance.mobility.clone();
                         tolerance.quad = residuals.tolerance.quad.clone();
                         if self.calibration_state.as_ref().and_then(|s| s.curve()).is_none() {
@@ -1211,7 +1215,6 @@ mod tests {
         use timsseek::rt_calibration::{
             CalibrationResult,
             DerivationParams,
-            DimensionErrors,
             ErrorStats,
         };
         let mut grid = CalibrationState::deferred(10, 3).unwrap();
@@ -1224,10 +1227,9 @@ mod tests {
         let calibration = CalibrationResult::from_measurements(
             CalibrationState::deferred(10, 3).unwrap(),
             &Tolerance::default(),
-            DimensionErrors {
-                mz_ppm: ErrorStats::from_slice(&[2.0, 3.0]),
-                ..Default::default()
-            },
+            [&[2.0, 3.0], &[-4.0, -2.0]],
+            ErrorStats::default(),
+            ErrorStats::default(),
             DerivationParams::default(),
         )
         .with_rt_axis(&timsquery::RtAxis::Absent);
@@ -1243,7 +1245,9 @@ mod tests {
         assert!(viewer.snapshot_points.is_empty());
         assert_eq!(viewer.library_rt_axis, timsquery::RtAxis::Absent);
         let residuals = viewer.residuals.as_ref().unwrap();
-        assert_eq!(residuals.errors.mz_ppm.n, 2);
-        assert_eq!(&residuals.tolerance.ms, calibration.mz_tolerance());
+        assert_eq!(residuals.errors.ms1_mz_ppm.n, 2);
+        assert_eq!(residuals.errors.ms2_mz_ppm.n, 2);
+        assert_eq!(&residuals.tolerance.ms1, calibration.ms1_mz_tolerance());
+        assert_eq!(&residuals.tolerance.ms2, calibration.ms2_mz_tolerance());
     }
 }

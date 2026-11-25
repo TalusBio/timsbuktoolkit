@@ -426,12 +426,14 @@ mod tests {
         let narrow: Tolerance = serde_json::from_str(NARROW_TOLERANCE_TEMPLATE).unwrap();
         let wide: Tolerance = serde_json::from_str(WIDE_TOLERANCE_TEMPLATE).unwrap();
 
-        assert!(matches!(narrow.ms, MzTolerance::Ppm(_)));
+        assert!(matches!(narrow.ms1, MzTolerance::Ppm(_)));
+        assert_eq!(narrow.ms2, narrow.ms1);
         assert!(matches!(narrow.rt, RtTolerance::Minutes(_)));
         assert!(matches!(narrow.mobility, MobilityTolerance::Pct(_)));
         assert!(matches!(narrow.quad, QuadTolerance::Absolute(_)));
 
-        assert!(matches!(wide.ms, MzTolerance::Absolute(_)));
+        assert!(matches!(wide.ms1, MzTolerance::Absolute(_)));
+        assert_eq!(wide.ms2, wide.ms1);
         assert!(matches!(wide.rt, RtTolerance::Unrestricted));
         assert!(matches!(wide.mobility, MobilityTolerance::Pct(_)));
         assert!(matches!(wide.quad, QuadTolerance::Absolute(_)));

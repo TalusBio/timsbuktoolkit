@@ -4,11 +4,10 @@ use crate::{
     RtAxis,
 };
 
-/// The only version [`SavedCalibration`] reads or writes. Named once so the
-/// writer and the reader's gate cannot disagree.
-pub const CALIBRATION_FORMAT_VERSION: &str = "v4";
+/// The calibration format written by [`SavedCalibration`].
+pub const CALIBRATION_FORMAT_VERSION: &str = "v5";
 
-/// JSON v4 calibration file format -- shared between CLI and viewer.
+/// JSON calibration file format shared between CLI and viewer.
 ///
 /// `calibration` is the grid's own snapshot and the only record of the fit: the
 /// curve and the ridge widths are recomputed by refitting it, so the file cannot
@@ -125,9 +124,9 @@ fn deserialize_version<'de, D: serde::Deserializer<'de>>(
     deserializer: D,
 ) -> Result<String, D::Error> {
     let version = <String as serde::Deserialize>::deserialize(deserializer)?;
-    if version != CALIBRATION_FORMAT_VERSION {
+    if version != CALIBRATION_FORMAT_VERSION && version != "v4" {
         return Err(serde::de::Error::custom(format!(
-            "Unsupported calibration version: {version} (expected {CALIBRATION_FORMAT_VERSION})"
+            "Unsupported calibration version: {version} (expected v4 or {CALIBRATION_FORMAT_VERSION})"
         )));
     }
     Ok(version)
@@ -186,7 +185,7 @@ mod tests {
                 .unwrap_err()
                 .to_string();
             assert!(
-                error.contains("Unsupported calibration version: v3 (expected v4)"),
+                error.contains("Unsupported calibration version: v3 (expected v4 or v5)"),
                 "{error}"
             );
         }

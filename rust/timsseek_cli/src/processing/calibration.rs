@@ -1,5 +1,6 @@
 use indicatif::ProgressIterator;
 use timsquery::models::FlatIdx;
+use timsquery::models::aggregators::spectrum_agg::ObservedSpectrum;
 use timsquery::models::tolerance::RtTolerance;
 use timsquery::traits::Target;
 use timsquery::{
@@ -13,9 +14,9 @@ use timsseek::rt_calibration::{
     CalibratedGrid,
     CalibrationResult,
     DerivationParams,
-    DimensionErrors,
     ErrorStats,
     LibraryRT,
+    MzErrorSamples,
     Point,
     RTCalibration,
     RidgeSummary,
@@ -477,9 +478,14 @@ pub(super) mod calib_dash_hook {
                 return;
             };
             let (
-                timsquery::models::tolerance::MzTolerance::Ppm(mz),
+                timsquery::models::tolerance::MzTolerance::Ppm(ms1_mz),
+                timsquery::models::tolerance::MzTolerance::Ppm(ms2_mz),
                 timsquery::models::tolerance::MobilityTolerance::Pct(mobility),
-            ) = (calibration.mz_tolerance(), calibration.mobility_tolerance())
+            ) = (
+                calibration.ms1_mz_tolerance(),
+                calibration.ms2_mz_tolerance(),
+                calibration.mobility_tolerance(),
+            )
             else {
                 return;
             };
@@ -490,8 +496,9 @@ pub(super) mod calib_dash_hook {
             d.show_final(
                 calib_dash::FitRecording::from_state(calibration.state()),
                 calib_dash::ToleranceSummary {
-                    mz_ppm: *mz,
-                    mobility_pct: (mobility.0 as f64, mobility.1 as f64),
+                    ms1_mz_ppm: (-ms1_mz.0, ms1_mz.1),
+                    ms2_mz_ppm: (-ms2_mz.0, ms2_mz.1),
+                    mobility_pct: (-f64::from(mobility.0), f64::from(mobility.1)),
                     rt_seconds: rt_tolerance_seconds,
                     n_calibrants: calibration.errors().rt_seconds.n,
                 },
@@ -692,13 +699,16 @@ fn count_shared_fragments(a: &[i64], b: &[i64]) -> usize {
 
 const MIN_SHARED_FRAGMENTS: usize = 5;
 
-pub(super) fn calibrate_from_phase1<I: ScorerQueriable>(
+pub(super) fn calibrate_from_phase1<I>(
     candidates: Vec<CalibrantCandidate>,
     phase1_lib: &ReferenceLibrary,
     main_lookup: Option<&PrecursorFragmentLookup>,
     pipeline: &Scorer<I>,
     config: &CalibrationConfig,
-) -> Result<CalibrationResult, CalibRtError> {
+) -> Result<CalibrationResult, CalibRtError>
+where
+    I: ScorerQueriable + for<'a> timsquery::QueriableData<ObservedSpectrum<'a, IonAnnot>>,
+{
     // === Step A: Fit iRT -> RT curve ===
     // With a separate calib lib, the curve's x-axis is the main speclib's iRT
     // (matched via shared fragments). We keep this per-candidate so later
@@ -782,7 +792,7 @@ pub(super) fn calibrate_from_phase1<I: ScorerQueriable>(
             config.calibration_query_rt_window_minutes,
         )));
 
-    let mut mz_errors_ppm: Vec<f32> = Vec::with_capacity(candidates.len());
+    let mut mz_samples = MzErrorSamples::default();
     let mut mobility_errors_pct: Vec<f32> = Vec::with_capacity(candidates.len());
     let mut rt_residuals_seconds: Vec<f32> = Vec::with_capacity(candidates.len());
 
@@ -825,19 +835,23 @@ pub(super) fn calibrate_from_phase1<I: ScorerQueriable>(
                 )
                 .expect("calibrant apex inside acquisition"),
             ));
-        pipeline
-            .index
-            .add_query(&mut agg, &query_tolerance.peak_tolerance());
+        pipeline.index.add_query(
+            &mut ObservedSpectrum {
+                spectrum: &mut agg,
+                observe_peak: &mut |level, reference, observed| {
+                    mz_samples.observe_peak(level, reference, observed);
+                },
+            },
+            &query_tolerance.peak_tolerance(),
+        );
+        mz_samples.finish_calibrant();
 
         let expected_mob = item.mobility_ook0() as f64;
         let offsets = MzMobilityOffsets::new(&agg, expected_mob);
-        let Some((mz_err_ppm, mob_err_pct)) = offsets.weighted_ms1() else {
+        let Some((_, mob_err_pct)) = offsets.weighted_ms1() else {
             continue;
         };
 
-        if mz_err_ppm.is_finite() {
-            mz_errors_ppm.push(mz_err_ppm);
-        }
         // Mobility is NaN for a non-searchable-axis run (mzML/no-IM lib); don't
         // let it poison the MAD-based mobility tolerance (unused there anyway).
         if pipeline.index.mobility_kind().is_scoreable() && mob_err_pct.is_finite() {
@@ -845,33 +859,27 @@ pub(super) fn calibrate_from_phase1<I: ScorerQueriable>(
         }
     }
 
-    info!(
-        "m/z measurements: {}/{} candidates (dropped {} off-ridge)",
-        mz_errors_ppm.len(),
-        candidates.len(),
-        n_off_ridge,
-    );
-
     // === Step C: Derive tolerances from error distributions ===
-    let errors = DimensionErrors {
-        mz_ppm: ErrorStats::from_slice(&mz_errors_ppm),
-        mobility_pct: ErrorStats::from_slice(&mobility_errors_pct),
-        rt_seconds: ErrorStats::from_slice(&rt_residuals_seconds),
-    };
     let mut derivation = DerivationParams::default();
-    derivation.sigma.mz = config.mz_sigma;
     derivation.sigma.mobility = config.mobility_sigma;
     derivation.sigma.rt = config.rt_sigma_factor;
     derivation.floors.rt_minutes = config.min_rt_tolerance_minutes;
 
+    let [ms1_samples, ms2_samples] = mz_samples.samples();
     info!(
-        "Calibration measurements: m/z={}, mobility={}, RT={}; off-ridge={}",
-        errors.mz_ppm.n, errors.mobility_pct.n, errors.rt_seconds.n, n_off_ridge,
+        "Calibration measurements: MS1 m/z={}, MS2 m/z={}, mobility={}, RT={}; off-ridge={}",
+        ms1_samples.len(),
+        ms2_samples.len(),
+        mobility_errors_pct.len(),
+        rt_residuals_seconds.len(),
+        n_off_ridge,
     );
     Ok(CalibrationResult::from_measurements(
         cal_state,
         &pipeline.broad_tolerance,
-        errors,
+        [ms1_samples, ms2_samples],
+        ErrorStats::from_slice(&mobility_errors_pct),
+        ErrorStats::from_slice(&rt_residuals_seconds),
         derivation,
     ))
 }
@@ -917,15 +925,38 @@ mod tests {
     impl timsquery::QueriableData<SpectralCollector<IonAnnot, MzMobilityStatsCollector>> for TestIndex {
         fn add_query(
             &self,
-            agg: &mut SpectralCollector<IonAnnot, MzMobilityStatsCollector>,
+            _: &mut SpectralCollector<IonAnnot, MzMobilityStatsCollector>,
+            _: &timsquery::PeakTolerance,
+        ) {
+        }
+    }
+    impl timsquery::QueriableData<ObservedSpectrum<'_, IonAnnot>> for TestIndex {
+        fn add_query(
+            &self,
+            query: &mut ObservedSpectrum<'_, IonAnnot>,
             tolerance: &timsquery::PeakTolerance,
         ) {
+            use timsquery::models::aggregators::spectrum_agg::MsLevel;
+
             self.queries
                 .lock()
                 .unwrap()
-                .push((agg.rt.center().unwrap().0, tolerance.clone()));
-            for ((_, mz), values) in agg.iter_mut_precursors() {
-                values.add(100.0, mz * (1.0 + 4e-6), 1.01);
+                .push((query.spectrum.rt.center().unwrap().0, tolerance.clone()));
+            for ((label, mz), values) in query.spectrum.iter_mut_precursors() {
+                for ppm in [2.0, 6.0] {
+                    let observed = mz * (1.0 + ppm * 1e-6);
+                    values.add(100.0, observed, 1.01);
+                    if label >= 0 {
+                        (query.observe_peak)(MsLevel::Ms1, mz, observed as f32);
+                    }
+                }
+            }
+            for ((_, &mz), values) in query.spectrum.iter_mut_fragments() {
+                for ppm in [-12.0, 0.0, 6.0] {
+                    let observed = mz * (1.0 + ppm * 1e-6);
+                    values.add(100.0, observed, 1.01);
+                    (query.observe_peak)(MsLevel::Ms2, mz, observed as f32);
+                }
             }
         }
     }
@@ -976,7 +1007,8 @@ mod tests {
                     mobility_kind,
                 },
                 broad_tolerance: timsquery::Tolerance {
-                    ms: MzTolerance::Ppm((20.0, 25.0)),
+                    ms1: MzTolerance::Ppm((20.0, 25.0)),
+                    ms2: MzTolerance::Ppm((30.0, 35.0)),
                     mobility: MobilityTolerance::Pct((6.0, 7.0)),
                     ..Default::default()
                 },
@@ -992,10 +1024,12 @@ mod tests {
             let calibration =
                 calibrate_from_phase1(vec![candidate()], &lib, None, &pipeline, &config).unwrap();
             assert!(!calibration.has_rt_calibration());
-            assert_eq!(calibration.errors().mz_ppm.n, 1);
+            assert_eq!(calibration.errors().ms1_mz_ppm.n, 6); // Two peaks per isotope (M+0..M+2).
+            assert_eq!(calibration.errors().ms2_mz_ppm.n, 3);
             assert_eq!(calibration.errors().mobility_pct.n, expected_mobility_count);
             assert_eq!(calibration.errors().rt_seconds.n, 0);
-            assert!((calibration.errors().mz_ppm.mean - 4.0).abs() < 0.01);
+            assert!((calibration.errors().ms1_mz_ppm.mean - 4.0).abs() < 0.1);
+            assert!((calibration.errors().ms2_mz_ppm.mad - 6.0).abs() < 0.1);
             if expected_mobility_count > 0 {
                 assert!((calibration.errors().mobility_pct.mean - 1.0).abs() < 0.01);
             } else {
@@ -1011,7 +1045,7 @@ mod tests {
             let queries = pipeline.index.queries.lock().unwrap();
             assert_eq!(queries.len(), 1);
             assert_eq!(queries[0].0, 30.0);
-            assert_eq!(queries[0].1.ms, pipeline.broad_tolerance.ms);
+            assert_eq!(queries[0].1, pipeline.broad_tolerance.peak_tolerance());
             drop(queries);
             // Empty main-library lookup must not suppress auxiliary-library mass calibration.
             let calibration = calibrate_from_phase1(
@@ -1022,12 +1056,14 @@ mod tests {
                 &config,
             )
             .unwrap();
-            assert_eq!(calibration.errors().mz_ppm.n, 1);
+            assert_eq!(calibration.errors().ms1_mz_ppm.n, 6);
+            assert_eq!(calibration.errors().ms2_mz_ppm.n, 3);
             assert!(!calibration.has_rt_calibration());
             // Prescore actually visits RT-free rows rather than returning early.
             if library_rt.is_none() {
                 let (_, timings, _) = phase1_prescore(&lib, &pipeline, 10, &config, None, None);
                 assert_eq!(timings.n_passed_filter, 1);
+                assert_eq!(pipeline.index.queries.lock().unwrap().len(), 2);
             }
         }
     }

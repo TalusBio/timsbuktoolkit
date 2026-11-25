@@ -51,6 +51,7 @@ use timsquery::{
     ExtractionQuery,
     KeyLike,
     MzMobilityStatsCollector,
+    PeakTolerance,
     ResolvedRt,
     RtSelection,
     SpectralCollector,
@@ -361,6 +362,7 @@ impl CalibrantHeap {
 pub struct CalibrationConfig {
     pub n_calibrants: usize,
     pub grid_size: usize,
+    /// Accepted for older configs. The m/z mixture uses a fixed 3 sigma.
     pub mz_sigma: f32,
     pub mobility_sigma: f32,
     pub rt_sigma_factor: f32,
@@ -964,15 +966,41 @@ impl<I: ScorerQueriable> Scorer<I> {
     /// Phase 1: Lightweight prescore -- broad extraction + find_apex_location only.
     /// Returns an [`ApexLocation`], whose `score` is the apex-profile peak
     /// value -- NOT the apex evidence (see `TraceScorer::suggest_apex`).
-    #[cfg_attr(
-        feature = "instrumentation",
-        tracing::instrument(skip_all, level = "trace")
-    )]
     pub fn prescore(
         &self,
         query: &RefQuery<'_>,
         worker: &mut ScoringWorker,
         timings: &mut PrescoreTimings,
+    ) -> Result<ApexLocation, SkipReason> {
+        self.prescore_with_windows(
+            query,
+            worker,
+            timings,
+            self.prescore_rt(),
+            &self.broad_tolerance.peak_tolerance(),
+        )
+    }
+
+    fn prescore_rt(&self) -> Option<ResolvedRt> {
+        ResolvedRt::from_mapping(
+            RtSelection::FullRun,
+            &self.broad_tolerance.rt,
+            self.index.ms1_cycle_mapping(),
+        )
+        .ok()
+    }
+
+    #[cfg_attr(
+        feature = "instrumentation",
+        tracing::instrument(name = "prescore", skip_all, level = "trace")
+    )]
+    fn prescore_with_windows(
+        &self,
+        query: &RefQuery<'_>,
+        worker: &mut ScoringWorker,
+        timings: &mut PrescoreTimings,
+        rt: Option<ResolvedRt>,
+        peak_tolerance: &PeakTolerance,
     ) -> Result<ApexLocation, SkipReason> {
         gate_expected_fragments(query)?;
 
@@ -981,17 +1009,9 @@ impl<I: ScorerQueriable> Scorer<I> {
             tracing::span!(tracing::Level::TRACE, "prescore::extraction").in_scope(|| {
                 super::extraction::build_extraction_into(
                     &mut worker.extraction,
-                    &ExtractionQuery::new(
-                        query,
-                        ResolvedRt::from_mapping(
-                            RtSelection::FullRun,
-                            &self.broad_tolerance.rt,
-                            self.index.ms1_cycle_mapping(),
-                        )
-                        .map_err(|_| SkipReason::RetentionTimeOutOfBounds)?,
-                    ),
+                    &ExtractionQuery::new(query, rt.ok_or(SkipReason::RetentionTimeOutOfBounds)?),
                     &self.index,
-                    &self.broad_tolerance.peak_tolerance(),
+                    peak_tolerance,
                     Some(TOP_N_FRAGMENTS),
                 )
             })
@@ -1047,6 +1067,8 @@ impl<I: ScorerQueriable> Scorer<I> {
         timings.skips.precursor_out_of_fragmented_range += precursor_oofr_count;
 
         let num_cycles = self.num_cycles();
+        let rt = self.prescore_rt();
+        let peak_tolerance = self.broad_tolerance.peak_tolerance();
         let max_frags = flats
             .iter()
             .map(|&f| get_item(f).fragment_count())
@@ -1080,7 +1102,7 @@ impl<I: ScorerQueriable> Scorer<I> {
                     return (worker, heap, t);
                 }
                 t.n_passed_filter += 1;
-                match self.prescore(&q, &mut worker, &mut t) {
+                match self.prescore_with_windows(&q, &mut worker, &mut t, rt, &peak_tolerance) {
                     Ok(loc) => {
                         let cand = CalibrantCandidate {
                             score: loc.score,

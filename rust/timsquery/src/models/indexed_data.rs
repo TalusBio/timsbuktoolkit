@@ -61,6 +61,10 @@
 //!
 //! This allows queries like "all retention times" while still filtering by m/z and mobility.
 
+use crate::models::aggregators::spectrum_agg::{
+    MsLevel,
+    ObservedSpectrum,
+};
 use crate::models::aggregators::{
     ChromatogramCollector,
     MzMobilityStatsCollector,
@@ -201,7 +205,7 @@ impl<FH: KeyLike> QueriableData<PointIntensityAggregator<FH>> for IndexedTimstof
         let frag_mzs: tinyvec::TinyVec<[f64; 16]> =
             aggregator.iter_fragments().map(|(_, mz)| mz).collect();
         prec_mzs.iter().for_each(|&mz| {
-            let mz_range = tolerance.mz_range_f32(mz as f32);
+            let mz_range = tolerance.ms1.mz_range_f32(mz as f32);
             self.for_each_ms1_peak(mz_range, ranges.ms1_cycle_range, ranges.im_range, |peak| {
                 aggregator.intensity += peak.intensity as f64;
             });
@@ -211,7 +215,7 @@ impl<FH: KeyLike> QueriableData<PointIntensityAggregator<FH>> for IndexedTimstof
             .for_each(|(quad_info, peaks)| {
                 let constrained_im = ranges.constrain_im_for_quadrupole(quad_info);
                 frag_mzs.iter().for_each(|&mz| {
-                    let mz_range = tolerance.mz_range_f32(mz as f32);
+                    let mz_range = tolerance.ms2.mz_range_f32(mz as f32);
                     peaks.for_each_peak(mz_range, ranges.ms2_cycle_range, constrained_im, |peak| {
                         aggregator.intensity += peak.intensity as f64;
                     });
@@ -241,7 +245,7 @@ impl<FH: KeyLike> QueriableData<ChromatogramCollector<FH, f32>> for IndexedTimst
         aggregator
             .iter_mut_precursors()
             .for_each(|((_idx, mz), mut chr)| {
-                let mz_range = tolerance.mz_range_f32(*mz as f32);
+                let mz_range = tolerance.ms1.mz_range_f32(*mz as f32);
                 self.for_each_ms1_peak(mz_range, ranges.ms1_cycle_range, ranges.im_range, |peak| {
                     chr.add_at_index(peak.cycle_index.as_u32(), peak.intensity);
                     local_ms1_peaks += 1;
@@ -259,7 +263,7 @@ impl<FH: KeyLike> QueriableData<ChromatogramCollector<FH, f32>> for IndexedTimst
                         // calculating the mz range for each quad instead of once per ion ...
                         // TODO: fix later ...
 
-                        let mz_range = tolerance.mz_range_f32(*mz as f32);
+                        let mz_range = tolerance.ms2.mz_range_f32(*mz as f32);
                         peaks.for_each_peak(
                             mz_range,
                             ranges.ms2_cycle_range,
@@ -294,7 +298,7 @@ impl<FH: KeyLike> QueriableData<SpectralCollector<FH, f32>> for IndexedTimstofPe
         aggregator
             .iter_mut_precursors()
             .for_each(|((_idx, mz), ion)| {
-                let mz_range = tolerance.mz_range_f32(mz as f32);
+                let mz_range = tolerance.ms1.mz_range_f32(mz as f32);
                 self.for_each_ms1_peak(mz_range, ranges.ms1_cycle_range, ranges.im_range, |peak| {
                     *ion += peak.intensity;
                 });
@@ -309,7 +313,7 @@ impl<FH: KeyLike> QueriableData<SpectralCollector<FH, f32>> for IndexedTimstofPe
                         // There is a bit of repeated work here ...
                         // calculating the mz range for each quad instead of once per ion ...
                         // TODO: Fix later ...
-                        let mz_range = tolerance.mz_range_f32(*mz as f32);
+                        let mz_range = tolerance.ms2.mz_range_f32(*mz as f32);
                         peaks.for_each_peak(
                             mz_range,
                             ranges.ms2_cycle_range,
@@ -327,41 +331,60 @@ impl<FH: KeyLike, V: PeakAddable<MS1CycleIndex> + PeakAddable<WindowCycleIndex>>
     QueriableData<SpectralCollector<FH, V>> for IndexedTimstofPeaks
 {
     fn add_query(&self, aggregator: &mut SpectralCollector<FH, V>, tolerance: &PeakTolerance) {
-        let ranges =
-            QueryRanges::from_query_data(aggregator, tolerance, self.mobility_kind(), |rt| {
-                self.rt_ms_to_cycle_index(rt)
-            });
-
-        aggregator
-            .iter_mut_precursors()
-            .for_each(|((_idx, mz), ion)| {
-                let mz_range = tolerance.mz_range_f32(mz as f32);
-                self.for_each_ms1_peak(mz_range, ranges.ms1_cycle_range, ranges.im_range, |peak| {
-                    *ion += *peak;
-                });
-            });
-
-        self.filter_precursor_ranges(ranges.quad_range, ranges.im_range)
-            .for_each(|(quad_info, peaks)| {
-                let constrained_im = ranges.constrain_im_for_quadrupole(quad_info);
-                aggregator
-                    .iter_mut_fragments()
-                    .for_each(|((_idx, mz), ion)| {
-                        // There is a bit of repeated work here ...
-                        // calculating the mz range for each quad instead of once per ion ...
-                        // TODO: Fix later ...
-                        let mz_range = tolerance.mz_range_f32(*mz as f32);
-                        peaks.for_each_peak(
-                            mz_range,
-                            ranges.ms2_cycle_range,
-                            constrained_im,
-                            |x| {
-                                *ion += *x;
-                            },
-                        );
-                    });
-            });
+        add_eager_spectral_query(self, aggregator, tolerance, |_, _, _| {});
     }
+}
+
+impl<FH: KeyLike> QueriableData<ObservedSpectrum<'_, FH>> for IndexedTimstofPeaks {
+    fn add_query(&self, query: &mut ObservedSpectrum<'_, FH>, tolerance: &PeakTolerance) {
+        add_eager_spectral_query(self, query.spectrum, tolerance, &mut *query.observe_peak);
+    }
+}
+
+fn add_eager_spectral_query<
+    FH: KeyLike,
+    V: PeakAddable<MS1CycleIndex> + PeakAddable<WindowCycleIndex>,
+>(
+    index: &IndexedTimstofPeaks,
+    aggregator: &mut SpectralCollector<FH, V>,
+    tolerance: &PeakTolerance,
+    mut observe_peak: impl FnMut(MsLevel, f64, f32),
+) {
+    let ranges = QueryRanges::from_query_data(aggregator, tolerance, index.mobility_kind(), |rt| {
+        index.rt_ms_to_cycle_index(rt)
+    });
+
+    aggregator
+        .iter_mut_precursors()
+        .for_each(|((label, mz), ion)| {
+            let mz_range = tolerance.ms1.mz_range_f32(mz as f32);
+            index.for_each_ms1_peak(mz_range, ranges.ms1_cycle_range, ranges.im_range, |peak| {
+                *ion += *peak;
+                if label >= 0 && peak.intensity > 0.0 {
+                    observe_peak(MsLevel::Ms1, mz, peak.mz);
+                }
+            });
+        });
+
+    index
+        .filter_precursor_ranges(ranges.quad_range, ranges.im_range)
+        .for_each(|(quad_info, peaks)| {
+            let constrained_im = ranges.constrain_im_for_quadrupole(quad_info);
+            aggregator
+                .iter_mut_fragments()
+                .for_each(|((_idx, mz), ion)| {
+                    // There is a bit of repeated work here ...
+                    // calculating the mz range for each quad instead of once per ion ...
+                    // TODO: Fix later ...
+                    let mz_range = tolerance.ms2.mz_range_f32(*mz as f32);
+                    peaks.for_each_peak(mz_range, ranges.ms2_cycle_range, constrained_im, |x| {
+                        *ion += *x;
+                        if x.intensity > 0.0 {
+                            observe_peak(MsLevel::Ms2, *mz, x.mz);
+                        }
+                    });
+                });
+        });
 }
 
 fn ms1_to_ms2_cycle_range(
@@ -425,7 +448,7 @@ impl<FH: KeyLike> QueriableData<ChromatogramCollector<FH, f32>> for IndexedPeaks
                 aggregator
                     .iter_mut_precursors()
                     .for_each(|((_idx, mz), mut chr)| {
-                        let mz_range = tolerance.mz_range_f32(*mz as f32);
+                        let mz_range = tolerance.ms1.mz_range_f32(*mz as f32);
                         lazy.query_peaks_ms1(mz_range, cycle_range_u32, ranges.im_range)
                             .for_each(|peak| {
                                 chr.add_at_index(peak.cycle_index.as_u32(), peak.intensity);
@@ -438,7 +461,7 @@ impl<FH: KeyLike> QueriableData<ChromatogramCollector<FH, f32>> for IndexedPeaks
                 aggregator
                     .iter_mut_fragments()
                     .for_each(|((_idx, mz), mut chr)| {
-                        let mz_range = tolerance.mz_range_f32(*mz as f32);
+                        let mz_range = tolerance.ms2.mz_range_f32(*mz as f32);
                         let results = lazy.query_peaks_ms2(
                             ranges.quad_range,
                             mz_range,
@@ -492,7 +515,7 @@ impl<FH: KeyLike> QueriableData<SpectralCollector<FH, f32>> for IndexedPeaksHand
                 aggregator
                     .iter_mut_precursors()
                     .for_each(|((_idx, mz), ion)| {
-                        let mz_range = tolerance.mz_range_f32(mz as f32);
+                        let mz_range = tolerance.ms1.mz_range_f32(mz as f32);
                         lazy.query_peaks_ms1(mz_range, cycle_range_u32, ranges.im_range)
                             .for_each(|peak| {
                                 *ion += peak.intensity;
@@ -502,7 +525,7 @@ impl<FH: KeyLike> QueriableData<SpectralCollector<FH, f32>> for IndexedPeaksHand
                 aggregator
                     .iter_mut_fragments()
                     .for_each(|((_idx, mz), ion)| {
-                        let mz_range = tolerance.mz_range_f32(*mz as f32);
+                        let mz_range = tolerance.ms2.mz_range_f32(*mz as f32);
                         let results = lazy.query_peaks_ms2(
                             ranges.quad_range,
                             mz_range,
@@ -528,50 +551,71 @@ impl<FH: KeyLike> QueriableData<SpectralCollector<FH, MzMobilityStatsCollector>>
         aggregator: &mut SpectralCollector<FH, MzMobilityStatsCollector>,
         tolerance: &PeakTolerance,
     ) {
-        match self {
-            IndexedPeaksHandle::Eager(eager) => eager.add_query(aggregator, tolerance),
-            IndexedPeaksHandle::Lazy(lazy) => {
-                let ranges = QueryRanges::from_query_data(
-                    aggregator,
-                    tolerance,
-                    lazy.mobility_kind(),
-                    |rt| lazy.rt_ms_to_cycle_index(rt),
-                );
+        add_indexed_spectral_query(self, aggregator, tolerance, |_, _, _| {});
+    }
+}
 
-                let cycle_range_u32 = match ranges.ms1_cycle_range {
-                    Restricted(x) => Restricted(
-                        TupleRange::try_new(x.start().as_u32(), x.end().as_u32()).unwrap(),
-                    ),
-                    Unrestricted => Unrestricted,
-                };
+impl<FH: KeyLike> QueriableData<ObservedSpectrum<'_, FH>> for IndexedPeaksHandle {
+    fn add_query(&self, query: &mut ObservedSpectrum<'_, FH>, tolerance: &PeakTolerance) {
+        add_indexed_spectral_query(self, query.spectrum, tolerance, &mut *query.observe_peak);
+    }
+}
 
-                aggregator
-                    .iter_mut_precursors()
-                    .for_each(|((_idx, mz), ion)| {
-                        let mz_range = tolerance.mz_range_f32(mz as f32);
-                        lazy.query_peaks_ms1(mz_range, cycle_range_u32, ranges.im_range)
-                            .for_each(|peak| {
-                                *ion += peak;
-                            });
-                    });
+fn add_indexed_spectral_query<FH: KeyLike>(
+    index: &IndexedPeaksHandle,
+    aggregator: &mut SpectralCollector<FH, MzMobilityStatsCollector>,
+    tolerance: &PeakTolerance,
+    mut observe_peak: impl FnMut(MsLevel, f64, f32),
+) {
+    match index {
+        IndexedPeaksHandle::Eager(eager) => {
+            add_eager_spectral_query(eager, aggregator, tolerance, observe_peak)
+        }
+        IndexedPeaksHandle::Lazy(lazy) => {
+            let ranges =
+                QueryRanges::from_query_data(aggregator, tolerance, lazy.mobility_kind(), |rt| {
+                    lazy.rt_ms_to_cycle_index(rt)
+                });
 
-                aggregator
-                    .iter_mut_fragments()
-                    .for_each(|((_idx, mz), ion)| {
-                        let mz_range = tolerance.mz_range_f32(*mz as f32);
-                        let results = lazy.query_peaks_ms2(
-                            ranges.quad_range,
-                            mz_range,
-                            cycle_range_u32,
-                            ranges.im_range,
-                        );
-                        for (_isolation_scheme, peaks) in results {
-                            for peak in peaks {
-                                *ion += peak;
+            let cycle_range_u32 = match ranges.ms1_cycle_range {
+                Restricted(x) => {
+                    Restricted(TupleRange::try_new(x.start().as_u32(), x.end().as_u32()).unwrap())
+                }
+                Unrestricted => Unrestricted,
+            };
+
+            aggregator
+                .iter_mut_precursors()
+                .for_each(|((label, mz), ion)| {
+                    let mz_range = tolerance.ms1.mz_range_f32(mz as f32);
+                    lazy.query_peaks_ms1(mz_range, cycle_range_u32, ranges.im_range)
+                        .for_each(|peak| {
+                            *ion += peak;
+                            if label >= 0 && peak.intensity > 0.0 {
+                                observe_peak(MsLevel::Ms1, mz, peak.mz);
+                            }
+                        });
+                });
+
+            aggregator
+                .iter_mut_fragments()
+                .for_each(|((_idx, mz), ion)| {
+                    let mz_range = tolerance.ms2.mz_range_f32(*mz as f32);
+                    let results = lazy.query_peaks_ms2(
+                        ranges.quad_range,
+                        mz_range,
+                        cycle_range_u32,
+                        ranges.im_range,
+                    );
+                    for (_isolation_scheme, peaks) in results {
+                        for peak in peaks {
+                            *ion += peak;
+                            if peak.intensity > 0.0 {
+                                observe_peak(MsLevel::Ms2, *mz, peak.mz);
                             }
                         }
-                    });
-            }
+                    }
+                });
         }
     }
 }
@@ -720,5 +764,122 @@ mod mobility_gate_tests {
             TupleRange::try_new(MS1CycleIndex::new(70_000), MS1CycleIndex::new(129_999)).unwrap()
         );
         assert_eq!(source.rt_seconds(), 900.0);
+    }
+}
+
+#[cfg(test)]
+mod mz_tolerance_tests {
+    use super::*;
+    use crate::models::tolerance::{
+        MzTolerance,
+        RtTolerance,
+    };
+    use crate::{
+        ExtractionQuery,
+        OwnedTarget,
+        ResolvedRt,
+        RtSelection,
+    };
+    use timscentroid::geometry::QuadrupoleIsolationScheme;
+    use timscentroid::indexing::{
+        IndexedPeak,
+        IndexedPeakGroup,
+    };
+    use timscentroid::rt_mapping::CycleToRTMapping;
+
+    fn peak<T: RTIndex>(mz: f32, intensity: f32) -> IndexedPeak<T> {
+        IndexedPeak {
+            mz,
+            intensity,
+            mobility_ook0: f16::from_f32(1.0),
+            cycle_index: T::new(1),
+        }
+    }
+
+    #[test]
+    fn precursor_and_fragment_queries_use_their_own_mz_windows() {
+        let (ms1, _) = IndexedPeakGroup::testing_new(
+            vec![peak::<MS1CycleIndex>(500.0, 1.0), peak(500.03, 2.0)],
+            CycleToRTMapping::new(vec![0, 1000, 2000]),
+            4,
+        );
+        let (ms2, _) = IndexedPeakGroup::testing_new(
+            vec![
+                peak::<WindowCycleIndex>(300.0, 4.0),
+                peak(300.03, 8.0),
+                peak(300.1, 16.0),
+            ],
+            CycleToRTMapping::new(vec![0, 1000, 2000]),
+            4,
+        );
+        let isolation =
+            QuadrupoleIsolationScheme::from_xxyy([(450.0, 550.0, 0.5, 1.5)].into_iter());
+        let eager = IndexedTimstofPeaks::from_parts(ms1, vec![(isolation, ms2)]);
+        let source = OwnedTarget::<usize>::builder()
+            .id(1)
+            .mobility_ook0(1.0)
+            .rt_value(1.0)
+            .precursor(500.0, 2)
+            .precursor_labels(tinyvec::tiny_vec!(0))
+            .fragment_labels(tinyvec::tiny_vec!(0usize))
+            .fragment_mzs(vec![300.0])
+            .try_build()
+            .unwrap();
+        let rt = ResolvedRt::from_mapping(
+            RtSelection::FullRun,
+            &RtTolerance::Unrestricted,
+            eager.ms1_cycle_mapping(),
+        )
+        .unwrap();
+        let query = ExtractionQuery::new(&source, rt);
+        let tolerance = PeakTolerance {
+            ms1: MzTolerance::Absolute((0.01, 0.01)),
+            ms2: MzTolerance::Absolute((0.05, 0.05)),
+            ..PeakTolerance::default()
+        };
+
+        let mut point = PointIntensityAggregator::new(&query);
+        eager.add_query(&mut point, &tolerance);
+        assert_eq!(point.intensity, 13.0);
+
+        let cache = tempfile::tempdir().unwrap();
+        let lazy = IndexedPeaksHandle::Eager(eager.clone())
+            .try_into_lazy(
+                crate::serde::CacheLocation::Local(cache.path().join("index")),
+                timscentroid::serialization::SerializationConfig::default(),
+            )
+            .unwrap();
+        for index in [
+            IndexedPeaksHandle::Eager(eager),
+            IndexedPeaksHandle::Lazy(lazy),
+        ] {
+            let mut chrom =
+                ChromatogramCollector::<usize, f32>::new(&query, index.ms1_cycle_mapping())
+                    .unwrap();
+            index.add_query(&mut chrom, &tolerance);
+            assert_eq!(chrom.n_precursor_peaks_added, 1);
+            assert_eq!(chrom.n_fragment_peaks_added, 2);
+
+            let mut spectrum = SpectralCollector::<usize, f32>::new(&query);
+            index.add_query(&mut spectrum, &tolerance);
+            assert_eq!(*spectrum.iter_precursors().next().unwrap().1, 1.0);
+            assert_eq!(*spectrum.iter_fragments().next().unwrap().1, 12.0);
+
+            let mut stats = SpectralCollector::<usize, MzMobilityStatsCollector>::new(&query);
+            let mut observed = Vec::with_capacity(3);
+            index.add_query(
+                &mut ObservedSpectrum {
+                    spectrum: &mut stats,
+                    observe_peak: &mut |level, reference, mz| observed.push((level, reference, mz)),
+                },
+                &tolerance,
+            );
+            assert_eq!(stats.iter_precursors().next().unwrap().1.weight(), 1.0);
+            assert_eq!(stats.iter_fragments().next().unwrap().1.weight(), 12.0);
+            assert_eq!(observed.len(), 3);
+            assert_eq!(observed[0], (MsLevel::Ms1, 500.0, 500.0));
+            assert!(observed.contains(&(MsLevel::Ms2, 300.0, 300.0)));
+            assert!(observed.contains(&(MsLevel::Ms2, 300.0, 300.03)));
+        }
     }
 }

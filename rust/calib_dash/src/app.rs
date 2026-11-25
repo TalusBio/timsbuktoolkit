@@ -502,12 +502,12 @@ fn as_calibrt_tuple(p: &CalibrantPoint) -> (LibraryRT<f64>, ObservedRTSeconds<f6
 /// Summary the Tolerances tab renders once Step B has run: the derived m/z, mobility
 /// and RT tolerances plus how many calibrants they came from.
 ///
-/// `mz_ppm` and `mobility_pct` are signed `(lo, hi)` windows around zero and are
-/// genuinely asymmetric -- Step B can derive a different tolerance on either side of a
-/// calibrant. `rt_seconds` is symmetric by construction.
+/// The m/z and mobility pairs hold signed lower and upper interval bounds.
+/// `rt_seconds` is symmetric by construction.
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ToleranceSummary {
-    pub mz_ppm: (f64, f64),
+    pub ms1_mz_ppm: (f64, f64),
+    pub ms2_mz_ppm: (f64, f64),
     pub mobility_pct: (f64, f64),
     /// Half-width: the tolerance is `±rt_seconds`.
     ///

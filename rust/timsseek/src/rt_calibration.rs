@@ -13,11 +13,17 @@ pub use calibrt::{
     RidgeMeasurement,
     RidgeSummary,
 };
+use rand::rngs::StdRng;
+use rand::{
+    Rng,
+    SeedableRng,
+};
 use serde::{
     Deserialize,
     Serialize,
 };
 use timsquery::Tolerance;
+use timsquery::models::aggregators::spectrum_agg::MsLevel;
 use timsquery::models::tolerance::{
     MobilityTolerance,
     MzTolerance,
@@ -25,9 +31,95 @@ use timsquery::models::tolerance::{
     RtTolerance,
 };
 
+mod mz_fit;
+use mz_fit::{
+    MZ_SIGMA_MULTIPLIER,
+    fit_mixture,
+};
+pub use mz_fit::{
+    MzFit,
+    MzFitFailure,
+    MzFitOutcome,
+};
+
 /// RT tolerance floor used when nothing configured one. Keeps a window from
 /// closing to nothing where the ridge is narrow.
 const DEFAULT_RT_FLOOR_MINUTES: f32 = 0.5;
+const MZ_SAMPLES_PER_CALIBRANT: usize = 128;
+const MZ_SAMPLES_PER_RUN: usize = 100_000;
+
+struct MzReservoir {
+    values: Vec<f32>,
+    seen: usize,
+    limit: usize,
+}
+
+impl MzReservoir {
+    fn new(limit: usize) -> Self {
+        Self {
+            values: Vec::with_capacity(limit),
+            seen: 0,
+            limit,
+        }
+    }
+
+    fn add(&mut self, value: f32, rng: &mut StdRng) {
+        self.seen += 1;
+        if self.values.len() < self.limit {
+            self.values.push(value);
+        } else {
+            let index = rng.random_range(0..self.seen);
+            if let Some(slot) = self.values.get_mut(index) {
+                *slot = value;
+            }
+        }
+    }
+}
+
+/// Bounded, reproducible sampling at two scales. The first reservoir keeps
+/// dense calibrants from dominating and the second covers the whole run even
+/// when candidates arrive in score or RT order.
+pub struct MzErrorSamples {
+    calibrant: [MzReservoir; 2],
+    run: [MzReservoir; 2],
+    rng: StdRng,
+}
+
+impl Default for MzErrorSamples {
+    fn default() -> Self {
+        Self {
+            calibrant: std::array::from_fn(|_| MzReservoir::new(MZ_SAMPLES_PER_CALIBRANT)),
+            run: std::array::from_fn(|_| MzReservoir::new(MZ_SAMPLES_PER_RUN)),
+            rng: StdRng::seed_from_u64(0),
+        }
+    }
+}
+
+impl MzErrorSamples {
+    pub fn observe_peak(&mut self, level: MsLevel, reference_mz: f64, observed_mz: f32) {
+        let ppm = ((f64::from(observed_mz) - reference_mz) / reference_mz * 1e6) as f32;
+        if ppm.is_finite() {
+            let index = match level {
+                MsLevel::Ms1 => 0,
+                MsLevel::Ms2 => 1,
+            };
+            self.calibrant[index].add(ppm, &mut self.rng);
+        }
+    }
+
+    pub fn finish_calibrant(&mut self) {
+        for (calibrant, run) in self.calibrant.iter_mut().zip(&mut self.run) {
+            for ppm in calibrant.values.drain(..) {
+                run.add(ppm, &mut self.rng);
+            }
+            calibrant.seen = 0;
+        }
+    }
+
+    pub fn samples(&self) -> [&[f32]; 2] {
+        [&self.run[0].values, &self.run[1].values]
+    }
+}
 
 /// The RT tolerance a ridge half-width implies, in minutes, floored at
 /// `floor_minutes` -- the same [`FloorsTriplet::rt_minutes`] that
@@ -83,22 +175,22 @@ impl ErrorStats {
 /// Residual statistics per measurement dimension.
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct DimensionErrors {
-    pub mz_ppm: ErrorStats,
+    #[serde(alias = "mz_ppm")]
+    pub ms1_mz_ppm: ErrorStats,
+    #[serde(default)]
+    pub ms2_mz_ppm: ErrorStats,
     pub mobility_pct: ErrorStats,
     pub rt_seconds: ErrorStats,
 }
 
 impl DimensionErrors {
     /// The tolerance windows these residuals imply under `params`.
-    pub fn derive_windows(&self, params: &DerivationParams) -> DerivedWindows {
-        let (mz_left, mz_right) =
-            mad_symmetric_bounds(&self.mz_ppm, params.sigma.mz, params.floors.mz_ppm);
+    fn derive_windows(&self, params: &DerivationParams) -> DerivedWindows {
         DerivedWindows {
             // RT takes the half-width alone: these residuals are what is left
             // after the curve, so they carry no offset for the median to preserve.
             rt_minutes: (params.sigma.rt * 1.4826 * self.rt_seconds.mad / 60.0)
                 .max(params.floors.rt_minutes),
-            mz_ppm: (mz_left as f64, mz_right as f64),
             mobility_pct: mad_symmetric_bounds(
                 &self.mobility_pct,
                 params.sigma.mobility,
@@ -110,14 +202,13 @@ impl DimensionErrors {
 
 /// The tolerance windows [`DimensionErrors::derive_windows`] produces.
 #[derive(Debug, Clone, Copy, PartialEq)]
-pub struct DerivedWindows {
-    pub rt_minutes: f32,
-    pub mz_ppm: (f64, f64),
-    pub mobility_pct: (f32, f32),
+struct DerivedWindows {
+    rt_minutes: f32,
+    mobility_pct: (f32, f32),
 }
 
-/// `median ± n_sigma * 1.4826 * MAD`, floored -- the `"mad_symmetric"` method
-/// [`DerivationParams`] names. Robust to tails: equal to `mean ± n_sigma * stdev`
+/// `median ± n_sigma * 1.4826 * MAD`, floored. Robust to tails:
+/// equal to `mean ± n_sigma * stdev`
 /// for a Gaussian population, and it resists the outlier inflation that would
 /// widen a window around a handful of bad matches.
 fn mad_symmetric_bounds(stats: &ErrorStats, n_sigma: f32, min_val: f32) -> (f32, f32) {
@@ -130,10 +221,128 @@ fn mad_symmetric_bounds(stats: &ErrorStats, n_sigma: f32, min_val: f32) -> (f32,
     (left, right)
 }
 
+fn mz_spread(
+    samples: &[f32],
+    stats: &ErrorStats,
+    configured: MzTolerance,
+) -> (MzTolerance, MzFitOutcome) {
+    let MzTolerance::Ppm((left, right)) = configured else {
+        return (
+            configured,
+            MzFitOutcome::fallback(MzFitFailure::NoSharedPpmWindow, 0, None),
+        );
+    };
+    let (lo, hi) = (-left, right);
+    let width = hi - lo;
+    if !width.is_finite() || width <= 0.0 {
+        return (
+            configured,
+            MzFitOutcome::fallback(MzFitFailure::InvalidWindow, 0, None),
+        );
+    }
+    // Index windows use f32 m/z endpoints, which can admit peaks just outside
+    // the configured ppm bounds. Keep those in the stats and histogram only.
+    let in_window = |x: &f32| (lo..=hi).contains(&f64::from(*x));
+    let outcome = if samples.iter().all(in_window) {
+        fit_mixture(samples, stats, width)
+    } else {
+        let inside: Vec<_> = samples.iter().copied().filter(in_window).collect();
+        fit_mixture(&inside, &ErrorStats::from_slice(&inside), width)
+    };
+    let MzFitOutcome::Fitted(fit) = outcome else {
+        return (configured, outcome);
+    };
+    let Some(bounds) = calibrated_mz_window((left, right), &fit) else {
+        return (
+            configured,
+            MzFitOutcome::fallback(MzFitFailure::WindowDoesNotOverlap, fit.n, Some(fit)),
+        );
+    };
+    (MzTolerance::Ppm(bounds), outcome)
+}
+
+fn calibrated_mz_window(broad: (f64, f64), fit: &MzFit) -> Option<(f64, f64)> {
+    let half_width = MZ_SIGMA_MULTIPLIER * fit.sigma;
+    let left = (half_width - fit.mu).min(broad.0);
+    let right = (half_width + fit.mu).min(broad.1);
+    (left + right >= 0.0).then_some((left, right))
+}
+
+fn warn_mz_fallback(level: &str, outcome: MzFitOutcome, tolerance: MzTolerance) {
+    if let MzFitOutcome::Fallback { reason, n, .. } = outcome {
+        tracing::warn!(
+            level,
+            ?reason,
+            n,
+            ?tolerance,
+            "m/z fit fell back to the broad tolerance"
+        );
+    }
+}
+
+/// Uniform signed ppm bins. The final bin includes its upper edge.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MzErrorHistogram {
+    pub start_ppm: f64,
+    pub bin_width_ppm: f64,
+    pub counts: Vec<u32>,
+    pub underflow: u32,
+    pub overflow: u32,
+}
+
+impl MzErrorHistogram {
+    fn from_samples(samples: &[f32], tolerance: MzTolerance) -> Self {
+        const MAX_BINS: usize = 200;
+        let (lower, upper) = match tolerance {
+            MzTolerance::Ppm((left, right)) => (-left, right),
+            // An absolute window's ppm extent varies by reference m/z.
+            MzTolerance::Absolute(_) => samples.iter().fold((-1.0f64, 1.0f64), |(lo, hi), &ppm| {
+                (lo.min(f64::from(ppm)), hi.max(f64::from(ppm)))
+            }),
+        };
+        let start_ppm = lower.floor();
+        let span = (upper.ceil() - start_ppm).max(1.0);
+        let bin_width_ppm = (span / MAX_BINS as f64).ceil().max(1.0);
+        let n_bins = ((span / bin_width_ppm).ceil() as usize).clamp(1, MAX_BINS);
+        let mut hist = Self {
+            start_ppm,
+            bin_width_ppm,
+            counts: vec![0; n_bins],
+            underflow: 0,
+            overflow: 0,
+        };
+        let end_ppm = start_ppm + n_bins as f64 * bin_width_ppm;
+        for &ppm in samples {
+            let ppm = f64::from(ppm);
+            if ppm < start_ppm {
+                hist.underflow += 1;
+            } else if ppm > end_ppm {
+                hist.overflow += 1;
+            } else {
+                let bin = ((ppm - start_ppm) / bin_width_ppm) as usize;
+                hist.counts[bin.min(n_bins - 1)] += 1;
+            }
+        }
+        hist
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq)]
+pub struct MzErrorHistograms {
+    pub ms1: MzErrorHistogram,
+    pub ms2: MzErrorHistogram,
+}
+
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq)]
+pub struct MzFits {
+    pub ms1: MzFitOutcome,
+    pub ms2: MzFitOutcome,
+}
+
 /// How tolerances are derived from `DimensionErrors`.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct DerivationParams {
-    /// Bound method, e.g. "mad_symmetric" = `median ± n_sigma * 1.4826 * MAD`.
+    /// Model used for m/z. Mobility and RT use MAD.
     pub method: String,
     pub sigma: SigmaTriplet,
     pub floors: FloorsTriplet,
@@ -148,7 +357,6 @@ pub struct SigmaTriplet {
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FloorsTriplet {
-    pub mz_ppm: f32,
     pub mobility_pct: f32,
     pub rt_minutes: f32,
 }
@@ -156,14 +364,13 @@ pub struct FloorsTriplet {
 impl Default for DerivationParams {
     fn default() -> Self {
         Self {
-            method: "mad_symmetric".to_string(),
+            method: "gaussian_uniform".to_string(),
             sigma: SigmaTriplet {
-                mz: 1.5,
+                mz: MZ_SIGMA_MULTIPLIER as f32,
                 mobility: 3.0,
                 rt: 3.0,
             },
             floors: FloorsTriplet {
-                mz_ppm: 0.1,
                 mobility_pct: 0.1,
                 rt_minutes: DEFAULT_RT_FLOOR_MINUTES,
             },
@@ -181,6 +388,8 @@ pub struct CalibrationResult {
     rt_tolerance_minutes: f32,
     tolerance: Tolerance,
     errors: DimensionErrors,
+    mz_error_histograms: Option<MzErrorHistograms>,
+    mz_fits: Option<MzFits>,
     derivation: Option<DerivationParams>,
     library_rt_axis: timsquery::RtAxis,
 }
@@ -200,12 +409,15 @@ impl CalibrationResult {
             state,
             rt_tolerance_minutes,
             tolerance: Tolerance {
-                ms: MzTolerance::Ppm(mz_tolerance_ppm),
+                ms1: MzTolerance::Ppm(mz_tolerance_ppm),
+                ms2: MzTolerance::Ppm(mz_tolerance_ppm),
                 rt: RtTolerance::Unrestricted,
                 mobility: MobilityTolerance::Pct(mobility_tolerance_pct),
                 quad: QuadTolerance::Absolute((0.1, 0.1)),
             },
             errors: DimensionErrors::default(),
+            mz_error_histograms: None,
+            mz_fits: None,
             derivation: None,
             library_rt_axis: timsquery::RtAxis::Unspecified,
         })
@@ -225,23 +437,33 @@ impl CalibrationResult {
     pub fn from_measurements(
         mut state: CalibratedGrid,
         configured: &Tolerance,
-        errors: DimensionErrors,
+        mz_samples: [&[f32]; 2],
+        mobility_pct: ErrorStats,
+        rt_seconds: ErrorStats,
         derivation: DerivationParams,
     ) -> Self {
         if state.curve().is_none() {
             state.reset();
         }
-        let windows = errors.derive_windows(&derivation);
+        let [ms1_samples, ms2_samples] = mz_samples;
+        let ms1_mz_ppm = ErrorStats::from_slice(ms1_samples);
+        let ms2_mz_ppm = ErrorStats::from_slice(ms2_samples);
+        let (ms1, ms1_fit) = mz_spread(ms1_samples, &ms1_mz_ppm, configured.ms1);
+        let (ms2, ms2_fit) = mz_spread(ms2_samples, &ms2_mz_ppm, configured.ms2);
+        warn_mz_fallback("MS1", ms1_fit, ms1);
+        warn_mz_fallback("MS2", ms2_fit, ms2);
         let mut tolerance = configured
             .clone()
             .with_rt_tolerance(RtTolerance::Unrestricted);
-        if errors.mz_ppm.n > 0 {
-            let mut bounds = windows.mz_ppm;
-            if let MzTolerance::Ppm(broad) = configured.ms {
-                bounds = (bounds.0.min(broad.0), bounds.1.min(broad.1));
-            }
-            tolerance.ms = MzTolerance::Ppm(bounds);
-        }
+        tolerance.ms1 = ms1;
+        tolerance.ms2 = ms2;
+        let errors = DimensionErrors {
+            ms1_mz_ppm,
+            ms2_mz_ppm,
+            mobility_pct,
+            rt_seconds,
+        };
+        let windows = errors.derive_windows(&derivation);
         if errors.mobility_pct.n > 0 {
             tolerance.mobility = MobilityTolerance::Pct(windows.mobility_pct);
         }
@@ -250,6 +472,14 @@ impl CalibrationResult {
             tolerance,
             rt_tolerance_minutes: windows.rt_minutes,
             errors,
+            mz_error_histograms: Some(MzErrorHistograms {
+                ms1: MzErrorHistogram::from_samples(ms1_samples, configured.ms1),
+                ms2: MzErrorHistogram::from_samples(ms2_samples, configured.ms2),
+            }),
+            mz_fits: Some(MzFits {
+                ms1: ms1_fit,
+                ms2: ms2_fit,
+            }),
             derivation: Some(derivation),
             library_rt_axis: timsquery::RtAxis::Unspecified,
         }
@@ -273,6 +503,10 @@ impl CalibrationResult {
 
     pub fn errors(&self) -> &DimensionErrors {
         &self.errors
+    }
+
+    pub fn mz_fits(&self) -> Option<MzFits> {
+        self.mz_fits
     }
 
     /// Interpolate ridge half-width at a given library RT (seconds).
@@ -332,8 +566,12 @@ impl CalibrationResult {
             .with_rt_tolerance(RtTolerance::Minutes((rt_tol_minutes, rt_tol_minutes)))
     }
 
-    pub fn mz_tolerance(&self) -> &MzTolerance {
-        &self.tolerance.ms
+    pub fn ms1_mz_tolerance(&self) -> &MzTolerance {
+        &self.tolerance.ms1
+    }
+
+    pub fn ms2_mz_tolerance(&self) -> &MzTolerance {
+        &self.tolerance.ms2
     }
 
     pub fn mobility_tolerance(&self) -> &MobilityTolerance {
@@ -379,6 +617,8 @@ impl CalibrationResult {
             self.rt_tolerance_minutes,
             Some(ResidualBlock {
                 errors: self.errors.clone(),
+                mz_error_histograms: self.mz_error_histograms.clone(),
+                mz_fits: self.mz_fits,
                 derivation: self.derivation.clone().unwrap_or_default(),
                 tolerance: self.unrestricted_rt_tolerance(),
             }),
@@ -393,7 +633,9 @@ impl CalibrationResult {
         Self::from_measurements(
             CalibratedGrid::deferred(10, 10).expect("valid default grid geometry"),
             &pipeline.broad_tolerance,
-            DimensionErrors::default(),
+            [&[], &[]],
+            ErrorStats::default(),
+            ErrorStats::default(),
             DerivationParams::default(),
         )
     }
@@ -407,6 +649,10 @@ pub type SavedCalibration = calibrt::SavedCalibration<ResidualBlock>;
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ResidualBlock {
     pub errors: DimensionErrors,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mz_error_histograms: Option<MzErrorHistograms>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mz_fits: Option<MzFits>,
     pub derivation: DerivationParams,
     pub tolerance: Tolerance,
 }
@@ -436,26 +682,35 @@ pub fn ridge_half_width_interp(widths: &[RidgeMeasurement], library_rt_s: f64) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use mz_fit::synthetic_samples;
     use tempfile::TempDir;
 
     #[test]
     fn dimensions_calibrate_independently_and_missing_axes_keep_configuration() {
         let configured = Tolerance {
-            ms: MzTolerance::Absolute((0.01, 0.02)),
+            ms1: MzTolerance::Ppm((15.0, 15.0)),
+            ms2: MzTolerance::Ppm((20.0, 25.0)),
             mobility: MobilityTolerance::Unrestricted,
             rt: RtTolerance::Minutes((1.0, 2.0)),
             quad: QuadTolerance::Absolute((0.3, 0.4)),
         };
-        for (mz, mob) in [(false, false), (true, false), (false, true), (true, true)] {
-            let errors = DimensionErrors {
-                mz_ppm: ErrorStats::from_slice(if mz { &[2.0, 3.0, 4.0] } else { &[] }),
-                mobility_pct: ErrorStats::from_slice(if mob { &[0.2, 0.3, 0.4] } else { &[] }),
-                ..Default::default()
-            };
+        let ms1_samples = synthetic_samples(1024, 1.0, 0.6, 0.15, (-15.0, 15.0), 5);
+        let ms2_samples = synthetic_samples(1024, -1.0, 1.5, 0.35, (-20.0, 25.0), 6);
+        for (ms1, ms2, mob) in [
+            (false, false, false),
+            (true, false, false),
+            (false, true, true),
+            (true, true, true),
+        ] {
             let result = CalibrationResult::from_measurements(
                 CalibratedGrid::deferred(10, 3).unwrap(),
                 &configured,
-                errors,
+                [
+                    if ms1 { &ms1_samples } else { &[] },
+                    if ms2 { &ms2_samples } else { &[] },
+                ],
+                ErrorStats::from_slice(if mob { &[0.2, 0.3, 0.4] } else { &[] }),
+                ErrorStats::default(),
                 DerivationParams::default(),
             );
             assert!(!result.has_rt_calibration());
@@ -463,18 +718,16 @@ mod tests {
             let primary = result.get_tolerance(500.0, 1.0, LibraryRT(20.0));
             assert_eq!(primary.rt, RtTolerance::Unrestricted);
             assert_eq!(primary.quad, configured.quad);
-            if mz {
-                assert!(matches!(primary.ms, MzTolerance::Ppm(_)));
-            } else {
-                assert_eq!(primary.ms, configured.ms);
-            }
+            assert_eq!(primary.ms1 != configured.ms1, ms1);
+            assert_eq!(primary.ms2 != configured.ms2, ms2);
             if mob {
                 assert!(matches!(primary.mobility, MobilityTolerance::Pct(_)));
             } else {
                 assert_eq!(primary.mobility, configured.mobility);
             }
             let secondary = result.get_spectral_tolerance();
-            assert_eq!(secondary.ms, primary.ms);
+            assert_eq!(secondary.ms1, primary.ms1);
+            assert_eq!(secondary.ms2, primary.ms2);
             assert_eq!(secondary.mobility, primary.mobility);
             assert_eq!(secondary.quad, primary.quad);
             if !mob {
@@ -484,30 +737,93 @@ mod tests {
             let path = dir.path().join("calibration.json");
             result.save_json([0.0, 600.0], 10, &path).unwrap();
             let (saved, _) = SavedCalibration::read(&path, None).unwrap();
+            assert_eq!(saved.version, "v5");
             assert!(saved.calibration.points.is_empty());
             let residuals = saved.residuals.unwrap();
-            assert_eq!(residuals.tolerance.ms, primary.ms);
+            assert_eq!(residuals.tolerance.ms1, primary.ms1);
+            assert_eq!(residuals.tolerance.ms2, primary.ms2);
             assert_eq!(residuals.tolerance.mobility, primary.mobility);
-            assert_eq!(residuals.errors.mz_ppm.n, if mz { 3 } else { 0 });
+            let ms1_stats = residuals.errors.ms1_mz_ppm;
+            let ms2_stats = residuals.errors.ms2_mz_ppm;
+            assert_eq!(ms1_stats.n, ms1_samples.len() * usize::from(ms1));
+            assert_eq!(ms2_stats.n, ms2_samples.len() * usize::from(ms2));
+            assert_eq!(ms1_stats.median, result.errors().ms1_mz_ppm.median);
+            assert_eq!(ms2_stats.mad, result.errors().ms2_mz_ppm.mad);
+            let hist = residuals.mz_error_histograms.unwrap();
+            assert_eq!(hist.ms1.counts.iter().sum::<u32>(), ms1_stats.n as u32);
+            assert_eq!(hist.ms2.counts.iter().sum::<u32>(), ms2_stats.n as u32);
+            assert_eq!(hist.ms2.start_ppm, -20.0);
+            assert_eq!(hist.ms2.bin_width_ppm, 1.0);
+            let fits = residuals.mz_fits.unwrap();
+            let original_fits = result.mz_fits().unwrap();
+            for (expected, saved, fitted) in [
+                (original_fits.ms1, fits.ms1, ms1),
+                (original_fits.ms2, fits.ms2, ms2),
+            ] {
+                match (expected, saved) {
+                    (MzFitOutcome::Fitted(a), MzFitOutcome::Fitted(b)) => {
+                        assert!(fitted);
+                        assert!((a.mu - b.mu).abs() < 1e-12);
+                        assert!((a.sigma - b.sigma).abs() < 1e-12);
+                        assert!((a.background_fraction - b.background_fraction).abs() < 1e-12);
+                        assert_eq!(a.iterations, b.iterations);
+                        assert_eq!(a.converged, b.converged);
+                        assert_eq!(a.n, b.n);
+                    }
+                    (_, other) => {
+                        assert!(!fitted);
+                        assert_eq!(
+                            other,
+                            MzFitOutcome::fallback(MzFitFailure::TooFewSamples, 0, None)
+                        );
+                    }
+                }
+            }
         }
     }
 
     #[test]
-    fn measured_mz_window_stays_inside_configured_ppm_window() {
-        let configured = Tolerance {
-            ms: MzTolerance::Ppm((8.0, 15.0)),
-            ..Tolerance::default()
+    fn measured_mz_window_clips_and_preserves_signed_left_bound() {
+        let fit = MzFit {
+            mu: 14.0,
+            sigma: 2.0,
+            background_fraction: 0.0,
+            iterations: 1,
+            converged: true,
+            n: 64,
         };
-        let result = CalibrationResult::from_measurements(
-            CalibratedGrid::deferred(10, 3).unwrap(),
-            &configured,
-            DimensionErrors {
-                mz_ppm: ErrorStats::from_slice(&[-60.0, 0.0, 60.0]),
-                ..Default::default()
-            },
-            DerivationParams::default(),
+        assert_eq!(calibrated_mz_window((8.0, 15.0), &fit), Some((-8.0, 15.0)));
+        assert_eq!(calibrated_mz_window((-2.0, 3.0), &fit), None);
+    }
+
+    #[test]
+    fn absolute_window_keeps_configured_tolerance_and_ppm_edges_filter_fit_samples() {
+        let samples = synthetic_samples(1000, 1.0, 1.0, 0.25, (-10.0, 15.0), 7);
+        let absolute = MzTolerance::Absolute((0.01, 0.02));
+        assert_eq!(
+            mz_spread(&samples, &ErrorStats::from_slice(&samples), absolute),
+            (
+                absolute,
+                MzFitOutcome::fallback(MzFitFailure::NoSharedPpmWindow, 0, None)
+            )
         );
-        assert_eq!(*result.mz_tolerance(), configured.ms);
+
+        let broad = MzTolerance::Ppm((10.0, 15.0));
+        let mut with_rounded_edges = samples.clone();
+        with_rounded_edges.extend([-10.001, 15.001]);
+        let result = mz_spread(
+            &with_rounded_edges,
+            &ErrorStats::from_slice(&with_rounded_edges),
+            broad,
+        );
+        let MzFitOutcome::Fitted(fit) = result.1 else {
+            panic!("{result:?}");
+        };
+        assert_eq!(fit.n, samples.len());
+        assert_eq!(
+            result,
+            mz_spread(&samples, &ErrorStats::from_slice(&samples), broad)
+        );
     }
 
     /// A curve with enough spread that the grid fit is non-degenerate, plus ridge
@@ -535,7 +851,8 @@ mod tests {
         );
 
         let errors = DimensionErrors {
-            mz_ppm: ErrorStats::from_slice(&[1.0, 2.0, 3.0]),
+            ms1_mz_ppm: ErrorStats::from_slice(&[1.0, 2.0, 3.0]),
+            ms2_mz_ppm: ErrorStats::from_slice(&[-4.0, -2.0, 0.0]),
             mobility_pct: ErrorStats::from_slice(&[0.5, 1.5]),
             rt_seconds: ErrorStats::from_slice(&[4.0, 6.0, 8.0]),
         };
@@ -590,7 +907,8 @@ mod tests {
         let residuals = saved
             .residuals
             .expect("a search's calibration carries its residuals");
-        assert_eq!(residuals.tolerance.ms, MzTolerance::Ppm((7.5, 8.5)));
+        assert_eq!(residuals.tolerance.ms1, MzTolerance::Ppm((7.5, 8.5)));
+        assert_eq!(residuals.tolerance.ms2, residuals.tolerance.ms1);
         assert_eq!(
             residuals.tolerance.mobility,
             MobilityTolerance::Pct((2.5, 3.5))
@@ -645,18 +963,17 @@ mod tests {
         }
     }
 
-    /// Pins the three per-dimension rules `derive_windows` folds together.
+    /// Pins the MAD-based mobility and RT rules.
     #[test]
     fn derive_windows_applies_each_dimensions_rule() {
         let params = DerivationParams {
-            method: "mad_symmetric".to_string(),
+            method: "gaussian_uniform".to_string(),
             sigma: SigmaTriplet {
-                mz: 2.0,
+                mz: 3.0,
                 mobility: 2.0,
                 rt: 3.0,
             },
             floors: FloorsTriplet {
-                mz_ppm: 0.1,
                 mobility_pct: 0.1,
                 rt_minutes: 0.25,
             },
@@ -666,28 +983,19 @@ mod tests {
         let symmetric = ErrorStats::from_slice(&[-2.0, -1.0, 0.0, 1.0, 2.0]);
         assert_eq!((symmetric.median, symmetric.mad), (0.0, 1.0));
 
-        // Offset by 10: the median rides along, so the window is not centred on
-        // zero -- that offset is the systematic error the window has to cover.
-        let offset = ErrorStats::from_slice(&[8.0, 9.0, 10.0, 11.0, 12.0]);
-        assert_eq!((offset.median, offset.mad), (10.0, 1.0));
-
         let rt_seconds = ErrorStats::from_slice(&[-60.0, 0.0, 60.0]);
         assert_eq!(rt_seconds.mad, 60.0);
 
         let w = DimensionErrors {
-            mz_ppm: offset,
             mobility_pct: symmetric,
             rt_seconds,
+            ..Default::default()
         }
         .derive_windows(&params);
 
         // Expectations are literals, not the implementation's own expression: at
         // MAD 1 and 2 sigma the half-spread is 2 * 1.4826 = 2.9652.
         //
-        // The offset dimension's left bound lands under its floor -- its median is
-        // further from zero than the spread, so the window does not reach back.
-        assert_eq!(w.mz_ppm.0, params.floors.mz_ppm as f64);
-        assert!((w.mz_ppm.1 - 12.9652).abs() < 1e-4, "{:?}", w.mz_ppm);
         assert!(
             (w.mobility_pct.0 - 2.9652).abs() < 1e-4,
             "{:?}",
@@ -704,8 +1012,6 @@ mod tests {
         // A dimension with nothing measured falls to its floor rather than zero,
         // which would be a window no query could match inside.
         let nothing = DimensionErrors::default().derive_windows(&params);
-        let mz_floor = params.floors.mz_ppm as f64;
-        assert_eq!(nothing.mz_ppm, (mz_floor, mz_floor));
         assert_eq!(
             nothing.mobility_pct,
             (params.floors.mobility_pct, params.floors.mobility_pct)
@@ -764,5 +1070,56 @@ mod tests {
             err.contains("v2") && err.contains(CALIBRATION_FORMAT_VERSION),
             "{err}"
         );
+    }
+
+    #[test]
+    fn mass_sampling_caps_each_calibrant_and_the_run() {
+        let mut sampler = MzErrorSamples::default();
+        for _ in 0..MZ_SAMPLES_PER_CALIBRANT * 2 {
+            sampler.observe_peak(MsLevel::Ms1, 500.0, 500.0);
+        }
+        sampler.observe_peak(MsLevel::Ms2, 300.0, 301.0);
+        sampler.observe_peak(MsLevel::Ms2, 300.0, f32::NAN);
+        sampler.finish_calibrant();
+        assert_eq!(sampler.samples()[0], &[0.0; MZ_SAMPLES_PER_CALIBRANT]);
+        assert_eq!(sampler.samples()[1].len(), 1);
+
+        for _ in 0..=MZ_SAMPLES_PER_RUN / MZ_SAMPLES_PER_CALIBRANT {
+            for _ in 0..MZ_SAMPLES_PER_CALIBRANT {
+                sampler.observe_peak(MsLevel::Ms1, 500.0, 501.0);
+                sampler.observe_peak(MsLevel::Ms2, 300.0, 300.0);
+            }
+            sampler.finish_calibrant();
+        }
+        assert_eq!(sampler.samples()[0].len(), MZ_SAMPLES_PER_RUN);
+        assert_eq!(sampler.samples()[1].len(), MZ_SAMPLES_PER_RUN);
+        assert!(sampler.samples()[0].contains(&2000.0));
+        assert!(sampler.samples()[1].contains(&0.0));
+    }
+
+    #[test]
+    fn v4_shared_tolerance_loads_for_both_levels() {
+        let dir = save_fixture(&sample_calibration());
+        let path = dir.path().join("calibration.json");
+        let mut json: serde_json::Value =
+            serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        json["version"] = serde_json::json!("v4");
+        let tolerance = json["residuals"]["tolerance"].as_object_mut().unwrap();
+        let shared = tolerance.remove("ms1").unwrap();
+        tolerance.remove("ms2").unwrap();
+        tolerance.insert("ms".to_string(), shared);
+        let errors = json["residuals"]["errors"].as_object_mut().unwrap();
+        let legacy_stats = errors.remove("ms1_mz_ppm").unwrap();
+        errors.remove("ms2_mz_ppm").unwrap();
+        errors.insert("mz_ppm".to_string(), legacy_stats);
+        std::fs::write(&path, serde_json::to_vec(&json).unwrap()).unwrap();
+        let (saved, _) = SavedCalibration::read(&path, None).unwrap();
+        assert_eq!(saved.version, "v4");
+        let residuals = saved.residuals.unwrap();
+        assert_eq!(residuals.tolerance.ms1, MzTolerance::Ppm((7.5, 8.5)));
+        assert_eq!(residuals.tolerance.ms2, residuals.tolerance.ms1);
+        assert_eq!(residuals.errors.ms1_mz_ppm.n, 3);
+        assert_eq!(residuals.errors.ms2_mz_ppm.n, 0);
+        assert!(residuals.mz_error_histograms.is_none());
     }
 }

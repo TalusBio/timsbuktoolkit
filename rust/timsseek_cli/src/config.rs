@@ -332,6 +332,36 @@ rt = "Unrestricted"
     fn parses_minimal_toml() {
         let c: Config = toml::from_str(MINIMAL_TOML).unwrap();
         assert_eq!(c.analysis.chunk_size, 20000);
+        let tolerance = c.analysis.tolerance;
+        assert_eq!(
+            tolerance.ms1,
+            timsquery::models::tolerance::MzTolerance::Ppm((15.0, 15.0))
+        );
+        assert_eq!(tolerance.ms2, tolerance.ms1);
+    }
+
+    #[test]
+    fn level_specific_tolerances_override_shared_defaults() {
+        use timsquery::models::tolerance::MzTolerance;
+
+        let shared = "ms = { Ppm = [15.0, 15.0] }";
+        let overrides = "ms1 = { Ppm = [2.0, 3.0] }\nms2 = { Absolute = [0.02, 0.03] }";
+        for replacement in [overrides.to_owned(), format!("{shared}\n{overrides}")] {
+            let toml = MINIMAL_TOML.replace(shared, &replacement);
+            let config: Config = toml::from_str(&toml).unwrap();
+            assert_eq!(config.analysis.tolerance.ms1, MzTolerance::Ppm((2.0, 3.0)));
+            assert_eq!(
+                config.analysis.tolerance.ms2,
+                MzTolerance::Absolute((0.02, 0.03))
+            );
+        }
+        let toml = MINIMAL_TOML.replace(shared, &format!("{shared}\nms2 = {{ Ppm = [4.0, 5.0] }}"));
+        let config: Config = toml::from_str(&toml).unwrap();
+        assert_eq!(
+            config.analysis.tolerance.ms1,
+            MzTolerance::Ppm((15.0, 15.0))
+        );
+        assert_eq!(config.analysis.tolerance.ms2, MzTolerance::Ppm((4.0, 5.0)));
     }
 
     #[test]

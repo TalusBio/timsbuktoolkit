@@ -7,7 +7,8 @@ use crate::artifacts::{
 };
 use indicatif::ProgressIterator;
 use timsquery::IndexedTimstofPeaks;
-use timsseek::ScorerQueriable;
+use timsquery::models::aggregators::spectrum_agg::ObservedSpectrum;
+use timsquery::models::tolerance::MzTolerance;
 use timsseek::data_sources::reference_library::ReferenceLibrary;
 use timsseek::errors::TimsSeekError;
 use timsseek::ml::qvalues::{
@@ -19,7 +20,10 @@ use timsseek::ml::{
     RescoreModel,
     rescore_with,
 };
-use timsseek::rt_calibration::CalibrationResult;
+use timsseek::rt_calibration::{
+    CalibrationResult,
+    MzFitOutcome,
+};
 use timsseek::scoring::pipeline::Scorer;
 use timsseek::scoring::timings::{
     TimedStep,
@@ -32,6 +36,10 @@ use timsseek::scoring::{
     ScoreTimings,
     ScoredCandidate,
     SkipCounts,
+};
+use timsseek::{
+    IonAnnot,
+    ScorerQueriable,
 };
 use tracing::{
     debug,
@@ -161,12 +169,30 @@ pub struct PipelineOptions<'a> {
     pub rescore_model: RescoreModel,
 }
 
-pub fn execute_pipeline<I: ScorerQueriable>(
+fn mz_fit_summary(tolerance: &MzTolerance, outcome: Option<MzFitOutcome>) -> String {
+    let (estimate, status) = match outcome {
+        Some(MzFitOutcome::Fitted(fit)) => (Some(fit), ""),
+        Some(MzFitOutcome::Fallback { estimate, .. }) => (estimate, ", fallback"),
+        None => (None, ""),
+    };
+    match estimate {
+        Some(fit) => format!(
+            "{tolerance:?} (mu={:+.3} ppm, sigma={:.3} ppm, bg={:.3}{status})",
+            fit.mu, fit.sigma, fit.background_fraction,
+        ),
+        None => format!("{tolerance:?} (mu=n/a, sigma=n/a, bg=n/a{status})"),
+    }
+}
+
+pub fn execute_pipeline<I>(
     speclib: &ReferenceLibrary,
     calib_lib: Option<&ReferenceLibrary>,
     pipeline: &Scorer<I>,
     options: &PipelineOptions<'_>,
-) -> std::result::Result<PipelineReport, TimsSeekError> {
+) -> std::result::Result<PipelineReport, TimsSeekError>
+where
+    I: ScorerQueriable + for<'a> timsquery::QueriableData<ObservedSpectrum<'a, IonAnnot>>,
+{
     if !matches!(
         speclib.geometry().capabilities().decoys,
         timsquery::models::capabilities::DecoyStrategy::MassShift { .. }
@@ -268,9 +294,11 @@ pub fn execute_pipeline<I: ScorerQueriable>(
             summary.in_ridge_ratio * 100.0,
         );
     }
+    let fits = calibration.mz_fits();
     println!(
-        "  m/z: {:?}   mobility: {}   RT fit: {}",
-        calibration.mz_tolerance(),
+        "  MS1 m/z: {}   MS2 m/z: {}   mobility: {}   RT fit: {}",
+        mz_fit_summary(calibration.ms1_mz_tolerance(), fits.map(|f| f.ms1)),
+        mz_fit_summary(calibration.ms2_mz_tolerance(), fits.map(|f| f.ms2)),
         if pipeline.index.mobility_kind().is_scoreable() {
             format!("{:?}", calibration.mobility_tolerance())
         } else {
