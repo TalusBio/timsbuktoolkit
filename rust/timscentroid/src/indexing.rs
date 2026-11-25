@@ -1942,8 +1942,17 @@ mod tests {
             "cycle_to_rt_ms".to_owned(),
             serde_json::json!([100, u32::MAX, 300]),
         );
-        std::fs::write(path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        std::fs::write(&path, serde_json::to_vec(&metadata).unwrap()).unwrap();
         assert_gap();
+
+        // A legacy cache whose acquired RTs go backwards cannot be repaired.
+        metadata["ms2_window_groups"][0]["group_info"]["cycle_to_rt_ms"] =
+            serde_json::json!([300, u32::MAX, 100]);
+        std::fs::write(&path, serde_json::to_vec(&metadata).unwrap()).unwrap();
+        assert!(
+            IndexedTimstofPeaks::load_from_storage(crate::StorageLocation::from_path(dir.path()))
+                .is_err()
+        );
     }
 
     #[test]

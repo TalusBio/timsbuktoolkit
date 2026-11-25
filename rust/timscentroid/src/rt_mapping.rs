@@ -285,6 +285,25 @@ mod tests {
     }
 
     #[test]
+    fn missing_cycle_rts_fill_leading_interior_and_trailing_gaps() {
+        // Missing slots hold garbage; only acquired cycles carry real RTs.
+        let present = [false, false, true, false, false, false, true, false, false];
+        let mut rts = [9, 9, 300, 9, 9, 9, 700, 9, 9];
+        fill_missing_cycle_rts(&mut rts, &present);
+        // Leading: ramp up from a zero baseline. Interior: linear in steps of
+        // 400/4. Trailing: hold the last acquired RT.
+        assert_eq!(rts, [0, 150, 300, 400, 500, 600, 700, 700, 700]);
+
+        let mut rts = [100, 200, 300];
+        fill_missing_cycle_rts(&mut rts, &[true; 3]);
+        assert_eq!(rts, [100, 200, 300]);
+
+        let mut rts = [9, 9];
+        fill_missing_cycle_rts(&mut rts, &[false; 2]);
+        assert_eq!(rts, [0, 0]);
+    }
+
+    #[test]
     fn test_container_serde() {
         let mapping: CycleToRTMapping<MS1CycleIndex> =
             CycleToRTMapping::new(vec![1000, 2000, 3000]);

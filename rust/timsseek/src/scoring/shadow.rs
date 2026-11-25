@@ -1396,6 +1396,72 @@ mod tests {
         IndexedTimstofPeaks::from_parts(ms1, groups).with_mobility_kind(mobility)
     }
 
+    fn windows(bounds: &[(f64, f64, f64, f64)], mobility: MobilityKind) -> IndexedTimstofPeaks {
+        let groups = bounds
+            .iter()
+            .map(|&window| {
+                (
+                    QuadrupoleIsolationScheme::from_xxyy([window].into_iter()),
+                    peaks(&[(300.0, 1.0, 1.0, 0)], &[0]),
+                )
+            })
+            .collect();
+        index(groups, mobility)
+    }
+
+    #[test]
+    fn static_group_prefers_nearest_centre_then_lower_bound_then_id() {
+        let index = windows(
+            &[
+                (400.0, 500.0, 0.0, 2.0),
+                (480.0, 520.0, 0.0, 2.0),
+                (450.0, 550.0, 0.0, 2.0),
+                (450.0, 550.0, 0.0, 2.0),
+                (490.0, 530.0, 0.0, 2.0),
+            ],
+            MobilityKind::Absent,
+        );
+        let map = WindowMap::new(&index).unwrap();
+        // 505: groups 1-4 contain it, 1-3 centred at 500 tie with 4 (510);
+        // 2 and 3 open lowest, and 2 has the lower id.
+        assert_eq!(map.static_group(505.0), Some(2));
+        // 515: group 4 (centre 510) is nearest.
+        assert_eq!(map.static_group(515.0), Some(4));
+        // 420: only group 0.
+        assert_eq!(map.static_group(420.0), Some(0));
+        assert_eq!(map.static_group(600.0), None);
+    }
+
+    #[test]
+    fn mobility_groups_pick_the_widest_projection_and_cap_memberships() {
+        let mut bounds = vec![
+            (490.0, 510.0, 0.90, 1.00),
+            (490.0, 510.0, 0.95, 1.10),
+            (490.0, 510.0, 1.05, 1.08),
+            (490.0, 510.0, 2.00, 2.10),
+        ];
+        let index = windows(&bounds, MobilityKind::Ook0);
+        let map = WindowMap::new(&index).unwrap();
+        // Query mobility 0.92-1.07: overlaps groups 0 (0.08), 1 (0.12), 2 (0.02).
+        let (primary, groups) = map
+            .mobility_groups((499.0, 501.0), (0.92, 1.07))
+            .unwrap()
+            .unwrap();
+        assert_eq!(primary, 1);
+        assert_eq!(groups.as_slice(), &[0, 1, 2]);
+        assert!(
+            map.mobility_groups((499.0, 501.0), (1.50, 1.60))
+                .unwrap()
+                .is_none()
+        );
+
+        bounds.truncate(3);
+        bounds.extend([(490.0, 510.0, 0.80, 1.20); 2]);
+        let index = windows(&bounds, MobilityKind::Ook0);
+        let map = WindowMap::new(&index).unwrap();
+        assert!(map.mobility_groups((499.0, 501.0), (0.92, 1.07)).is_err());
+    }
+
     #[test]
     fn score_ties_compare_top_fragment_bits_and_survive_row_permutation() {
         let library = library(&[[1.0, 0.0], [2.0, 0.5], [2.0, 1.0]], &[1.0; 3]);

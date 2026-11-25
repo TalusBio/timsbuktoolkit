@@ -986,6 +986,8 @@ mod tests {
         rt: timscentroid::rt_mapping::CycleToRTMapping<timscentroid::rt_mapping::MS1CycleIndex>,
         queries: std::sync::Mutex<Vec<(f32, timsquery::PeakTolerance)>>,
         mobility_kind: timscentroid::MobilityKind,
+        /// Intensity of every fragment at a global MS1 cycle; `None` adds nothing.
+        fragment_trace: Option<fn(usize) -> f32>,
     }
 
     impl timsseek::traits::MappableRTCycles for TestIndex {
@@ -1003,9 +1005,18 @@ mod tests {
     impl timsquery::QueriableData<timsquery::ChromatogramCollector<IonAnnot, f32>> for TestIndex {
         fn add_query(
             &self,
-            _: &mut timsquery::ChromatogramCollector<IonAnnot, f32>,
+            query: &mut timsquery::ChromatogramCollector<IonAnnot, f32>,
             _: &timsquery::PeakTolerance,
         ) {
+            let Some(trace) = self.fragment_trace else {
+                return;
+            };
+            let offset = query.cycle_offset();
+            for (_, mut chromatogram) in query.iter_mut_fragments() {
+                for cycle in offset..offset + chromatogram.len() {
+                    chromatogram.add_at_index(u32::try_from(cycle).unwrap(), trace(cycle));
+                }
+            }
         }
     }
     impl timsquery::QueriableData<SpectralCollector<IonAnnot, f32>> for TestIndex {
@@ -1099,6 +1110,7 @@ mod tests {
                     rt: timscentroid::rt_mapping::CycleToRTMapping::new(vec![0, 30_000, 60_000]),
                     queries: Default::default(),
                     mobility_kind,
+                    fragment_trace: None,
                 },
                 broad_tolerance: timsquery::Tolerance {
                     ms1: MzTolerance::Ppm((20.0, 25.0)),
@@ -1161,6 +1173,66 @@ mod tests {
                 assert_eq!(pipeline.index.queries.lock().unwrap().len(), 2);
             }
         }
+    }
+
+    #[test]
+    fn poisson_gain_reads_the_window_centred_on_the_calibrant_apex() {
+        use timsquery::models::{
+            Row,
+            TargetCapabilities,
+            TargetColumnsBuilder,
+        };
+        use timsseek::rt_calibration::ObservedRTSeconds;
+
+        // A spike at cycle 10 (10 s). The 5-cycle window centred on it is
+        // [100, 100, 200, 100, 100]: fourth difference 600, weight 10600.
+        // A window off by one cycle gives 160000 / 8600 instead.
+        const APEX: usize = 10;
+        let index = TestIndex {
+            rt: timscentroid::rt_mapping::CycleToRTMapping::new(
+                (0..20).map(|cycle| cycle * 1000).collect(),
+            ),
+            queries: Default::default(),
+            mobility_kind: timscentroid::MobilityKind::Ook0,
+            fragment_trace: Some(|cycle| if cycle == APEX { 200.0 } else { 100.0 }),
+        };
+        let mut builder =
+            TargetColumnsBuilder::with_capabilities(TargetCapabilities::default_diann());
+        let fragments = [(IonAnnot::try_from("y1").unwrap(), 300.0)];
+        builder.push_row(Row {
+            precursor_mz: 500.0,
+            charge: 2,
+            mobility: 1.0,
+            frags: &fragments,
+            ..Default::default()
+        });
+        let lib = ReferenceLibrary::try_from(timsquery::serde::TargetTable::Mzpaf {
+            geom: builder
+                .seal(timsquery::models::capabilities::DecoyPolicy::Never)
+                .unwrap(),
+            frag_intens: Some(vec![1.0]),
+        })
+        .unwrap();
+        let row = lib.geometry().flats().next().unwrap();
+        // +-5 s around the apex: the extraction starts at cycle 5, so the
+        // apex must be shifted into collector-local coordinates.
+        let rt = ResolvedRt::resolve(
+            RtSelection::Centered(ObservedRTSeconds(10.0)),
+            &RtTolerance::Minutes((5.0 / 60.0, 5.0 / 60.0)),
+            timsquery::utils::TupleRange::try_new(ObservedRTSeconds(0.0), ObservedRTSeconds(19.0))
+                .unwrap(),
+        )
+        .unwrap();
+        let tolerance = PeakTolerance::default();
+
+        let accepted = vec![(row, rt); 16];
+        let gain = measure_poisson_gain(&index, &lib, &accepted, &tolerance).unwrap();
+        assert!((gain - 600.0 * 600.0 / 10600.0).abs() < 1e-9, "{gain}");
+        // One calibrant short of the minimum: no gain.
+        assert_eq!(
+            measure_poisson_gain(&index, &lib, &accepted[..15], &tolerance),
+            None
+        );
     }
 
     #[test]
