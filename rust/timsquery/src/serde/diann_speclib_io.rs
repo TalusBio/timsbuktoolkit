@@ -236,11 +236,13 @@ impl<'a> Peptide<'a> {
         // The fragment block starts after the fixed header and the `nfrag`
         // count; its length was validated when the view was constructed.
         let start = Peptide::header_len(self.version) + 4;
-        self.buf[start..]
-            .as_chunks::<PRODUCT_SIZE>()
-            .0
-            .iter()
-            .map(Fragment)
+        let (fragments, remainder) = self.buf[start..].as_chunks::<PRODUCT_SIZE>();
+        assert!(
+            remainder.is_empty(),
+            "fragment block not a multiple of {PRODUCT_SIZE}: {} trailing bytes",
+            remainder.len()
+        );
+        fragments.iter().map(Fragment)
     }
 }
 
