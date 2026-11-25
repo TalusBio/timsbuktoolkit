@@ -31,17 +31,16 @@ jobs:
           cache-key: ${{ matrix.features }}
           # Keeps the action's `-D warnings` default so PRs fail on what
           # release.yml fails on.
-      - name: Build
-        run: cargo build --verbose -p timsseek ${{ matrix.features }}
-      - name: Run tests
-        run: cargo test --verbose -p timsseek ${{ matrix.features }}
+      - uses: go-task/setup-task@v1
+        with:
+          version: ${{ env.TASK_VERSION }}
+      - name: Build and test timsseek
+        run: task test:timsseek FEATURES='${{ matrix.features }}'
       # timsseek alone misses timscentroid's mzdata ingest, tims_stage staging
       # and the timsquery mobility gate.
       - name: Run reader + staging tests (mzdata)
         if: matrix.features == ''
-        run: |
-          cargo test -p timscentroid --features mzdata
-          cargo test -p tims_stage -p timsquery
+        run: task test:readers
 
   # Crates the timsseek matrix above never compiles. `--all-targets` so examples
   # are built too — that is what let `timsseek_cli/examples/load_bench.rs` rot.
@@ -56,20 +55,19 @@ jobs:
           # Bump when the `-p` list changes: the key ignores it, so a widened
           # build hits the old key and rust-cache saves nothing.
           cache-key: pkgs-cli-sim-viewer
-      - name: Build
-        run: cargo build --verbose -p timsseek_cli -p apex_sim -p timsseek_macros -p rescore_dash -p timsquery_viewer
-      - name: Run tests
-        run: cargo test --verbose -p timsseek_cli -p apex_sim -p timsseek_macros -p rescore_dash -p timsquery_viewer --all-targets
-      # Opt-in, so these call sites compile under no other leg.
-      - name: Type-check (dashboard feature)
-        run: cargo check -p timsseek_cli --features dashboard --all-targets
+      - uses: go-task/setup-task@v1
+        with:
+          version: ${{ env.TASK_VERSION }}
+      - name: Build and test CLI, simulator, macros, dashboard and viewer
+        run: task test:cli-and-sim
       # calibrt compiles in every leg but nothing above runs its tests, and
       # calib_dash is built by no other leg at all. The feature leg is the only
       # one that compiles `calib_dash_hook`'s real arm.
       - name: Run calibrt / calib_dash tests
-        run: cargo test --verbose -p calibrt -p calib_dash
-      - name: Check timsseek_cli with the calib-dashboard feature
-        run: cargo check --verbose -p timsseek_cli --features calib-dashboard --all-targets
+        run: task test:calibration
+      # Opt-in, so these call sites compile under no other leg.
+      - name: Type-check dashboard features
+        run: task check:dashboards
 
   rust-tests:
     runs-on: ubuntu-latest

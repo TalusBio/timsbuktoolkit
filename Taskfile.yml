@@ -11,6 +11,16 @@ tasks:
       - task: fmt:check
       - task: clippy
       - task: test
+      - task: test:timsseek
+        vars:
+          FEATURES: ""
+      - task: test:timsseek
+        vars:
+          FEATURES: --no-default-features
+      - task: test:readers
+      - task: test:cli-and-sim
+      - task: test:calibration
+      - task: check:dashboards
       - task: doc
       - task: license_check
 
@@ -33,17 +43,51 @@ tasks:
 
   test:python:
     cmds:
-      - uv run --locked python -m pytest
+      - uv run python -m pytest
+
+  test:timsseek:
+    env:
+      RUSTFLAGS: -D warnings
+    cmds:
+      - cargo build --verbose -p timsseek {{.FEATURES | default ""}}
+      - cargo test --verbose -p timsseek {{.FEATURES | default ""}}
+
+  test:readers:
+    env:
+      RUSTFLAGS: -D warnings
+    cmds:
+      - cargo test -p timscentroid --features mzdata
+      - cargo test -p tims_stage -p timsquery
+
+  test:cli-and-sim:
+    env:
+      RUSTFLAGS: -D warnings
+    cmds:
+      - cargo build --verbose -p timsseek_cli -p apex_sim -p timsseek_macros -p rescore_dash -p timsquery_viewer
+      - cargo test --verbose -p timsseek_cli -p apex_sim -p timsseek_macros -p rescore_dash -p timsquery_viewer --all-targets
+
+  test:calibration:
+    env:
+      RUSTFLAGS: -D warnings
+    cmds:
+      - cargo test --verbose -p calibrt -p calib_dash
+
+  check:dashboards:
+    env:
+      RUSTFLAGS: -D warnings
+    cmds:
+      - cargo check -p timsseek_cli --features dashboard --all-targets
+      - cargo check --verbose -p timsseek_cli --features calib-dashboard --all-targets
 
   fmt:
     cmds:
       - cargo +nightly fmt --all --verbose
-      - uv run --locked ruff format
+      - uv run ruff format
 
   fmt:check:
     cmds:
       - cargo +nightly fmt --all -- --check
-      - uv run --locked ruff format --check
+      - uv run ruff format --check
 
   clippy:
     cmds:
