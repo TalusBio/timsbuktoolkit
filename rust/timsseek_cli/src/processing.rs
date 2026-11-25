@@ -292,7 +292,7 @@ where
 
     // === PHASE 2: Calibration (fit RT + measure errors + derive tolerances) ===
     info!("Phase 2: Calibration...");
-    let step = TimedStep::begin("Phase 2: Calibrate");
+    let step = TimedStep::begin_deferred("Phase 2: Calibrate");
     let calibration = {
         match calibrate_from_phase1(
             calibrants,

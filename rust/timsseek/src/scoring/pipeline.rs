@@ -24,6 +24,7 @@
 //! 2. **Calibrated scoring** (Phase 3): Narrow calibrated extraction + `find_apex` + secondary query.
 
 use crate::data_sources::reference_library::{
+    ExpectedIntensity,
     RefQuery,
     ReferenceLibrary,
     RowHandles,
@@ -73,6 +74,10 @@ use super::apex_finding::{
     Extraction,
     RelativeIntensityCollector,
     TraceScorer,
+};
+use super::blocks::poisson::{
+    PoissonEvidence,
+    compute_poisson_evidence,
 };
 use super::hyperscore::single_lazyscore;
 use super::offsets::MzMobilityOffsets;
@@ -670,6 +675,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         metadata: &super::apex_finding::CandidateMetadata,
         nqueries: u8,
         apex: ApexBlocks,
+        poisson: PoissonEvidence,
         inner_collector: &SpectralCollector<IonAnnot, MzMobilityStatsCollector>,
         isotope_collector: Option<&SpectralCollector<IonAnnot, f32>>,
     ) -> Result<ScoredCandidate, DataProcessingError> {
@@ -684,6 +690,7 @@ impl<I: ScorerQueriable> Scorer<I> {
             secondary_lazy,
             nqueries,
             apex,
+            poisson,
         });
 
         // No searchable mobility axis (mzML/FAIMS) → the observed mobility is a
@@ -870,14 +877,27 @@ impl<I: ScorerQueriable> Scorer<I> {
             trace.stage = Phase3Stage::Apex;
         }
 
-        let apex_score = timed!(
+        let (apex_score, poisson) = timed!(
             timings.scoring,
             tracing::span!(tracing::Level::TRACE, "score_calibrated::apex_scoring").in_scope(
                 || {
-                    worker
+                    let apex = worker
                         .scorer
                         .find_apex(scoring_ctx, &|idx| self.map_rt_index_to_milis(idx))
-                        .map_err(|e| apex_error_to_skip(&e))
+                        .map_err(|e| apex_error_to_skip(&e))?;
+                    let poisson = calibration
+                        .and_then(CalibrationResult::poisson_gain)
+                        .map_or(PoissonEvidence::MISSING, |gain| {
+                            compute_poisson_evidence(
+                                &worker.scorer.traces.apex_profile,
+                                apex.joint_apex_cycle,
+                                (apex.counts.rising_cycles, apex.counts.falling_cycles),
+                                &scoring_ctx.chromatograms.fragments,
+                                query.iter_expected_fragments(),
+                                gain,
+                            )
+                        });
+                    Ok::<_, SkipReason>((apex, poisson))
                 },
             )
         )?;
@@ -940,6 +960,7 @@ impl<I: ScorerQueriable> Scorer<I> {
                     &metadata,
                     nqueries,
                     apex_score,
+                    poisson,
                     inner_collector,
                     isotope_collector,
                 )

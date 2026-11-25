@@ -49,6 +49,7 @@ pub mod intensities;
 pub mod ion_errors;
 pub mod lazy;
 pub mod mobility;
+pub mod poisson;
 pub mod primary;
 pub mod relative_intensities;
 pub mod result_meta;

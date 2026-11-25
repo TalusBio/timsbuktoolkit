@@ -392,6 +392,7 @@ pub struct CalibrationResult {
     mz_fits: Option<MzFits>,
     derivation: Option<DerivationParams>,
     library_rt_axis: timsquery::RtAxis,
+    poisson_gain: Option<f64>,
 }
 
 impl CalibrationResult {
@@ -420,6 +421,7 @@ impl CalibrationResult {
             mz_fits: None,
             derivation: None,
             library_rt_axis: timsquery::RtAxis::Unspecified,
+            poisson_gain: None,
         })
     }
 
@@ -427,6 +429,15 @@ impl CalibrationResult {
     pub fn with_rt_axis(mut self, axis: &timsquery::RtAxis) -> Self {
         self.library_rt_axis = axis.clone();
         self
+    }
+
+    pub fn with_poisson_gain(mut self, gain: Option<f64>) -> Self {
+        self.poisson_gain = gain.filter(|&g| g.is_finite() && g > 0.0);
+        self
+    }
+
+    pub fn poisson_gain(&self) -> Option<f64> {
+        self.poisson_gain
     }
 
     pub fn has_rt_calibration(&self) -> bool {
@@ -482,6 +493,7 @@ impl CalibrationResult {
             }),
             derivation: Some(derivation),
             library_rt_axis: timsquery::RtAxis::Unspecified,
+            poisson_gain: None,
         }
     }
 
@@ -619,6 +631,7 @@ impl CalibrationResult {
                 errors: self.errors.clone(),
                 mz_error_histograms: self.mz_error_histograms.clone(),
                 mz_fits: self.mz_fits,
+                poisson_gain: self.poisson_gain,
                 derivation: self.derivation.clone().unwrap_or_default(),
                 tolerance: self.unrestricted_rt_tolerance(),
             }),
@@ -653,6 +666,8 @@ pub struct ResidualBlock {
     pub mz_error_histograms: Option<MzErrorHistograms>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mz_fits: Option<MzFits>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub poisson_gain: Option<f64>,
     pub derivation: DerivationParams,
     pub tolerance: Tolerance,
 }

@@ -22,6 +22,7 @@ use super::blocks::lazy::{
     SecondaryLazyScores,
 };
 use super::blocks::mobility::Mobility;
+use super::blocks::poisson::PoissonEvidence;
 use super::blocks::primary::PrimaryScores;
 use super::blocks::relative_intensities::RelativeIntensities;
 use super::blocks::result_meta::ResultMeta;
@@ -45,6 +46,7 @@ pub struct FinalizeInputs<'a> {
     pub rel_inten: RelativeIntensityCollector,
     pub secondary_lazy: SecondaryLazyScoresRaw,
     pub nqueries: u8,
+    pub poisson: PoissonEvidence,
     /// Apex-stage blocks, moved in at zero cost.
     pub apex: ApexBlocks,
 }
@@ -102,6 +104,8 @@ pub struct ScoringFields {
     pub rel_intensities: RelativeIntensities,
     #[block]
     pub shadow: ShadowScores,
+    #[block]
+    pub poisson: PoissonEvidence,
 }
 
 impl ScoringFields {
@@ -125,6 +129,7 @@ impl ScoringFields {
             ion_errors: IonErrors::compute(inp.offsets),
             rel_intensities: RelativeIntensities::from_collector(&inp.rel_inten),
             shadow: ShadowScores::default(),
+            poisson: inp.poisson,
         }
     }
 

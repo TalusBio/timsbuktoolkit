@@ -1,13 +1,23 @@
 use indicatif::ProgressIterator;
+use timscentroid::rt_mapping::RTIndex;
 use timsquery::models::FlatIdx;
 use timsquery::models::aggregators::spectrum_agg::ObservedSpectrum;
 use timsquery::models::tolerance::RtTolerance;
 use timsquery::traits::Target;
 use timsquery::{
+    ChromatogramCollector,
+    ExtractionQuery,
     MzMobilityStatsCollector,
+    PeakTolerance,
+    ResolvedRt,
+    RtSelection,
     SpectralCollector,
 };
-use timsseek::data_sources::reference_library::ReferenceLibrary;
+use timsseek::data_sources::reference_library::{
+    MAX_FRAGMENTS,
+    MAX_PRECURSORS,
+    ReferenceLibrary,
+};
 use timsseek::rt_calibration::{
     CALIBRANT_WEIGHT,
     CalibRtError,
@@ -22,9 +32,13 @@ use timsseek::rt_calibration::{
     RidgeSummary,
     ridge_half_width_interp,
 };
+use timsseek::scoring::blocks::poisson::CalibrantGainScratch;
 use timsseek::scoring::offsets::MzMobilityOffsets;
 use timsseek::scoring::pipeline::Scorer;
-use timsseek::scoring::timings::make_progress_bar;
+use timsseek::scoring::timings::{
+    TimedStep,
+    make_progress_bar,
+};
 use timsseek::scoring::{
     CALIBRANT_HEAP_GROUPS,
     CALIBRANT_RT_BANDS,
@@ -795,6 +809,9 @@ where
     let mut mz_samples = MzErrorSamples::default();
     let mut mobility_errors_pct: Vec<f32> = Vec::with_capacity(candidates.len());
     let mut rt_residuals_seconds: Vec<f32> = Vec::with_capacity(candidates.len());
+    let mut accepted = Vec::with_capacity(candidates.len());
+    let cycle_mapping = pipeline.index.ms1_cycle_mapping();
+    let peak_tolerance = query_tolerance.peak_tolerance();
 
     let mut n_off_ridge = 0usize;
     for (candidate, library_rt_opt) in candidates.iter().zip(library_rt_for_candidate.iter()) {
@@ -824,17 +841,16 @@ where
             rt_residuals_seconds.push(residual);
         }
 
+        let rt = ResolvedRt::from_mapping(
+            RtSelection::Centered(candidate.apex_rt),
+            &query_tolerance.rt,
+            cycle_mapping,
+        )
+        .expect("calibrant apex inside acquisition");
+        accepted.push((candidate.speclib_index, rt));
         // No clone: build collector from the flyweight (Target) + rt override.
         let mut agg: SpectralCollector<IonAnnot, MzMobilityStatsCollector> =
-            SpectralCollector::new(&timsquery::ExtractionQuery::new(
-                &item,
-                timsquery::ResolvedRt::from_mapping(
-                    timsquery::RtSelection::Centered(candidate.apex_rt),
-                    &query_tolerance.rt,
-                    pipeline.index.ms1_cycle_mapping(),
-                )
-                .expect("calibrant apex inside acquisition"),
-            ));
+            SpectralCollector::new(&ExtractionQuery::new(&item, rt));
         pipeline.index.add_query(
             &mut ObservedSpectrum {
                 spectrum: &mut agg,
@@ -842,7 +858,7 @@ where
                     mz_samples.observe_peak(level, reference, observed);
                 },
             },
-            &query_tolerance.peak_tolerance(),
+            &peak_tolerance,
         );
         mz_samples.finish_calibrant();
 
@@ -866,6 +882,8 @@ where
     derivation.floors.rt_minutes = config.min_rt_tolerance_minutes;
 
     let [ms1_samples, ms2_samples] = mz_samples.samples();
+    let poisson_gain =
+        measure_poisson_gain(&pipeline.index, phase1_lib, &accepted, &peak_tolerance);
     info!(
         "Calibration measurements: MS1 m/z={}, MS2 m/z={}, mobility={}, RT={}; off-ridge={}",
         ms1_samples.len(),
@@ -881,12 +899,88 @@ where
         ErrorStats::from_slice(&mobility_errors_pct),
         ErrorStats::from_slice(&rt_residuals_seconds),
         derivation,
-    ))
+    )
+    .with_poisson_gain(poisson_gain))
+}
+
+fn measure_poisson_gain<I: ScorerQueriable>(
+    index: &I,
+    library: &ReferenceLibrary,
+    accepted: &[(FlatIdx, ResolvedRt)],
+    tolerance: &PeakTolerance,
+) -> Option<f64> {
+    let &(first_row, first_rt) = accepted.first()?;
+    let step = TimedStep::begin_deferred("  Poisson gain");
+    let mapping = index.ms1_cycle_mapping();
+    assert!(u32::try_from(mapping.len()).is_ok());
+    let max_cycles = accepted
+        .iter()
+        .map(|&(_, rt)| ChromatogramCollector::<IonAnnot, f32>::query_cycles(rt, mapping).1)
+        .max()
+        .expect("accepted calibrants are nonempty");
+    assert!((1..=mapping.len()).contains(&max_cycles));
+
+    let first_item = library.item_at(first_row);
+    let mut chromatograms = ChromatogramCollector::<IonAnnot, f32>::new_with_capacity(
+        &ExtractionQuery::new(&first_item, first_rt),
+        mapping,
+        MAX_PRECURSORS,
+        MAX_FRAGMENTS,
+        max_cycles,
+    )
+    .expect("validated calibrant geometry");
+    let mut scratch = CalibrantGainScratch::new();
+    let mut samples = Vec::with_capacity(accepted.len());
+    for &(row, rt) in accepted {
+        let item = library.item_at(row);
+        let query = ExtractionQuery::new(&item, rt);
+        chromatograms
+            .try_reset_with(&query, mapping)
+            .expect("validated calibrant geometry");
+        debug_assert!(chromatograms.num_cycles() <= max_cycles);
+        index.add_query(&mut chromatograms, tolerance);
+        let apex_rt = rt.center().expect("calibrant query has an observed center");
+        let apex = mapping
+            .ms_to_closest_index((apex_rt.0 * 1000.0).round() as u32)
+            .index();
+        if let Some(gain) = apex
+            .checked_sub(chromatograms.cycle_offset())
+            .and_then(|apex| scratch.measure(&chromatograms.fragments, apex))
+        {
+            samples.push(gain);
+        }
+    }
+    assert!(samples.len() <= accepted.len());
+    let gain = median_poisson_gain(&mut samples);
+    step.finish_with(format_args!("{} gain samples", samples.len()));
+    info!(?gain, n = samples.len(), "Poisson intensity gain");
+    gain
+}
+
+fn median_poisson_gain(samples: &mut [f64]) -> Option<f64> {
+    const MIN_GAIN_CALIBRANTS: usize = 16;
+    if samples.len() < MIN_GAIN_CALIBRANTS {
+        return None;
+    }
+    debug_assert!(samples.iter().all(|&gain| gain.is_finite() && gain >= 0.0));
+    let (_, &mut median, _) = samples.select_nth_unstable_by(samples.len() / 2, f64::total_cmp);
+    (median > 0.0).then_some(median)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn gain_requires_sixteen_samples_and_uses_positive_upper_median() {
+        let mut gains = [0.0; 16];
+        gains[..8].fill(2.0);
+        assert_eq!(median_poisson_gain(&mut gains[..15]), None);
+        assert_eq!(median_poisson_gain(&mut gains), Some(2.0));
+        gains.fill(0.0);
+        gains[..7].fill(2.0);
+        assert_eq!(median_poisson_gain(&mut gains), None);
+    }
 
     struct TestIndex {
         rt: timscentroid::rt_mapping::CycleToRTMapping<timscentroid::rt_mapping::MS1CycleIndex>,
