@@ -1177,7 +1177,7 @@ mod test {
         });
         assert_eq!(actual.width(), expected.width());
         assert_eq!(actual.culled(), expected.culled());
-        for row in feat.chunks_exact(3) {
+        for row in feat.as_chunks::<3>().0 {
             let mut a = vec![0.0; actual.width()];
             let mut b = vec![0.0; expected.width()];
             actual.apply(row, &mut a);

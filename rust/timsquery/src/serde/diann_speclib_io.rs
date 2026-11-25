@@ -159,7 +159,7 @@ impl<'a> Cursor<'a> {
 }
 
 /// Zero-copy view over one 12-byte `Product`/fragment record.
-struct Fragment<'a>(&'a [u8]);
+struct Fragment<'a>(&'a [u8; PRODUCT_SIZE]);
 
 impl Fragment<'_> {
     fn mz(&self) -> f32 {
@@ -236,7 +236,11 @@ impl<'a> Peptide<'a> {
         // The fragment block starts after the fixed header and the `nfrag`
         // count; its length was validated when the view was constructed.
         let start = Peptide::header_len(self.version) + 4;
-        self.buf[start..].chunks_exact(PRODUCT_SIZE).map(Fragment)
+        self.buf[start..]
+            .as_chunks::<PRODUCT_SIZE>()
+            .0
+            .iter()
+            .map(Fragment)
     }
 }
 
