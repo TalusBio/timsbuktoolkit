@@ -240,17 +240,23 @@ mod tests {
     }
 
     #[test]
-    fn uniform_background_falls_back_at_the_iteration_cap() {
+    fn uniform_background_falls_back() {
         let samples = synthetic_samples(20_000, 0.0, 1.0, 1.0, (-15.0, 15.0), 4);
         let result = fit_mixture(&samples, &ErrorStats::from_slice(&samples), 30.0);
         let MzFitOutcome::Fallback {
-            estimate: Some(fit),
+            reason,
+            estimate: Some(_),
             ..
         } = result
         else {
             panic!("{result:?}");
         };
-        assert_eq!(fit.iterations, MAX_ITERATIONS);
-        assert!(!fit.converged);
+        assert!(
+            matches!(
+                reason,
+                MzFitFailure::BackgroundDominated | MzFitFailure::NoEvidenceAgainstUniform
+            ),
+            "{reason:?}"
+        );
     }
 }

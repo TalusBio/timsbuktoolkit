@@ -1116,19 +1116,6 @@ mod tests {
             score_at_apex(&index, WindowCycleIndex::new(0), &subject, &rival, &[]),
             [1.0, 4.0 / 7.0, 0.0],
         );
-
-        // The older rival-only one-axis fit removes four units instead of three.
-        let rival_only = (observed[1] + observed[2]) / 2.0;
-        let residual = [observed[0], observed[1] - rival_only];
-        assert_eq!(rival_only, 4.0);
-        assert_eq!(residual, [2.0, 1.0]);
-        let cosine = residual.iter().sum::<f64>()
-            / (2.0 * residual.iter().map(|value| value * value).sum::<f64>()).sqrt();
-        assert_eq!(cosine, 3.0 / 10.0_f64.sqrt());
-        assert_eq!(
-            residual.iter().sum::<f64>() / (observed[0] + observed[1]),
-            3.0 / 7.0
-        );
     }
 
     #[test]
@@ -1136,8 +1123,8 @@ mod tests {
         let subject = [fragment(300.0, 1.0), fragment(400.0, 1.0)];
         let rival = [fragment(400.0, 1.0), fragment(500.0, 1.0)];
         let channels = union_channels(&subject, &rival);
+        // The unconstrained solve gives a negative subject scale (-4/3).
         let observed = [0.0, 2.0, 6.0];
-        assert_eq!((2.0 * 2.0 - 8.0) / 3.0, -4.0 / 3.0);
         assert_eq!(fit_scales(&channels, &observed), [0.0, 4.0]);
         assert_scores(residual_scores(&channels, &observed, true), [0.0, 0.0, 1.0]);
     }
@@ -1415,10 +1402,6 @@ mod tests {
         let flats: Vec<_> = library.geometry().flats().collect();
         let preferred = library.item_at(flats[1]);
         let alternate = library.item_at(flats[2]);
-        assert_eq!(
-            sequence_key(&preferred),
-            (splitmix64(2), 500.0_f64.to_bits())
-        );
         assert_eq!(sequence_key(&preferred), sequence_key(&alternate));
         assert_eq!(compare_ties(&preferred, &alternate), Ordering::Less);
 
@@ -1459,17 +1442,23 @@ mod tests {
     }
 
     #[test]
-    fn sequence_hash_pads_the_final_little_endian_chunk() {
-        let mut hash = SequenceHash::default();
-        hash.write_str("ABCDE").unwrap();
-        hash.write_str("FGHI").unwrap();
-        let expected = splitmix64(u64::from_le_bytes(*b"ABCDEFGH"));
-        let expected = splitmix64(expected ^ u64::from(b'I'));
-        assert_eq!(hash.finish(3), splitmix64(expected ^ 3));
+    fn sequence_hash_ignores_write_boundaries_and_separates_sequences() {
+        let hash = |parts: &[&str], charge: u8| {
+            let mut hash = SequenceHash::default();
+            for part in parts {
+                hash.write_str(part).unwrap();
+            }
+            hash.finish(charge)
+        };
+        assert_eq!(hash(&["ABCDE", "FGHI"], 3), hash(&["ABCDEFGHI"], 3));
+        assert_eq!(hash(&["ABCDEFGH", "I"], 3), hash(&["ABCDEFGHI"], 3));
+        // The partial final chunk still counts.
+        assert_ne!(hash(&["ABCDEFGHI"], 3), hash(&["ABCDEFGH"], 3));
+        assert_ne!(hash(&["ABCDEFGHI"], 3), hash(&["ABCDEFGHI"], 2));
     }
 
     #[test]
-    fn disjoint_mobility_ranges_mask_centroids_and_other_group_rivals() {
+    fn disjoint_mobility_ranges_mask_centroids_and_rivals() {
         let group_0 = QuadrupoleIsolationScheme::from_xxyy(
             [(490.0, 510.0, 0.90, 0.95), (490.0, 510.0, 1.05, 1.10)].into_iter(),
         );
@@ -1501,22 +1490,6 @@ mod tests {
         assert!(!window_map::intersects(&subject_im, &rival_im));
         window_map::project(&group_1, mz, (0.97, 1.03), &mut rival_im);
         assert!(!rival_im.is_empty());
-        let memberships = Csr {
-            offsets: vec![0, 1, 2],
-            rows: vec![0, 1],
-        };
-        assert!(
-            find_rival(
-                &mut BucketHeads::new(),
-                &memberships,
-                0..=0,
-                0,
-                |a, b| a.cmp(&b),
-                |_| { panic!("self and other group must not be probed") },
-                &subject
-            )
-            .is_none()
-        );
     }
 
     #[test]

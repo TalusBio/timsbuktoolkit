@@ -350,6 +350,13 @@ rt = "Unrestricted"
         let c: Config = toml::from_str(MINIMAL_TOML).unwrap();
         assert_eq!(c.analysis.chunk_size, 20000);
         assert!(c.analysis.denoise_traces);
+        let disabled = MINIMAL_TOML.replace("[analysis]", "[analysis]\ndenoise_traces = false");
+        assert!(
+            !toml::from_str::<Config>(&disabled)
+                .unwrap()
+                .analysis
+                .denoise_traces
+        );
         let tolerance = c.analysis.tolerance;
         assert_eq!(
             tolerance.ms1,
@@ -543,12 +550,5 @@ rt = "Unrestricted"
             serde_json::to_string(&CalibrationConfig::default()).unwrap(),
             "[calibration] in default_config.toml drifted from CalibrationConfig::default()"
         );
-    }
-
-    #[test]
-    fn trace_denoising_can_be_disabled() {
-        let config = MINIMAL_TOML.replace("[analysis]", "[analysis]\ndenoise_traces = false");
-        let c: Config = toml::from_str(&config).unwrap();
-        assert!(!c.analysis.denoise_traces);
     }
 }

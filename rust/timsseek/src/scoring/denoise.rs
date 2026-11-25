@@ -282,17 +282,8 @@ mod tests {
 
     #[test]
     fn reproduces_quadratic_basis_at_every_sample() {
+        // y = 3 + 2x + x^2 at x = -3..=3: a quadratic fit reproduces it exactly.
         let input = [6.0, 3.0, 2.0, 3.0, 6.0, 11.0, 18.0];
-        let positions = [-3.0, -2.0, -1.0, 0.0, 1.0, 2.0, 3.0];
-        let linear_moment: f32 = input.iter().zip(positions).map(|(y, x)| y * x).sum();
-        let quadratic_moment: f32 = input
-            .iter()
-            .zip(positions)
-            .map(|(y, x)| y * (x * x - 4.0))
-            .sum();
-        assert_eq!(input.iter().sum::<f32>() / 7.0, 7.0);
-        assert_eq!(linear_moment / 28.0, 2.0);
-        assert_eq!(quadratic_moment / 84.0, 1.0);
 
         let mut output = [0.0; WINDOW];
         smooth(&input, &mut output);
