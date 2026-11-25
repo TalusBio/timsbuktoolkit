@@ -126,7 +126,10 @@ pub(crate) fn compute_poisson_evidence(
         background_sum += background;
     }
     let fraction_sum = fragments.iter().map(|row| row.fraction).sum::<f64>();
-    assert!((fraction_sum - 1.0).abs() <= 1e-5, "fraction_sum={fraction_sum}");
+    assert!(
+        (fraction_sum - 1.0).abs() <= 1e-5,
+        "fraction_sum={fraction_sum}"
+    );
     fit_signal(
         shape,
         fragments,

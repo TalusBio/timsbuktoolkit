@@ -255,18 +255,16 @@ impl ShadowRun<'_> {
         }
         // Missing = NaN features, including rows without a shadow context.
         let (targets_missing, decoys_missing) =
-            candidates
-                .iter()
-                .fold((0usize, 0usize), |(t, d), row| {
-                    match (
-                        row.scoring.shadow.shadow_cosine.is_nan(),
-                        row.scoring.identity.is_target,
-                    ) {
-                        (true, true) => (t + 1, d),
-                        (true, false) => (t, d + 1),
-                        (false, true | false) => (t, d),
-                    }
-                });
+            candidates.iter().fold((0usize, 0usize), |(t, d), row| {
+                match (
+                    row.scoring.shadow.shadow_cosine.is_nan(),
+                    row.scoring.identity.is_target,
+                ) {
+                    (true, true) => (t + 1, d),
+                    (true, false) => (t, d + 1),
+                    (false, true | false) => (t, d),
+                }
+            });
         tracing::info!(
             targets_with_rival,
             targets_without_rival = targets - targets_with_rival,
