@@ -791,10 +791,10 @@ impl<T1: ConvertableDomain, T2: ConvertableDomain> PeakCentroider<T1, T2> {
             let (left_im, right_im) = self.im_index_bounds(peak.scan_index);
             // Compute intensity directly here
             let mut summed_int = 0.0;
-            for i in left_ptr..right_ptr {
-                let scan_idx = self.peaks[i].scan_index;
+            for neighbor in &self.peaks[left_ptr..right_ptr] {
+                let scan_idx = neighbor.scan_index;
                 if scan_idx >= left_im && scan_idx <= right_im {
-                    summed_int += self.peaks[i].corrected_intensity;
+                    summed_int += neighbor.corrected_intensity;
                 }
             }
             self.order_intensity.push(summed_int);

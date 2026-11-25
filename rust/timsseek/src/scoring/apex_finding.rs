@@ -803,11 +803,12 @@ impl TraceScorer {
         let mut sum = 0.0;
         let mut count = 0;
 
-        for i in base_start..base_end {
+        let baseline = &self.traces.ms2_lazyscore[base_start..base_end];
+        for (offset, &val) in baseline.iter().enumerate() {
+            let i = base_start + offset;
             if i >= peak_start && i < peak_end {
                 continue;
             }
-            let val = self.traces.ms2_lazyscore[i];
             if !val.is_nan() {
                 sum += val as f64;
             }

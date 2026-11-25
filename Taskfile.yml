@@ -6,6 +6,24 @@ includes:
   timsseek: ./rust/timsseek
 
 tasks:
+  ci:
+    cmds:
+      - task: fmt:check
+      - task: clippy
+      - task: test
+      - task: test:timsseek
+        vars:
+          FEATURES: ""
+      - task: test:timsseek
+        vars:
+          FEATURES: --no-default-features
+      - task: test:readers
+      - task: test:cli-and-sim
+      - task: test:calibration
+      - task: check:dashboards
+      - task: doc
+      - task: license_check
+
   # Mirrors the `cargo-deny` CI job. Needs cargo-deny >= 0.16: older builds
   # cannot parse CVSS 4.0 entries and die on the advisory database itself.
   license_check:
@@ -14,22 +32,65 @@ tasks:
 
   test:
     cmds:
+      - task: test:rust
+      - task: test:python
+
+  test:rust:
+    cmds:
       - cargo test -- --nocapture
       # Not a default member — that keeps ratatui out of a plain `cargo build`.
       - cargo test -p rescore_dash -- --nocapture
+
+  test:python:
+    cmds:
       - uv run python -m pytest
+
+  test:timsseek:
+    cmds:
+      - RUSTFLAGS="${RUSTFLAGS:-} -D warnings" cargo build --verbose -p timsseek {{.FEATURES | default ""}}
+      - RUSTFLAGS="${RUSTFLAGS:-} -D warnings" cargo test --verbose -p timsseek {{.FEATURES | default ""}}
+
+  test:readers:
+    cmds:
+      - RUSTFLAGS="${RUSTFLAGS:-} -D warnings" cargo test -p timscentroid --features mzdata
+      - RUSTFLAGS="${RUSTFLAGS:-} -D warnings" cargo test -p tims_stage -p timsquery
+
+  test:cli-and-sim:
+    cmds:
+      - RUSTFLAGS="${RUSTFLAGS:-} -D warnings" cargo build --verbose -p timsseek_cli -p apex_sim -p timsseek_macros -p rescore_dash -p timsquery_viewer
+      - RUSTFLAGS="${RUSTFLAGS:-} -D warnings" cargo test --verbose -p timsseek_cli -p apex_sim -p timsseek_macros -p rescore_dash -p timsquery_viewer --all-targets
+
+  test:calibration:
+    cmds:
+      - RUSTFLAGS="${RUSTFLAGS:-} -D warnings" cargo test --verbose -p calibrt -p calib_dash
+
+  check:dashboards:
+    cmds:
+      - RUSTFLAGS="${RUSTFLAGS:-} -D warnings" cargo check -p timsseek_cli --features dashboard --all-targets
+      - RUSTFLAGS="${RUSTFLAGS:-} -D warnings" cargo check --verbose -p timsseek_cli --features calib-dashboard --all-targets
 
   fmt:
     cmds:
-      - cargo +nightly fmt --verbose
+      - RUSTFLAGS="${RUSTFLAGS:-} -D warnings" cargo +nightly fmt --all --verbose
       - uv run ruff format
+
+  fmt:check:
+    cmds:
+      - RUSTFLAGS="${RUSTFLAGS:-} -D warnings" cargo +nightly fmt --all -- --check
+      - uv run ruff format --check
 
   clippy:
     cmds:
-      - cargo clippy --fix --allow-dirty --allow-staged {{.CLI_ARGS}} -- -D warnings
-      # Same: not a default member, so the line above never reaches it.
+      - cargo clippy --all-targets --no-deps {{.CLI_ARGS}} -- -D warnings
+      # rescore_dash is outside Cargo's default members.
       - cargo clippy -p rescore_dash --all-targets -- -D warnings
-      # dashboard.rs only exists under the opt-in feature; CI only `cargo check`s it.
+      # dashboard.rs only exists under the opt-in feature.
+      - cargo clippy -p timsseek_cli --features dashboard --all-targets -- -D warnings
+
+  clippy:fix:
+    cmds:
+      - cargo clippy --fix --allow-dirty --allow-staged {{.CLI_ARGS}} -- -D warnings
+      - cargo clippy -p rescore_dash --all-targets -- -D warnings
       - cargo clippy -p timsseek_cli --features dashboard --all-targets -- -D warnings
 
   # Keep workspace documentation warning-free.

@@ -265,68 +265,32 @@ pub fn stream_process_batches<L: KeyLike + Display + DecoyShift>(
     let file = File::create(output_path)?;
     let writer = BufWriter::new(file);
 
-    match serialization_format {
-        SerializationFormat::PrettyJson => {
-            let ser = JsonStreamSerializer::new(writer, SerializationFormat::PrettyJson);
-            process_and_serialize(
-                geom,
-                aggregator_use,
-                index,
-                tolerance,
-                ser,
-                total_batches,
-                batch_size,
-                serialization_start,
-                output_path,
-            )?;
-        }
-        SerializationFormat::Json => {
-            let ser = JsonStreamSerializer::new(writer, SerializationFormat::Json);
-            process_and_serialize(
-                geom,
-                aggregator_use,
-                index,
-                tolerance,
-                ser,
-                total_batches,
-                batch_size,
-                serialization_start,
-                output_path,
-            )?;
-        }
-        SerializationFormat::Ndjson => {
-            let ser = JsonStreamSerializer::new(writer, SerializationFormat::Ndjson);
-            process_and_serialize(
-                geom,
-                aggregator_use,
-                index,
-                tolerance,
-                ser,
-                total_batches,
-                batch_size,
-                serialization_start,
-                output_path,
-            )?;
-        }
-    }
-    Ok(())
+    let ser = JsonStreamSerializer::new(writer, serialization_format);
+    process_and_serialize(
+        geom,
+        aggregator_use,
+        index,
+        tolerance,
+        ser,
+        batch_size,
+        (output_path, serialization_start),
+    )
 }
 
 /// Processes batches of arena flyweights and serializes the aggregated results.
 /// Each batch materializes `QueryRef` flyweights over the shared arena (no row
 /// data is copied) and feeds them to the extraction collectors.
 #[instrument(skip_all)]
-pub fn process_and_serialize<L: KeyLike + Display + DecoyShift>(
+fn process_and_serialize<L: KeyLike + Display + DecoyShift>(
     geom: &TargetColumns<L>,
     aggregator_use: PossibleAggregator,
     index: &IndexedTimstofPeaks,
     tolerance: &Tolerance,
     mut ser: JsonStreamSerializer<impl Write>,
-    total_batches: usize,
     batch_size: usize,
-    serialization_start: Instant,
-    output_path: &Path,
+    output: (&Path, Instant),
 ) -> Result<(), CliError> {
+    let total_batches = geom.expanded_len().div_ceil(batch_size);
     let mut last_progress = Instant::now();
     let progress_interval = Duration::from_secs(2);
 
@@ -355,6 +319,7 @@ pub fn process_and_serialize<L: KeyLike + Display + DecoyShift>(
     }
 
     ser.finish()?;
+    let (output_path, serialization_start) = output;
     let serialization_elapsed = serialization_start.elapsed();
     println!("Wrote to {}", output_path.display());
     println!(
