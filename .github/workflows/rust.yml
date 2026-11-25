@@ -10,6 +10,7 @@ env:
   CARGO_TERM_COLOR: always
   RUST_BACKTRACE: 1
   CARGO_INCREMENTAL: 0
+  TASK_VERSION: '3.54.0'
 
 jobs:
   build:
@@ -80,10 +81,10 @@ jobs:
           cache: true
           cache-key: task-rust-tests
           rustflags: ''
-      - name: Run default workspace tests
-        run: cargo test -- --nocapture
-      - name: Run rescore dashboard tests
-        run: cargo test -p rescore_dash -- --nocapture
+      - uses: go-task/setup-task@v1
+        with:
+          version: ${{ env.TASK_VERSION }}
+      - run: task test:rust
 
   python-tests:
     runs-on: ubuntu-latest
@@ -92,8 +93,10 @@ jobs:
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-      - name: Run Python tests
-        run: uv run python -m pytest
+      - uses: go-task/setup-task@v1
+        with:
+          version: ${{ env.TASK_VERSION }}
+      - run: task test:python
 
   clippy:
     runs-on: ubuntu-latest
@@ -106,13 +109,10 @@ jobs:
           cache: true
           cache-key: task-clippy
           rustflags: ''
-      # Match the targets and dependency scope implied by Taskfile.yml's first Clippy invocation.
-      - name: Lint default workspace targets
-        run: cargo clippy --all-targets --no-deps -- -D warnings
-      - name: Lint rescore dashboard targets
-        run: cargo clippy -p rescore_dash --all-targets -- -D warnings
-      - name: Lint timsseek_cli with the dashboard feature
-        run: cargo clippy -p timsseek_cli --features dashboard --all-targets -- -D warnings
+      - uses: go-task/setup-task@v1
+        with:
+          version: ${{ env.TASK_VERSION }}
+      - run: task clippy
 
   doc:
     runs-on: ubuntu-latest
@@ -124,10 +124,10 @@ jobs:
           cache: true
           cache-key: task-doc
           rustflags: ''
-      - name: Build workspace documentation
-        env:
-          RUSTDOCFLAGS: -D warnings
-        run: cargo doc --workspace --no-deps
+      - uses: go-task/setup-task@v1
+        with:
+          version: ${{ env.TASK_VERSION }}
+      - run: task doc
 
   # The PSI-MS `spectrum origin type` subtree is vendored as generated Rust
   # (`rust/timsquery/src/serde/psims_origin_type.rs`), because no crate in the
@@ -150,8 +150,7 @@ jobs:
         run: python3 scripts/gen_psims_origin_type.py --check
 
   # `rustfmt.toml` uses nightly-only options, so a stable `cargo fmt` reports
-  # hundreds of spurious diffs and a nightly one is the only check that means
-  # anything. `task fmt` is the local spelling; this is the same thing in CI.
+  # hundreds of spurious diffs. `task fmt:check` uses nightly.
   fmt:
     runs-on: ubuntu-latest
     steps:
@@ -163,13 +162,13 @@ jobs:
           components: rustfmt
           cache: false
           rustflags: ''
-      - name: rustfmt
-        run: cargo +nightly fmt --all -- --check
       - uses: astral-sh/setup-uv@v6
         with:
           enable-cache: true
-      - name: ruff format
-        run: uv run ruff format --check
+      - uses: go-task/setup-task@v1
+        with:
+          version: ${{ env.TASK_VERSION }}
+      - run: task fmt:check
 
   # `deny.toml` existed for a long time with nothing invoking it, so dependency
   # licensing drifted red unnoticed. This is the gate.
@@ -183,6 +182,10 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v6
-      - uses: EmbarkStudios/cargo-deny-action@v2
+      - uses: taiki-e/install-action@v2
         with:
-          command: check
+          tool: cargo-deny@0.20.2
+      - uses: go-task/setup-task@v1
+        with:
+          version: ${{ env.TASK_VERSION }}
+      - run: task license_check
