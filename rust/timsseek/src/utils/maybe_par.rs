@@ -259,8 +259,10 @@ mod tests {
     }
 
     /// Regression: the recursive `par_iter().fold().reduce()` this replaced
-    /// overflows these 64 KiB stacks on 48 workers, because every split level
-    /// keeps partial accumulators on the stack.
+    /// overflows these 256 KiB stacks on 48 workers, because every split level
+    /// keeps partial accumulators on the stack. Measured in debug builds: the
+    /// recursive fold needs over 1 MiB on Linux x86_64 and aarch64 and on
+    /// macOS; block jobs fit in 128 KiB on all three.
     #[cfg(feature = "rayon")]
     #[test]
     fn scoring_fold_uses_bounded_jobs_on_small_stacks() {
@@ -270,7 +272,7 @@ mod tests {
         const PAYLOAD_WORDS: usize = 512;
         let pool = rayon::ThreadPoolBuilder::new()
             .num_threads(THREAD_COUNT)
-            .stack_size(64 * 1024)
+            .stack_size(256 * 1024)
             .build()
             .expect("build a small-stack test pool");
         let items: Vec<usize> = (0..ITEM_COUNT).collect();
