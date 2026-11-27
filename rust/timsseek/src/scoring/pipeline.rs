@@ -9,12 +9,8 @@
 //! - `ScoringWorker` holds time-series feature buffers (size varies with query)
 //! - Chromatogram collectors (size varies with query complexity)
 //!
-//! `prescore_batch` and `score_calibrated_batch` dispatch through
-//! `crate::utils::maybe_par::fold_reduce`, which is compile-time gated on the
-//! `rayon` feature. With rayon, each worker thread gets its own
-//! `ScoringWorker` via the `init` closure and reuses it across thousands
-//! of queries; without rayon, a single `ScoringWorker` is built and reused
-//! for the whole batch. Either way the same closure bodies run.
+//! The batch scorers reuse one `ScoringWorker` per Rayon thread across
+//! blocks and batches. Without Rayon, one worker scores the entire batch.
 //!
 //! ## Scoring Pipeline
 //!
@@ -36,6 +32,7 @@ use crate::rt_calibration::{
     LibraryRT,
     ObservedRTSeconds,
 };
+use crate::utils::maybe_par::BlockWorkers;
 use crate::{
     IonAnnot,
     ScorerQueriable,
@@ -132,6 +129,48 @@ struct CandidateIdentity {
 struct BatchScoring<'a, 'index> {
     calibration: Option<&'a CalibrationResult>,
     shadow: Option<&'a ShadowRun<'index>>,
+}
+
+/// Scratch and run inputs shared by successive Phase 1 batches.
+pub struct PrescoreBatch<'a, I: ScorerQueriable> {
+    scorer: &'a Scorer<I>,
+    library: &'a ReferenceLibrary,
+    capacity_per_band: usize,
+    library_rt_range: Option<(f32, f32)>,
+    workers: BlockWorkers<ScoringWorker>,
+}
+
+type TraceSlots = HashMap<FlatIdx, Mutex<Phase3Trace>>;
+
+/// Scratch and run inputs shared by successive Phase 3 batches.
+pub struct BatchScorer<'a, 'index, I: ScorerQueriable> {
+    scorer: &'a Scorer<I>,
+    library: &'a ReferenceLibrary,
+    batch: BatchScoring<'a, 'index>,
+    traces: Option<&'a TraceSlots>,
+    workers: BlockWorkers<ScoringWorker>,
+}
+
+impl<I: ScorerQueriable> BatchScorer<'_, '_, I> {
+    pub fn score(&mut self, flats: &[FlatIdx]) -> (Vec<ScoredCandidate>, ScoreTimings, SkipCounts) {
+        if self.traces.is_some() {
+            self.scorer.score_batch::<true>(
+                self.library,
+                flats,
+                self.batch,
+                self.traces,
+                &mut self.workers,
+            )
+        } else {
+            self.scorer.score_batch::<false>(
+                self.library,
+                flats,
+                self.batch,
+                None,
+                &mut self.workers,
+            )
+        }
+    }
 }
 
 /// Per-rayon-worker scoring state. Holds a `TraceScorer` plus reusable scratch:
@@ -1030,14 +1069,27 @@ impl<I: ScorerQueriable> Scorer<I> {
         traces: Option<&HashMap<FlatIdx, Mutex<Phase3Trace>>>,
         shadow: Option<&ShadowRun<'_>>,
     ) -> (Vec<ScoredCandidate>, ScoreTimings, SkipCounts) {
-        let batch = BatchScoring {
-            calibration,
-            shadow,
-        };
-        if traces.is_some() {
-            self.score_batch::<true>(lib, flats, batch, traces)
-        } else {
-            self.score_batch::<false>(lib, flats, batch, None)
+        self.batch_scorer(lib, calibration, traces, shadow)
+            .score(flats)
+    }
+
+    /// Create a scorer that keeps its scratch across Phase 3 batches.
+    pub fn batch_scorer<'a, 'index>(
+        &'a self,
+        library: &'a ReferenceLibrary,
+        calibration: Option<&'a CalibrationResult>,
+        traces: Option<&'a TraceSlots>,
+        shadow: Option<&'a ShadowRun<'index>>,
+    ) -> BatchScorer<'a, 'index, I> {
+        BatchScorer {
+            scorer: self,
+            library,
+            batch: BatchScoring {
+                calibration,
+                shadow,
+            },
+            traces,
+            workers: BlockWorkers::new(),
         }
     }
 
@@ -1046,11 +1098,12 @@ impl<I: ScorerQueriable> Scorer<I> {
         lib: &ReferenceLibrary,
         flats: &[FlatIdx],
         batch: BatchScoring<'_, '_>,
-        traces: Option<&HashMap<FlatIdx, Mutex<Phase3Trace>>>,
+        traces: Option<&TraceSlots>,
+        workers: &mut BlockWorkers<ScoringWorker>,
     ) -> (Vec<ScoredCandidate>, ScoreTimings, SkipCounts) {
         let get_item = |f| lib.item_at(f);
         let num_cycles = self.num_cycles();
-        // `fold_reduce` parallelizes over the slice, driving the flyweight by
+        // `fold_reduce` scores contiguous blocks, driving the flyweight by
         // index; the flyweight itself is never stored.
         // Precursor-range gate over the flyweight geometry.
         let filter_fn = |q: &RefQuery<'_>| {
@@ -1066,23 +1119,21 @@ impl<I: ScorerQueriable> Scorer<I> {
         let precursor_oofr_count =
             flats.iter().filter(|&&f| !filter_fn(&get_item(f))).count() as u32;
 
-        let (_worker, mut results): (ScoringWorker, IonSearchAccumulator) =
-            crate::utils::maybe_par::fold_reduce(
-                flats,
-                || {
-                    tracing::debug!(
-                        target: "alloc_track",
-                        phase = "phase3_score",
-                        num_cycles,
-                        max_frags,
-                        "worker init: ScoringWorker + IonSearchAccumulator"
-                    );
-                    (
-                        ScoringWorker::with_denoising(num_cycles, max_frags, self.denoise_traces),
-                        IonSearchAccumulator::default(),
-                    )
-                },
-                |(mut worker, acc), (_idx, &flat)| {
+        let mut results = workers.fold_reduce(
+            flats,
+            || {
+                tracing::debug!(
+                    target: "alloc_track",
+                    phase = "phase3_score",
+                    num_cycles,
+                    max_frags,
+                    "worker init: ScoringWorker"
+                );
+                ScoringWorker::with_denoising(num_cycles, max_frags, self.denoise_traces)
+            },
+            |worker, chunk| {
+                let mut acc = IonSearchAccumulator::default();
+                for &flat in chunk {
                     let q = get_item(flat);
                     let mut trace = if TRACE {
                         traces
@@ -1096,7 +1147,7 @@ impl<I: ScorerQueriable> Scorer<I> {
                         if TRACE && let Some(trace) = trace.as_deref_mut() {
                             trace.skip = Some(SkipReason::PrecursorOutOfFragmentedRange);
                         }
-                        return (worker, acc);
+                        continue;
                     }
                     let _span =
                         tracing::span!(tracing::Level::TRACE, "score_calibrated_item").entered();
@@ -1111,7 +1162,7 @@ impl<I: ScorerQueriable> Scorer<I> {
                         &q,
                         identity,
                         batch,
-                        &mut worker,
+                        worker,
                         &mut t,
                         trace.as_deref_mut(),
                     );
@@ -1121,10 +1172,12 @@ impl<I: ScorerQueriable> Scorer<I> {
                             Err(reason) => trace.skip = Some(*reason),
                         }
                     }
-                    (worker, acc.fold((result, t)))
-                },
-                |(wa, a), (_wb, b)| (wa, a.reduce(b)),
-            );
+                    acc.fold((result, t));
+                }
+                acc
+            },
+            IonSearchAccumulator::merge,
+        );
 
         results.skips.precursor_out_of_fragmented_range = precursor_oofr_count;
         (results.res, results.timings, results.skips)
@@ -1218,80 +1271,24 @@ impl<I: ScorerQueriable> Scorer<I> {
         library_rt_range: Option<(f32, f32)>,
         timings: &mut PrescoreTimings,
     ) -> StratifiedCalibrantHeaps {
-        let get_item = |f| lib.item_at(f);
-        // The flat index IS the global speclib index (see `Speclib::item_at`),
-        // so it doubles as `CalibrantCandidate::speclib_index` -- no separate
-        // chunk offset needed.
-        let filter_fn = |q: &RefQuery<'_>| {
-            let tmp = q.precursor_mz_limits();
-            let lims = TupleRange::try_new(tmp.0, tmp.1).expect("Should already be ordered");
-            self.fragmented_range.intersects(lims)
-        };
+        self.prescore_batches(lib, capacity_per_band, library_rt_range)
+            .score(flats, timings)
+    }
 
-        // Count pre-filter rejects once; keeps the rayon loop counter-free.
-        let precursor_oofr_count =
-            flats.iter().filter(|&&f| !filter_fn(&get_item(f))).count() as u32;
-        timings.skips.precursor_out_of_fragmented_range += precursor_oofr_count;
-
-        let num_cycles = self.num_cycles();
-        let rt = self.prescore_rt();
-        let peak_tolerance = self.broad_tolerance.peak_tolerance();
-        let max_frags = flats
-            .iter()
-            .map(|&f| get_item(f).fragment_count())
-            .max()
-            .unwrap_or(0);
-
-        let (_worker, heap, par_timings) = crate::utils::maybe_par::fold_reduce(
-            flats,
-            || {
-                tracing::debug!(
-                    target: "alloc_track",
-                    phase = "phase1_prescore",
-                    num_cycles,
-                    capacity_per_band,
-                    max_frags,
-                    "worker init: ScoringWorker + StratifiedCalibrantHeaps"
-                );
-                (
-                    ScoringWorker::new(num_cycles, max_frags),
-                    StratifiedCalibrantHeaps::for_library(
-                        capacity_per_band,
-                        library_rt_range,
-                        self.acquisition_rt_range_seconds(),
-                    ),
-                    PrescoreTimings::default(),
-                )
-            },
-            |(mut worker, mut heap, mut t), (_idx, &flat)| {
-                let q = get_item(flat);
-                if !filter_fn(&q) {
-                    return (worker, heap, t);
-                }
-                t.n_passed_filter += 1;
-                match self.prescore_with_windows(&q, &mut worker, &mut t, rt, &peak_tolerance) {
-                    Ok(loc) => {
-                        let cand = CalibrantCandidate {
-                            score: loc.score,
-                            apex_rt: ObservedRTSeconds(loc.retention_time_ms as f32 / 1000.0),
-                            speclib_index: flat,
-                            library_rt: q.library_rt().unwrap_or(LibraryRT(f32::NAN)),
-                        };
-                        if let Err(reason) = heap.push(cand) {
-                            t.skips.bump(reason);
-                        }
-                    }
-                    Err(reason) => t.skips.bump(reason),
-                }
-                (worker, heap, t)
-            },
-            |(wa, ha, mut ta), (_wb, hb, tb)| {
-                ta += tb;
-                (wa, ha.merge(hb), ta)
-            },
-        );
-        *timings += par_timings;
-        heap
+    /// Create a scorer that keeps its scratch across Phase 1 batches.
+    pub fn prescore_batches<'a>(
+        &'a self,
+        library: &'a ReferenceLibrary,
+        capacity_per_band: usize,
+        library_rt_range: Option<(f32, f32)>,
+    ) -> PrescoreBatch<'a, I> {
+        PrescoreBatch {
+            scorer: self,
+            library,
+            capacity_per_band,
+            library_rt_range,
+            workers: BlockWorkers::new(),
+        }
     }
 
     fn map_rt_index_to_milis(&self, rt_index: usize) -> u32 {
@@ -1303,6 +1300,88 @@ impl<I: ScorerQueriable> Scorer<I> {
 
     fn num_cycles(&self) -> usize {
         self.index.ms1_cycle_mapping().len()
+    }
+}
+
+impl<I: ScorerQueriable> PrescoreBatch<'_, I> {
+    /// Score a batch into bounded A/B, library-RT-stratified heaps.
+    #[cfg_attr(
+        feature = "instrumentation",
+        tracing::instrument(skip_all, level = "trace")
+    )]
+    pub fn score(
+        &mut self,
+        flats: &[FlatIdx],
+        timings: &mut PrescoreTimings,
+    ) -> StratifiedCalibrantHeaps {
+        let scorer = self.scorer;
+        let library = self.library;
+        let get_item = |f| library.item_at(f);
+        // The flat index IS the global speclib index (see `Speclib::item_at`),
+        // so it doubles as `CalibrantCandidate::speclib_index` -- no separate
+        // chunk offset needed.
+        let filter_fn = |q: &RefQuery<'_>| {
+            let tmp = q.precursor_mz_limits();
+            let lims = TupleRange::try_new(tmp.0, tmp.1).expect("Should already be ordered");
+            scorer.fragmented_range.intersects(lims)
+        };
+
+        let num_cycles = scorer.num_cycles();
+        let rt = scorer.prescore_rt();
+        let peak_tolerance = scorer.broad_tolerance.peak_tolerance();
+        let capacity_per_band = self.capacity_per_band;
+        let library_rt_range = self.library_rt_range;
+        let (heap, par_timings) = self.workers.fold_reduce(
+            flats,
+            || {
+                tracing::debug!(
+                    target: "alloc_track",
+                    phase = "phase1_prescore",
+                    num_cycles,
+                    "worker init: ScoringWorker"
+                );
+                // Phase 1 extractions keep at most `TOP_N_FRAGMENTS` rows, so
+                // one worker fits every batch it is reused for.
+                ScoringWorker::new(num_cycles, TOP_N_FRAGMENTS)
+            },
+            |worker, chunk| {
+                let mut heap = StratifiedCalibrantHeaps::for_library(
+                    capacity_per_band,
+                    library_rt_range,
+                    scorer.acquisition_rt_range_seconds(),
+                );
+                let mut t = PrescoreTimings::default();
+                for &flat in chunk {
+                    let q = get_item(flat);
+                    if !filter_fn(&q) {
+                        t.skips.bump(SkipReason::PrecursorOutOfFragmentedRange);
+                        continue;
+                    }
+                    t.n_passed_filter += 1;
+                    match scorer.prescore_with_windows(&q, worker, &mut t, rt, &peak_tolerance) {
+                        Ok(loc) => {
+                            let cand = CalibrantCandidate {
+                                score: loc.score,
+                                apex_rt: ObservedRTSeconds(loc.retention_time_ms as f32 / 1000.0),
+                                speclib_index: flat,
+                                library_rt: q.library_rt().unwrap_or(LibraryRT(f32::NAN)),
+                            };
+                            if let Err(reason) = heap.push(cand) {
+                                t.skips.bump(reason);
+                            }
+                        }
+                        Err(reason) => t.skips.bump(reason),
+                    }
+                }
+                (heap, t)
+            },
+            |(heap, timings), (partial_heap, partial_timings)| {
+                heap.merge_in_place(partial_heap);
+                *timings += partial_timings;
+            },
+        );
+        *timings += par_timings;
+        heap
     }
 }
 

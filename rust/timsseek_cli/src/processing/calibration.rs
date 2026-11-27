@@ -658,18 +658,13 @@ pub(super) fn phase1_prescore<I: ScorerQueriable>(
         }
     });
     let mut visited = 0usize;
+    let mut batch_scorer = pipeline.prescore_batches(speclib, capacity_per_band, rt_range);
 
     // Shuffle individual flat indices, not source-order chunks: libraries are
     // commonly ordered by RT, sequence, or decoy variant, and a future prefix
     // stop must not inherit any of those structures.
     for (batch_idx, batch) in shuffled.chunks(chunk_size).enumerate().progress_with(pb) {
-        let batch_heaps = pipeline.prescore_partitioned_batch(
-            speclib,
-            batch,
-            capacity_per_band,
-            rt_range,
-            &mut timings,
-        );
+        let batch_heaps = batch_scorer.score(batch, &mut timings);
         heaps.merge_in_place(batch_heaps);
         visited += batch.len();
 

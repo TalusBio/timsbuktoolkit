@@ -38,10 +38,34 @@ static GLOBAL: MiMalloc = MiMalloc;
 static GLOBAL: alloc_track::TrackingAllocator = alloc_track::TrackingAllocator::new();
 
 fn main() {
+    if let Err(e) = build_global_pool() {
+        eprintln!("failed to build the global Rayon pool: {e}");
+        std::process::exit(1);
+    }
     if let Err(e) = run() {
         eprintln!("{e}");
         std::process::exit(1);
     }
+}
+
+/// Builds the process-wide Rayon pool before anything can use the default one.
+/// `RAYON_NUM_THREADS` keeps Rayon's meaning: unset, unparsable or 0 selects
+/// the available parallelism.
+fn build_global_pool() -> Result<(), rayon::ThreadPoolBuildError> {
+    let requested = std::env::var("RAYON_NUM_THREADS")
+        .ok()
+        .and_then(|value| value.parse::<usize>().ok())
+        .filter(|&count| count > 0);
+    let thread_count = match requested {
+        Some(count) => count,
+        None => std::thread::available_parallelism().map_or(1, std::num::NonZeroUsize::get),
+    };
+    rayon::ThreadPoolBuilder::new()
+        .num_threads(thread_count)
+        .thread_name(|index| format!("timsseek-w{index}"))
+        .build_global()?;
+    assert_eq!(rayon::current_num_threads(), thread_count);
+    Ok(())
 }
 
 fn run() -> std::result::Result<(), errors::CliError> {

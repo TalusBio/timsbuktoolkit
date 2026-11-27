@@ -22,9 +22,8 @@ use crate::scoring::pipeline::{
 };
 use crate::scoring::results::ScoredCandidate;
 use crate::traits::ScorerQueriable;
+use crate::utils::maybe_par::BlockWorkers;
 use half::f16;
-#[cfg(feature = "rayon")]
-use rayon::prelude::*;
 use smallvec::SmallVec;
 use std::cmp::Ordering;
 use std::fmt::Write;
@@ -213,8 +212,7 @@ impl ShadowRun<'_> {
             .max()
             .unwrap_or(0);
         let mut scores = Vec::with_capacity(largest);
-        #[cfg(not(feature = "rayon"))]
-        let mut scratch = SubjectScratch::default();
+        let mut workers = BlockWorkers::new();
         for group in 0..self.windows.group_count() {
             let group = u16::try_from(group).expect("checked group count");
             let bucket = self.bucket(group, 0);
@@ -226,16 +224,8 @@ impl ShadowRun<'_> {
             let score = |scratch: &mut SubjectScratch, &row: &u32| {
                 self.score_subject(&index, &order, row, group, scratch)
             };
-            #[cfg(feature = "rayon")]
-            members
-                .par_iter()
-                .map_init(SubjectScratch::default, score)
-                .collect_into_vec(&mut scores);
-            #[cfg(not(feature = "rayon"))]
-            {
-                scores.clear();
-                scores.extend(members.iter().map(|row| score(&mut scratch, row)));
-            }
+            scores.resize(members.len(), (ShadowScores::default(), false));
+            workers.map_into(members, &mut scores, SubjectScratch::default, score);
             assert_eq!(members.len(), scores.len());
             for (&row, &(score, has_rival)) in members.iter().zip(&scores) {
                 let candidate = &mut candidates[row as usize];
