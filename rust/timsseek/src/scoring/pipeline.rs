@@ -424,8 +424,11 @@ impl CalibrantHeap {
         }
     }
 
+    /// Best first. Heap layout depends on insertion order, and calibration
+    /// sums over these points, so callers get one canonical order.
     pub fn into_vec(self) -> Vec<CalibrantCandidate> {
         self.heap
+            .into_sorted_vec()
             .into_iter()
             .map(|std::cmp::Reverse(c)| c)
             .collect()
@@ -435,9 +438,11 @@ impl CalibrantHeap {
         self.heap.len()
     }
 
-    /// Iterate over heap contents. Order is arbitrary (not sorted by score).
+    /// Best first, like [`Self::into_vec`]: convergence refits over these.
     pub fn iter(&self) -> impl Iterator<Item = &CalibrantCandidate> + Clone {
-        self.heap.iter().map(|r| &r.0)
+        let mut sorted: Vec<_> = self.heap.iter().map(|r| &r.0).collect();
+        sorted.sort_unstable_by(|a, b| b.cmp(a));
+        sorted.into_iter()
     }
 }
 
@@ -1444,6 +1449,33 @@ mod tests {
             forward.iter().next().unwrap().speclib_index,
             reverse.iter().next().unwrap().speclib_index
         );
+    }
+
+    #[test]
+    fn calibrant_heap_order_is_independent_of_insertion_order() {
+        let lib = tiny_lazy_lib();
+        let flats: Vec<_> = lib.geometry().flats().collect();
+        let candidate = |rank: usize| CalibrantCandidate {
+            score: 1.0 + rank as f32,
+            apex_rt: ObservedRTSeconds(20.0),
+            speclib_index: flats[rank % flats.len()],
+            library_rt: LibraryRT(10.0),
+        };
+        let filled = |order: &[usize]| {
+            let mut heap = CalibrantHeap::new(4);
+            for &rank in order {
+                heap.push(candidate(rank)).unwrap();
+            }
+            heap
+        };
+        let forward = filled(&[0, 1, 2, 3, 4, 5]);
+        let shuffled = filled(&[3, 5, 0, 4, 1, 2]);
+        let expected: Vec<_> = [5, 4, 3, 2].map(candidate).to_vec();
+
+        assert!(forward.iter().eq(&expected));
+        assert!(shuffled.iter().eq(&expected));
+        assert_eq!(forward.into_vec(), expected);
+        assert_eq!(shuffled.into_vec(), expected);
     }
 
     #[test]
