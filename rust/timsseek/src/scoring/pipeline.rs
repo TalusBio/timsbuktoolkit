@@ -374,17 +374,18 @@ impl StratifiedCalibrantHeaps {
     }
 }
 
-/// Bounded min-heap: keeps only the top-N candidates by score.
-/// Uses Reverse so the *smallest* score is at the top (ejected first).
+/// Bounded top-N set: keeps only the best `capacity` candidates. The
+/// candidate order is total (score, then library index), so the set is always
+/// sorted and its contents and order do not depend on insertion or merge order.
 pub struct CalibrantHeap {
-    heap: std::collections::BinaryHeap<std::cmp::Reverse<CalibrantCandidate>>,
+    best: std::collections::BTreeSet<CalibrantCandidate>,
     capacity: usize,
 }
 
 impl CalibrantHeap {
     pub fn new(capacity: usize) -> Self {
         Self {
-            heap: std::collections::BinaryHeap::with_capacity(capacity + 1),
+            best: std::collections::BTreeSet::new(),
             capacity,
         }
     }
@@ -401,13 +402,13 @@ impl CalibrantHeap {
         if !candidate.score.is_finite() || candidate.score <= 0.0 {
             return Ok(());
         }
-        if self.heap.len() < self.capacity {
-            self.heap.push(std::cmp::Reverse(candidate));
-        } else if let Some(std::cmp::Reverse(min)) = self.heap.peek()
+        if self.best.len() < self.capacity {
+            self.best.insert(candidate);
+        } else if let Some(min) = self.best.first()
             && candidate > *min
         {
-            self.heap.pop();
-            self.heap.push(std::cmp::Reverse(candidate));
+            self.best.pop_first();
+            self.best.insert(candidate);
         }
         Ok(())
     }
@@ -418,31 +419,24 @@ impl CalibrantHeap {
     }
 
     pub fn merge_in_place(&mut self, other: Self) {
-        for item in other.heap {
+        for item in other.best {
             // Ignore: other heap already filtered on its own push.
-            let _ = self.push(item.0);
+            let _ = self.push(item);
         }
     }
 
-    /// Best first. Heap layout depends on insertion order, and calibration
-    /// sums over these points, so callers get one canonical order.
+    /// Best first.
     pub fn into_vec(self) -> Vec<CalibrantCandidate> {
-        self.heap
-            .into_sorted_vec()
-            .into_iter()
-            .map(|std::cmp::Reverse(c)| c)
-            .collect()
+        self.best.into_iter().rev().collect()
     }
 
     pub fn len(&self) -> usize {
-        self.heap.len()
+        self.best.len()
     }
 
-    /// Best first, like [`Self::into_vec`]: convergence refits over these.
+    /// Best first, like [`Self::into_vec`].
     pub fn iter(&self) -> impl Iterator<Item = &CalibrantCandidate> + Clone {
-        let mut sorted: Vec<_> = self.heap.iter().map(|r| &r.0).collect();
-        sorted.sort_unstable_by(|a, b| b.cmp(a));
-        sorted.into_iter()
+        self.best.iter().rev()
     }
 }
 
