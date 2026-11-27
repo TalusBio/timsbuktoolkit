@@ -1295,7 +1295,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         self.index
             .ms1_cycle_mapping()
             .rt_milis_for_index(&MS1CycleIndex::new(rt_index as u32))
-            .unwrap_or(0)
+            .expect("extraction cycles are clamped to the run's cycle mapping")
     }
 
     fn num_cycles(&self) -> usize {
