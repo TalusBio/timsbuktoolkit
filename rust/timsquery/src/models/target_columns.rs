@@ -593,6 +593,7 @@ impl<L: KeyLike> TargetColumns<L> {
             }
             .into());
         }
+        self.shrink();
         // Groups first. Ungrouped rows retain their row code and use their
         // output id once source ids have been built.
         self.build_decoy_groups()?;
@@ -627,7 +628,6 @@ impl<L: KeyLike> TargetColumns<L> {
                 self.n_stored_decoys(),
             );
         }
-        self.shrink();
         Ok(self)
     }
 

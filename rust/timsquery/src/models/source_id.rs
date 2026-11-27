@@ -256,8 +256,8 @@ impl SourceIds {
                     })
                     .collect(),
             ),
-            (None, Some(_)) => Self::text(ids.iter().map(|id| match id {
-                OwnedSourceId::Text(s) => s.as_str(),
+            (None, Some(_)) => Self::text(ids.into_iter().map(|id| match id {
+                OwnedSourceId::Text(s) => s,
                 OwnedSourceId::Numeric(_) => unreachable!("no row holds a number"),
             })),
             (Some(first_numeric_row), Some(row)) => Err(SourceIdError::MixedShapes {
