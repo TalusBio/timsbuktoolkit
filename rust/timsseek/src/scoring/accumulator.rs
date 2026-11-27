@@ -19,19 +19,17 @@ pub(super) struct IonSearchAccumulator {
 }
 
 impl IonSearchAccumulator {
-    pub(super) fn reduce(mut self, other: Self) -> Self {
+    pub(super) fn merge(&mut self, other: Self) {
         self.res.extend(other.res);
         self.skips += other.skips;
         self.timings += other.timings;
-        self
     }
 
-    pub(super) fn fold(mut self, item: ScoreItem) -> Self {
+    pub(super) fn fold(&mut self, item: ScoreItem) {
         match item.0 {
             Ok(elem) => self.res.push(elem),
             Err(reason) => self.skips.bump(reason),
         }
         self.timings += item.1;
-        self
     }
 }

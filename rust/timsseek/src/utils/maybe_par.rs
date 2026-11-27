@@ -3,9 +3,8 @@
 //!
 //! The shapes, and what each one promises about ordering:
 //!
-//! * [`fold_reduce`] -- per-item fold with per-worker accumulators. The
-//!   accumulator count, and so the reduce order, follows the thread pool: NOT
-//!   reproducible for a non-associative `reduce` (e.g. float addition).
+//! * [`BlockWorkers`] -- scoped jobs over a thread-count-dependent partition,
+//!   followed by an ordered merge.
 //! * [`chunked_fold_reduce`] -- per-chunk accumulate over a thread-count-
 //!   independent partition, merged in ascending chunk order: bitwise
 //!   reproducible.
@@ -16,42 +15,128 @@
 #[cfg(feature = "rayon")]
 use rayon::prelude::*;
 
-/// Per-item fold with per-worker accumulator init.
+use std::sync::Mutex;
+
+/// Blocks per pool thread and batch. Blocks are equal in item count, not in
+/// cost, and the batch ends when its slowest block does, so finer blocks keep
+/// that tail short on mixed performance/efficiency cores (4 per thread left
+/// Phase 1 ~10% slower than the recursive split on an M2).
+const CHUNKS_PER_THREAD: usize = 16;
+
+/// Reuses one scratch slot per pool thread across batches of scoped jobs.
+/// Jobs run to completion and take their slot once per block.
 ///
-/// `init()` must be an identity for `reduce`: rayon uses it to seed both the
-/// fold and the reduce, so a non-identity init miscounts on small inputs.
-///
-/// The accumulator count -- and therefore the order `reduce` combines them --
-/// follows the thread pool. Use [`chunked_fold_reduce`] when that order must
-/// be reproducible.
-pub(crate) fn fold_reduce<Item, Acc, Init, Fold, Reduce>(
-    items: &[Item],
-    init: Init,
-    fold: Fold,
-    reduce: Reduce,
-) -> Acc
-where
-    Item: Sync,
-    Acc: Send,
-    Init: Fn() -> Acc + Send + Sync,
-    Fold: Fn(Acc, (usize, &Item)) -> Acc + Send + Sync,
-    Reduce: Fn(Acc, Acc) -> Acc + Send + Sync,
-{
-    #[cfg(feature = "rayon")]
-    {
-        items
-            .par_iter()
-            .enumerate()
-            .fold(&init, fold)
-            .reduce(&init, reduce)
+/// Each block is a flat FIFO job, not a node of a recursive split, so a
+/// worker's stack depth does not grow with the thread count. Recursive
+/// `fold`/`reduce` nested join frames per steal and overflowed 2 MiB stacks
+/// on 48 workers.
+pub(crate) struct BlockWorkers<State> {
+    slots: Vec<Mutex<Option<State>>>,
+}
+
+impl<State: Send> BlockWorkers<State> {
+    pub(crate) fn new() -> Self {
+        Self {
+            slots: Vec::with_capacity(1),
+        }
     }
-    #[cfg(not(feature = "rayon"))]
-    {
-        let _ = &reduce; // suppress unused-param lint in serial builds
-        items
-            .iter()
-            .enumerate()
-            .fold(init(), |acc, pair| fold(acc, pair))
+
+    fn chunk_len(&mut self, item_count: usize) -> usize {
+        #[cfg(feature = "rayon")]
+        let thread_count = rayon::current_num_threads();
+        #[cfg(not(feature = "rayon"))]
+        let thread_count = 1;
+        if thread_count > self.slots.len() {
+            self.slots.resize_with(thread_count, || Mutex::new(None));
+        }
+        if thread_count == 1 {
+            item_count.max(1)
+        } else {
+            item_count.div_ceil(thread_count * CHUNKS_PER_THREAD).max(1)
+        }
+    }
+
+    fn run<Block: Send>(
+        &self,
+        blocks: impl IntoIterator<Item = Block>,
+        init: impl Fn() -> State + Sync,
+        work: impl Fn(&mut State, Block) + Sync,
+    ) {
+        let run_block = |index: usize, block| {
+            // A block job never waits on Rayon, so it never runs nested in
+            // another job on the same thread.
+            let mut slot = self.slots[index]
+                .try_lock()
+                .expect("one block job per thread at a time");
+            work(slot.get_or_insert_with(&init), block);
+        };
+        #[cfg(feature = "rayon")]
+        if rayon::current_num_threads() > 1 {
+            rayon::in_place_scope_fifo(|scope| {
+                let run_block = &run_block;
+                for block in blocks {
+                    scope.spawn_fifo(move |_| {
+                        let index = rayon::current_thread_index().expect("scoped Rayon job");
+                        run_block(index, block);
+                    });
+                }
+            });
+            return;
+        }
+        for block in blocks {
+            run_block(0, block);
+        }
+    }
+
+    /// Fold blocks independently, then merge partials in input order.
+    pub(crate) fn fold_reduce<Item: Sync, Acc: Send>(
+        &mut self,
+        items: &[Item],
+        init: impl Fn() -> State + Sync,
+        fold: impl Fn(&mut State, &[Item]) -> Acc + Sync,
+        merge: impl Fn(&mut Acc, Acc),
+    ) -> Acc {
+        let chunk_len = self.chunk_len(items.len());
+        let chunk_count = items.len().div_ceil(chunk_len);
+        if chunk_count <= 1 {
+            let slot = self.slots[0].get_mut().expect("scoring scratch poisoned");
+            return fold(slot.get_or_insert_with(init), items);
+        }
+        let mut partials = Vec::with_capacity(chunk_count);
+        partials.resize_with(chunk_count, || None);
+        self.run(
+            items.chunks(chunk_len).zip(&mut partials),
+            init,
+            |state, (chunk, partial)| *partial = Some(fold(state, chunk)),
+        );
+        let mut partials = partials
+            .into_iter()
+            .map(|partial| partial.expect("scope completed every chunk"));
+        let mut result = partials.next().expect("nonempty input has a chunk");
+        for partial in partials {
+            merge(&mut result, partial);
+        }
+        result
+    }
+
+    pub(crate) fn map_into<Item: Sync, Output: Send>(
+        &mut self,
+        items: &[Item],
+        output: &mut [Output],
+        init: impl Fn() -> State + Sync,
+        map: impl Fn(&mut State, &Item) -> Output + Sync,
+    ) {
+        assert_eq!(items.len(), output.len());
+        let chunk_len = self.chunk_len(items.len());
+        self.run(
+            items.chunks(chunk_len).zip(output.chunks_mut(chunk_len)),
+            init,
+            |state, (items, output)| {
+                for (item, destination) in items.iter().zip(output) {
+                    *destination = map(state, item);
+                }
+            },
+        );
     }
 }
 
@@ -66,7 +151,7 @@ where
 ///
 /// Determinism: the partition depends only on `items.len()` and `chunk_len`,
 /// and the merge walks partials in index order, so the float addition sequence
-/// is identical on 1 thread and on 64. Unlike [`fold_reduce`], this is
+/// is identical on 1 thread and on 64. Unlike [`BlockWorkers`], this is
 /// bitwise-reproducible.
 ///
 /// Panics if `chunk_len == 0`.
@@ -143,46 +228,89 @@ mod tests {
     }
 
     #[test]
-    fn sum_matches_plain_fold() {
-        let items: Vec<u32> = (0..1_000).collect();
-        let got = fold_reduce(
-            &items,
-            || 0u64,
-            |acc, (idx, v)| acc + *v as u64 + idx as u64,
-            |a, b| a + b,
+    fn empty_slice_is_folded_once() {
+        let got = BlockWorkers::new().fold_reduce(
+            &[] as &[u32],
+            || (),
+            |(), chunk| chunk.len(),
+            |_, _| unreachable!(),
         );
-        let expected: u64 = items
-            .iter()
-            .enumerate()
-            .map(|(idx, v)| *v as u64 + idx as u64)
-            .sum();
-        assert_eq!(got, expected);
-    }
-
-    #[test]
-    fn empty_slice_returns_init() {
-        let items: Vec<u32> = Vec::new();
-        let got = fold_reduce(&items, || 0u64, |acc, (_, v)| acc + *v as u64, |a, b| a + b);
         assert_eq!(got, 0);
     }
 
     #[test]
-    fn index_is_passed_through() {
-        let items: Vec<char> = vec!['a', 'b', 'c', 'd'];
-        let mut got = fold_reduce(
+    fn chunks_merge_in_input_order() {
+        let items: Vec<u32> = (0..1_003).collect();
+        let got = BlockWorkers::new().fold_reduce(
             &items,
-            Vec::<usize>::new,
-            |mut acc, (idx, _)| {
-                acc.push(idx);
-                acc
-            },
-            |mut a, b| {
-                a.extend(b);
-                a
+            || (),
+            |(), chunk| chunk.to_vec(),
+            |result, partial| {
+                #[cfg(feature = "rayon")]
+                assert_eq!(
+                    rayon::current_thread_index(),
+                    None,
+                    "merge runs on the caller"
+                );
+                result.extend(partial);
             },
         );
-        got.sort_unstable();
-        assert_eq!(got, vec![0, 1, 2, 3]);
+        assert_eq!(got, items);
+    }
+
+    /// Regression: the recursive `par_iter().fold().reduce()` this replaced
+    /// overflows these 256 KiB stacks on 48 workers, because every split level
+    /// keeps partial accumulators on the stack. Measured in debug builds: the
+    /// recursive fold needs over 1 MiB on Linux x86_64 and aarch64 and on
+    /// macOS; block jobs fit in 128 KiB on all three.
+    #[cfg(feature = "rayon")]
+    #[test]
+    fn scoring_fold_uses_bounded_jobs_on_small_stacks() {
+        const THREAD_COUNT: usize = 48;
+        const ITEM_COUNT: usize = 10_003;
+        // Partials move by value, like the scoring heaps and timings.
+        const PAYLOAD_WORDS: usize = 512;
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(THREAD_COUNT)
+            .stack_size(256 * 1024)
+            .build()
+            .expect("build a small-stack test pool");
+        let items: Vec<usize> = (0..ITEM_COUNT).collect();
+        pool.install(|| {
+            use std::sync::atomic::{
+                AtomicUsize,
+                Ordering,
+            };
+            let constructions = AtomicUsize::new(0);
+            let mut workers = BlockWorkers::new();
+            for _ in 0..3 {
+                let (counts, sum, jobs) = workers.fold_reduce(
+                    &items,
+                    || {
+                        constructions.fetch_add(1, Ordering::Relaxed);
+                    },
+                    |(), chunk| {
+                        let mut counts = [0usize; PAYLOAD_WORDS];
+                        counts[chunk.len() % PAYLOAD_WORDS] = 1;
+                        (counts, chunk.iter().sum::<usize>(), 1)
+                    },
+                    |result, partial| {
+                        for (total, count) in result.0.iter_mut().zip(partial.0) {
+                            *total += count;
+                        }
+                        result.1 += partial.1;
+                        result.2 += partial.2;
+                    },
+                );
+                assert_eq!(sum, ITEM_COUNT * (ITEM_COUNT - 1) / 2);
+                assert_eq!(counts.iter().sum::<usize>(), jobs);
+                assert!(
+                    (THREAD_COUNT..=CHUNKS_PER_THREAD * THREAD_COUNT).contains(&jobs),
+                    "{jobs} jobs"
+                );
+            }
+            assert!((1..=THREAD_COUNT).contains(&constructions.into_inner()));
+        });
     }
 
     /// Callers recover global element indices as `chunk_idx * chunk_len + local`

@@ -147,14 +147,14 @@ fn execute_raw_pipeline<I: ScorerQueriable>(
     let mut timings = ScoreTimings::default();
     let shadow = pipeline.prepare_shadows(None)?;
     let mut shadow_rows = shadow.as_ref().map(|_| Vec::default());
+    let mut batch_scorer = pipeline.batch_scorer(
+        library,
+        None,
+        trace.as_ref().map(|trace| &trace.phase3),
+        shadow.as_ref(),
+    );
     for batch in library.chunks(options.chunk_size) {
-        let (rows, timing, skips) = pipeline.score_shadow_batch(
-            library,
-            &batch,
-            None,
-            trace.as_ref().map(|trace| &trace.phase3),
-            shadow.as_ref(),
-        );
+        let (rows, timing, skips) = batch_scorer.score(&batch);
         timings += timing;
         report.phase3_skips += skips;
         report.total_scored += rows.len();
@@ -538,16 +538,16 @@ fn phase3_score<I: ScorerQueriable>(
     let mut results = Vec::new();
     let mut skips = SkipCounts::default();
 
+    let mut batch_scorer = pipeline.batch_scorer(
+        speclib,
+        Some(calibration),
+        trace.map(|trace| &trace.phase3),
+        shadow,
+    );
     // Chunk the flat index space `0..len` and hand each range to the batch
     // scorer, which drives the lazy flyweight by index.
     for batch in speclib.chunks(chunk_size).progress_with(pb) {
-        let (batch_results, batch_timings, batch_skips) = pipeline.score_shadow_batch(
-            speclib,
-            &batch,
-            Some(calibration),
-            trace.map(|trace| &trace.phase3),
-            shadow,
-        );
+        let (batch_results, batch_timings, batch_skips) = batch_scorer.score(&batch);
         *timings += batch_timings;
         skips += batch_skips;
         results.extend(batch_results);
