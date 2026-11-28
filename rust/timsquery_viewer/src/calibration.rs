@@ -554,7 +554,7 @@ impl ViewerCalibrationState {
                         let rt_mapper = |idx: usize| -> u32 {
                             cycle_mapping
                                 .rt_milis_for_index(&MS1CycleIndex::new(idx as u32))
-                                .unwrap_or(0)
+                                .expect("extraction cycles are clamped to the run's cycle mapping")
                         };
 
                         // The same Phase-1 entry point and rank as the search.
