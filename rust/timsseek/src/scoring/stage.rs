@@ -19,18 +19,6 @@ pub enum Stage {
     Final,
 }
 
-impl Stage {
-    pub const ALL: [Stage; 2] = [Stage::Calibrant, Stage::Final];
-
-    /// The only label a report prints for a stage.
-    pub fn name(self) -> &'static str {
-        match self {
-            Self::Calibrant => "calibrant",
-            Self::Final => "final",
-        }
-    }
-}
-
 /// The scalar a [`Stage`] ranks by. Finite, and ordered across the candidates
 /// of one stage in one run. Built only by the scorer.
 #[derive(Clone, Copy, Debug, PartialEq, PartialOrd)]
@@ -77,10 +65,5 @@ mod tests {
         assert!(RankScore::new(f32::INFINITY).is_err());
         assert!(RankScore::new(f32::NEG_INFINITY).is_err());
         assert_eq!(RankScore::new(-2.5).unwrap().get(), -2.5);
-    }
-
-    #[test]
-    fn stage_names_are_distinct() {
-        assert_eq!(Stage::ALL.map(Stage::name), ["calibrant", "final"]);
     }
 }
