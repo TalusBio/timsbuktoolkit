@@ -567,7 +567,7 @@ impl ViewerCalibrationState {
                             // Viewer has no skip counter wired up; NaN scores
                             // are rare and silently dropped here.
                             let _ = local_heap.push(CalibrantCandidate {
-                                score: apex.score,
+                                score: apex.profile_value,
                                 apex_rt: ObservedRTSeconds(apex.retention_time_ms as f32 / 1000.0),
                                 speclib_index: elution_groups.flat(eg_idx),
                                 library_rt,

@@ -1183,8 +1183,7 @@ impl<I: ScorerQueriable> Scorer<I> {
     }
 
     /// Phase 1: Lightweight prescore -- broad extraction + find_apex_location only.
-    /// Returns an [`ApexLocation`], whose `score` is the apex-profile peak
-    /// value -- NOT the apex evidence (see `TraceScorer::suggest_apex`).
+    /// Returns the [`ApexLocation`] the apex finder picked.
     pub fn prescore(
         &self,
         query: &RefQuery<'_>,
@@ -1360,7 +1359,7 @@ impl<I: ScorerQueriable> PrescoreBatch<'_, I> {
                     match scorer.prescore_with_windows(&q, worker, &mut t, rt, &peak_tolerance) {
                         Ok(loc) => {
                             let cand = CalibrantCandidate {
-                                score: loc.score,
+                                score: loc.profile_value,
                                 apex_rt: ObservedRTSeconds(loc.retention_time_ms as f32 / 1000.0),
                                 speclib_index: flat,
                                 library_rt: q.library_rt().unwrap_or(LibraryRT(f32::NAN)),
