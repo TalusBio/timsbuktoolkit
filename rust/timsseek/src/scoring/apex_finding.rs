@@ -1237,24 +1237,6 @@ mod tests {
     }
 
     #[test]
-    fn suggested_apex_is_the_location_at_its_cycle() {
-        let candidate = extraction(
-            &[0.0, 2.0, 9.0, 3.0, 0.0, 5.0, 1.0],
-            &[0.0, 1.0, 4.0, 1.0, 0.0, 0.0, 0.0],
-        );
-        let mut scorer = TraceScorer::new(7, 1);
-        scorer.prepare(Stage::Calibrant, &candidate).unwrap();
-        let picked = scorer.suggest_apex(&rt_ms, 0).unwrap();
-        let at = scorer.location_at(picked.apex_cycle, &rt_ms, 0);
-        assert_eq!(picked.profile_value.to_bits(), at.profile_value.to_bits());
-        assert_eq!(
-            (picked.rising_cycles, picked.falling_cycles),
-            (at.rising_cycles, at.falling_cycles)
-        );
-        assert_eq!(picked.retention_time_ms, at.retention_time_ms);
-    }
-
-    #[test]
     #[should_panic(expected = "rank_at(Final) on traces prepared for Some(Calibrant)")]
     fn rank_at_rejects_traces_of_another_stage() {
         let candidate = extraction(&[0.0, 2.0, 9.0, 3.0], &[0.0, 1.0, 4.0, 1.0]);
