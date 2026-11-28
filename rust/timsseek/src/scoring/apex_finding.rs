@@ -54,6 +54,10 @@ use crate::scoring::blocks::counts::ApexCounts;
 use crate::scoring::blocks::intensities::Intensities;
 use crate::scoring::blocks::lazy::ApexLazyScores;
 use crate::scoring::blocks::primary::PrimaryScores;
+use crate::scoring::stage::{
+    RankScore,
+    Stage,
+};
 use crate::utils::top_n_array::TopNArray;
 use serde::Serialize;
 use timsquery::models::aggregators::ChromatogramCollector;
@@ -292,6 +296,8 @@ pub struct TraceScorer {
     coel_scratch: CoelutionScratch,
     feature_scratch: ApexFeatureScratch,
     shape: Option<ShapeScratch>,
+    /// The stage whose trace preparation `traces` currently holds.
+    prepared: Option<Stage>,
     cosine_profile: Vec<f32>,
     scribe_profile: Vec<f32>,
     cfg: ApexConfig,
@@ -360,6 +366,7 @@ impl TraceScorer {
             coel_scratch: CoelutionScratch::with_frag_capacity(max_frags),
             feature_scratch: ApexFeatureScratch::new(max_frags),
             shape: denoise_traces.then(|| ShapeScratch::new(capacity, max_frags)),
+            prepared: None,
             cosine_profile: Vec::with_capacity(capacity),
             scribe_profile: Vec::with_capacity(capacity),
             cfg: ApexConfig::default(),
@@ -409,7 +416,22 @@ impl TraceScorer {
                 ],
             );
         }
+        self.prepared = Some(Stage::Final);
         Ok(())
+    }
+
+    /// Trace preparation for `stage`: [`Stage::Calibrant`] computes the raw
+    /// traces, [`Stage::Final`] also the denoised shapes when this scorer
+    /// denoises. O(fragments x cycles). Call once per extraction.
+    pub fn prepare<T: KeyLike>(
+        &mut self,
+        stage: Stage,
+        scoring_ctx: &Extraction<T>,
+    ) -> Result<(), DataProcessingError> {
+        match stage {
+            Stage::Calibrant => self.compute_raw_traces(scoring_ctx),
+            Stage::Final => self.compute_traces(scoring_ctx),
+        }
     }
 
     fn compute_raw_traces<T: KeyLike>(
@@ -426,9 +448,11 @@ impl TraceScorer {
         self.buffers.clear();
         self.buffers.resize(n_cycles);
 
+        self.prepared = None;
         self.compute_pass_1(scoring_ctx)?;
         self.compute_main_score_trace();
         self.build_profiles_cached();
+        self.prepared = Some(Stage::Calibrant);
 
         Ok(())
     }
@@ -618,7 +642,42 @@ impl TraceScorer {
         })
     }
 
-    /// Phase-1 entry: compute_traces + suggest_apex (apex location only).
+    /// THE definition of what `stage` ranks by, evaluated at `at.apex_cycle`
+    /// of the extraction last prepared for that same stage.
+    ///
+    /// `at` is also the peak context (rise/fall) for scores that use one, so
+    /// a caller can rank at a forced cycle via [`Self::location_at`] without
+    /// any input from the apex finder.
+    ///
+    /// # Panics
+    ///
+    /// Panics if the traces were not prepared for `stage`, or if
+    /// `at.apex_cycle` is outside them.
+    pub fn rank_at<T: KeyLike>(
+        &mut self,
+        stage: Stage,
+        scoring_ctx: &Extraction<T>,
+        at: &ApexLocation,
+        rt_mapper: &dyn Fn(usize) -> u32,
+    ) -> Result<RankScore, DataProcessingError> {
+        assert_eq!(
+            self.prepared,
+            Some(stage),
+            "rank_at({stage:?}) on traces prepared for {:?}",
+            self.prepared
+        );
+        match stage {
+            Stage::Calibrant => RankScore::new(self.traces.ms2_lazyscore[at.apex_cycle]),
+            Stage::Final => {
+                let evidence = self.apex_evidence(scoring_ctx);
+                let blocks = self.score_at(scoring_ctx, &evidence, at.apex_cycle, at, rt_mapper)?;
+                RankScore::new(blocks.primary.main_score)
+            }
+        }
+    }
+
+    /// Phase-1 entry: calibrant trace preparation + apex location + the
+    /// calibrant rank at that apex.
     #[cfg_attr(
         feature = "instrumentation",
         tracing::instrument(skip(self, scoring_ctx, rt_mapper), level = "trace")
@@ -627,10 +686,12 @@ impl TraceScorer {
         &mut self,
         scoring_ctx: &Extraction<T>,
         rt_mapper: &dyn Fn(usize) -> u32,
-    ) -> Result<ApexLocation, DataProcessingError> {
-        self.compute_raw_traces(scoring_ctx)?;
+    ) -> Result<(ApexLocation, RankScore), DataProcessingError> {
+        self.prepare(Stage::Calibrant, scoring_ctx)?;
         let cycle_offset = scoring_ctx.chromatograms.cycle_offset();
-        self.suggest_apex(rt_mapper, cycle_offset)
+        let location = self.suggest_apex(rt_mapper, cycle_offset)?;
+        let rank = self.rank_at(Stage::Calibrant, scoring_ctx, &location, rt_mapper)?;
+        Ok((location, rank))
     }
 
     /// Phase-3 entry: compute_traces + suggest_apex + score_at (full score).
@@ -643,7 +704,7 @@ impl TraceScorer {
         scoring_ctx: &Extraction<T>,
         rt_mapper: &dyn Fn(usize) -> u32,
     ) -> Result<ApexBlocks, DataProcessingError> {
-        self.compute_traces(scoring_ctx)?;
+        self.prepare(Stage::Final, scoring_ctx)?;
         let cycle_offset = scoring_ctx.chromatograms.cycle_offset();
         let loc = self.suggest_apex(rt_mapper, cycle_offset)?;
         let evidence = self.apex_evidence(scoring_ctx);
@@ -1111,6 +1172,80 @@ mod tests {
             smoothed.intensities.ms2_summed_intensity,
             raw.intensities.ms2_summed_intensity
         );
+    }
+
+    #[test]
+    fn prescore_lazyscore_matches_full_scoring_at_the_same_apex() {
+        let candidate = extraction(
+            &[0.0, 1.0, 4.0, 21.0, 7.0, 1.0, 0.0],
+            &[0.0, 1.0, 1.0, 8.0, 2.0, 0.0, 0.0],
+        );
+        let mut scorer = TraceScorer::with_denoising(7, 1, true);
+        let (location, rank) = scorer.find_apex_location(&candidate, &rt_ms).unwrap();
+        let full = scorer.find_apex(&candidate, &rt_ms).unwrap();
+
+        assert_eq!(location.apex_cycle, 3);
+        assert_eq!(location.apex_cycle, full.joint_apex_cycle);
+        assert!(rank.get() > 0.0);
+        assert_eq!(
+            rank.get().to_bits(),
+            full.apex_lazy.apex_lazyscore.to_bits()
+        );
+    }
+
+    #[test]
+    fn final_rank_matches_the_phase3_entry_point() {
+        let candidate = extraction(
+            &[0.0, 1.0, 4.0, 21.0, 7.0, 1.0, 0.0],
+            &[0.0, 1.0, 1.0, 8.0, 2.0, 0.0, 0.0],
+        );
+        let mut scorer = TraceScorer::with_denoising(7, 1, true);
+        let full = scorer.find_apex(&candidate, &rt_ms).unwrap();
+
+        scorer.prepare(Stage::Final, &candidate).unwrap();
+        let picked = scorer.suggest_apex(&rt_ms, 0).unwrap();
+        let rank = scorer
+            .rank_at(Stage::Final, &candidate, &picked, &rt_ms)
+            .unwrap();
+        assert_eq!(rank.get().to_bits(), full.primary.main_score.to_bits());
+
+        // A forced cycle is ranked with its own peak context.
+        let forced = scorer.location_at(5, &rt_ms, 0);
+        assert_eq!(forced.apex_cycle, 5);
+        assert_eq!(forced.retention_time_ms, rt_ms(5));
+        assert!(
+            scorer
+                .rank_at(Stage::Final, &candidate, &forced, &rt_ms)
+                .unwrap()
+                < rank
+        );
+    }
+
+    #[test]
+    fn suggested_apex_is_the_location_at_its_cycle() {
+        let candidate = extraction(
+            &[0.0, 2.0, 9.0, 3.0, 0.0, 5.0, 1.0],
+            &[0.0, 1.0, 4.0, 1.0, 0.0, 0.0, 0.0],
+        );
+        let mut scorer = TraceScorer::new(7, 1);
+        scorer.prepare(Stage::Calibrant, &candidate).unwrap();
+        let picked = scorer.suggest_apex(&rt_ms, 0).unwrap();
+        let at = scorer.location_at(picked.apex_cycle, &rt_ms, 0);
+        assert_eq!(picked.profile_value.to_bits(), at.profile_value.to_bits());
+        assert_eq!(
+            (picked.rising_cycles, picked.falling_cycles),
+            (at.rising_cycles, at.falling_cycles)
+        );
+        assert_eq!(picked.retention_time_ms, at.retention_time_ms);
+    }
+
+    #[test]
+    #[should_panic(expected = "rank_at(Final) on traces prepared for Some(Calibrant)")]
+    fn rank_at_rejects_traces_of_another_stage() {
+        let candidate = extraction(&[0.0, 2.0, 9.0, 3.0], &[0.0, 1.0, 4.0, 1.0]);
+        let mut scorer = TraceScorer::new(4, 1);
+        let (location, _) = scorer.find_apex_location(&candidate, &rt_ms).unwrap();
+        let _ = scorer.rank_at(Stage::Final, &candidate, &location, &rt_ms);
     }
 
     #[test]
