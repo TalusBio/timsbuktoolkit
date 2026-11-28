@@ -119,14 +119,13 @@ pub struct Extraction<T: KeyLike> {
     pub chromatograms: ChromatogramCollector<T, f32>,
 }
 
-/// Lightweight result from Phase 1 apex finding.
-/// Contains only the apex location and a basic score for calibrant ranking.
+/// Apex finder output: where the apex is and the peak context around it.
+/// Carries no ranking score.
 #[derive(Debug, Clone, Copy)]
 pub struct ApexLocation {
-    // TODO: FIXME: this struct is redundant (and could be just passed as a
-    // score block)
-    /// Basic score (apex profile peak value) for ranking.
-    pub score: f32,
+    /// `apex_profile[apex_cycle]`. Window-normalized: comparable between
+    /// cycles of ONE extraction, never between extractions.
+    pub profile_value: f32,
     /// Retention time at the apex (ms).
     pub retention_time_ms: u32,
     /// Local cycle index of the apex within the extraction.
@@ -436,7 +435,7 @@ impl TraceScorer {
 
     /// Stage B: Suggest best apex from precomputed traces.
     /// Pure peak-pick on apex_profile -- O(cycles). Truly cheap.
-    /// Returns `apex_profile[max_loc]` as the ranking score.
+    /// The location is [`Self::location_at`] the profile's argmax.
     pub fn suggest_apex(
         &self,
         rt_mapper: &dyn Fn(usize) -> u32,
@@ -456,17 +455,29 @@ impl TraceScorer {
                 context: Some("No non-0 main score".into()),
             });
         }
+        Ok(self.location_at(max_loc, rt_mapper, cycle_offset))
+    }
 
-        let (rising_cycles, falling_cycles) = self.calculate_rise_and_fall_cycles(max_loc);
-        let retention_time_ms = rt_mapper(max_loc + cycle_offset);
-
-        Ok(ApexLocation {
-            score: max_val, // apex_profile peak value, NOT apex_evidence
-            retention_time_ms,
-            apex_cycle: max_loc,
+    /// The apex location at a forced local `cycle` of the current traces:
+    /// rise/fall around it and the profile value there.
+    ///
+    /// # Panics
+    ///
+    /// Panics if `cycle` is outside the prepared traces.
+    pub fn location_at(
+        &self,
+        cycle: usize,
+        rt_mapper: &dyn Fn(usize) -> u32,
+        cycle_offset: usize,
+    ) -> ApexLocation {
+        let (rising_cycles, falling_cycles) = self.calculate_rise_and_fall_cycles(cycle);
+        ApexLocation {
+            profile_value: self.traces.apex_profile[cycle],
+            retention_time_ms: rt_mapper(cycle + cycle_offset),
+            apex_cycle: cycle,
             rising_cycles,
             falling_cycles,
-        })
+        }
     }
 
     /// Stage B': the window-global apex evidence. Cycle-invariant, so it is
