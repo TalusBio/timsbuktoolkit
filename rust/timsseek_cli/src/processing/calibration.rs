@@ -1149,7 +1149,7 @@ mod tests {
         let mut heap = CalibrantHeap::new(1);
         assert_eq!(candidates.iter().count(), 2);
         for candidate in candidates.into_vec() {
-            heap.push(candidate).unwrap();
+            heap.push(candidate);
         }
         assert_eq!(heap.iter().next().unwrap().speclib_index, narrow);
     }
@@ -1210,7 +1210,7 @@ mod tests {
                 denoise_traces: true,
             };
             let candidate = || CalibrantCandidate {
-                score: 20.0,
+                score: timsseek::scoring::RankScore::for_tests(20.0),
                 apex_rt: timsseek::rt_calibration::ObservedRTSeconds(30.0),
                 library_rt: LibraryRT(library_rt.unwrap_or(f32::NAN)),
                 speclib_index: lib.geometry().flats().next().unwrap(),
@@ -1364,7 +1364,7 @@ mod tests {
             vec![(0.0, fingerprint.clone()), (-20.0, fingerprint)],
         );
         let candidate = CalibrantCandidate {
-            score: 1.0,
+            score: timsseek::scoring::RankScore::for_tests(1.0),
             apex_rt: timsseek::rt_calibration::ObservedRTSeconds(120.0),
             library_rt: LibraryRT(9000.0),
             speclib_index: calibration.geometry().flats().next().unwrap(),

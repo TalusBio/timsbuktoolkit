@@ -550,24 +550,20 @@ impl ViewerCalibrationState {
                             Err(_) => return (scorer, local_heap),
                         };
 
-                        if scorer.compute_traces(&extraction).is_err() {
-                            return (scorer, local_heap);
-                        }
-
-                        let cycle_offset = extraction.chromatograms.cycle_offset();
+                        // Maps a global cycle; the scorer adds the extraction offset.
                         let rt_mapper = |idx: usize| -> u32 {
                             cycle_mapping
-                                .rt_milis_for_index(&MS1CycleIndex::new(
-                                    (idx + cycle_offset) as u32,
-                                ))
+                                .rt_milis_for_index(&MS1CycleIndex::new(idx as u32))
                                 .unwrap_or(0)
                         };
 
-                        if let Ok(apex) = scorer.suggest_apex(&rt_mapper, 0) {
-                            // Viewer has no skip counter wired up; NaN scores
-                            // are rare and silently dropped here.
-                            let _ = local_heap.push(CalibrantCandidate {
-                                score: apex.profile_value,
+                        // The same Phase-1 entry point and rank as the search.
+                        // Failed candidates are dropped; the viewer keeps no
+                        // skip counts.
+                        if let Ok((apex, rank)) = scorer.find_apex_location(&extraction, &rt_mapper)
+                        {
+                            local_heap.push(CalibrantCandidate {
+                                score: rank,
                                 apex_rt: ObservedRTSeconds(apex.retention_time_ms as f32 / 1000.0),
                                 speclib_index: elution_groups.flat(eg_idx),
                                 library_rt,

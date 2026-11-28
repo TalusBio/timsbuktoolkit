@@ -205,11 +205,11 @@ impl ScoringWorker {
 }
 
 /// Lightweight calibrant candidate -- just enough to re-query in Phase 2.
-/// Implements Ord by score (ascending) for use in BinaryHeap<Reverse<_>>.
+/// Ordered by score, then library index.
 #[derive(Debug, Clone)]
 pub struct CalibrantCandidate {
     /// The calibrant rank at the selected apex (`TraceScorer::rank_at`).
-    pub score: f32,
+    pub score: RankScore,
     pub apex_rt: ObservedRTSeconds<f32>,
     pub speclib_index: FlatIdx,
     pub library_rt: LibraryRT<f32>,
@@ -331,7 +331,7 @@ impl StratifiedCalibrantHeaps {
         (((library_rt - self.rt_min) * self.band_scale) as usize).min(CALIBRANT_RT_BANDS - 1)
     }
 
-    pub fn push(&mut self, candidate: CalibrantCandidate) -> Result<(), SkipReason> {
+    pub fn push(&mut self, candidate: CalibrantCandidate) {
         let group = calibrant_heap_group(candidate.speclib_index);
         let band = self.band_of(if self.observed_rt_bands {
             candidate.apex_rt.0
@@ -393,17 +393,11 @@ impl CalibrantHeap {
         }
     }
 
-    /// Returns `Err(SkipReason::CalibrantNanScore)` when `candidate.score` is
-    /// NaN so the caller can surface the count in reports. Non-positive or
-    /// +Inf scores are silently discarded -- they are either sentinel
-    /// (`score <= 0.0` means "no usable signal") or already dominated by any
-    /// finite positive candidate in the heap.
-    pub fn push(&mut self, candidate: CalibrantCandidate) -> Result<(), SkipReason> {
-        if candidate.score.is_nan() {
-            return Err(SkipReason::CalibrantNanScore);
-        }
-        if !candidate.score.is_finite() || candidate.score <= 0.0 {
-            return Ok(());
+    /// Non-positive scores are discarded: `score <= 0.0` means "no usable
+    /// signal". Rank scores are finite by construction.
+    pub fn push(&mut self, candidate: CalibrantCandidate) {
+        if candidate.score.get() <= 0.0 {
+            return;
         }
         if self.best.len() < self.capacity {
             self.best.insert(candidate);
@@ -413,7 +407,6 @@ impl CalibrantHeap {
             self.best.pop_first();
             self.best.insert(candidate);
         }
-        Ok(())
     }
 
     pub fn merge(mut self, other: Self) -> Self {
@@ -423,8 +416,7 @@ impl CalibrantHeap {
 
     pub fn merge_in_place(&mut self, other: Self) {
         for item in other.best {
-            // Ignore: other heap already filtered on its own push.
-            let _ = self.push(item);
+            self.push(item);
         }
     }
 
@@ -1363,14 +1355,12 @@ impl<I: ScorerQueriable> PrescoreBatch<'_, I> {
                     match scorer.prescore_with_windows(&q, worker, &mut t, rt, &peak_tolerance) {
                         Ok((loc, rank)) => {
                             let cand = CalibrantCandidate {
-                                score: rank.get(),
+                                score: rank,
                                 apex_rt: ObservedRTSeconds(loc.retention_time_ms as f32 / 1000.0),
                                 speclib_index: flat,
                                 library_rt: q.library_rt().unwrap_or(LibraryRT(f32::NAN)),
                             };
-                            if let Err(reason) = heap.push(cand) {
-                                t.skips.bump(reason);
-                            }
+                            heap.push(cand);
                         }
                         Err(reason) => t.skips.bump(reason),
                     }
@@ -1429,18 +1419,18 @@ mod tests {
         let first = flats.next().unwrap();
         let second = flats.next().unwrap();
         let candidate = |speclib_index| CalibrantCandidate {
-            score: 10.0,
+            score: RankScore::for_tests(10.0),
             apex_rt: ObservedRTSeconds(20.0),
             speclib_index,
             library_rt: LibraryRT(10.0),
         };
 
         let mut forward = CalibrantHeap::new(1);
-        forward.push(candidate(first)).unwrap();
-        forward.push(candidate(second)).unwrap();
+        forward.push(candidate(first));
+        forward.push(candidate(second));
         let mut reverse = CalibrantHeap::new(1);
-        reverse.push(candidate(second)).unwrap();
-        reverse.push(candidate(first)).unwrap();
+        reverse.push(candidate(second));
+        reverse.push(candidate(first));
 
         assert_eq!(
             forward.iter().next().unwrap().speclib_index,
@@ -1453,7 +1443,7 @@ mod tests {
         let lib = tiny_lazy_lib();
         let flats: Vec<_> = lib.geometry().flats().collect();
         let candidate = |rank: usize| CalibrantCandidate {
-            score: 1.0 + rank as f32,
+            score: RankScore::for_tests(1.0 + rank as f32),
             apex_rt: ObservedRTSeconds(20.0),
             speclib_index: flats[rank % flats.len()],
             library_rt: LibraryRT(10.0),
@@ -1461,7 +1451,7 @@ mod tests {
         let filled = |order: &[usize]| {
             let mut heap = CalibrantHeap::new(4);
             for &rank in order {
-                heap.push(candidate(rank)).unwrap();
+                heap.push(candidate(rank));
             }
             heap
         };
@@ -1485,21 +1475,21 @@ mod tests {
         let mut right = make();
         for i in 0..30 {
             let candidate = CalibrantCandidate {
-                score: i as f32 + 1.0,
+                score: RankScore::for_tests(i as f32 + 1.0),
                 apex_rt: ObservedRTSeconds(i as f32 * 10.0),
                 library_rt: LibraryRT(f32::NAN),
                 speclib_index: flat,
             };
-            direct.push(candidate.clone()).unwrap();
+            direct.push(candidate.clone());
             if i % 2 == 0 {
-                left.push(candidate).unwrap();
+                left.push(candidate);
             } else {
-                right.push(candidate).unwrap();
+                right.push(candidate);
             }
         }
         left.merge_in_place(right);
         let scores = |heap: StratifiedCalibrantHeaps| {
-            let mut scores: Vec<_> = heap.into_vec().into_iter().map(|c| c.score).collect();
+            let mut scores: Vec<_> = heap.into_vec().into_iter().map(|c| c.score.get()).collect();
             scores.sort_by(f32::total_cmp);
             scores
         };
@@ -1514,7 +1504,7 @@ mod tests {
         let flats: Vec<_> = lib.geometry().flats().collect();
         let candidates: Vec<_> = (0..12)
             .map(|index| CalibrantCandidate {
-                score: index as f32 + 1.0,
+                score: RankScore::for_tests(index as f32 + 1.0),
                 apex_rt: ObservedRTSeconds(index as f32),
                 speclib_index: flats[index % flats.len()],
                 library_rt: LibraryRT((index % CALIBRANT_RT_BANDS) as f32 * 10.0 + 1.0),
@@ -1522,20 +1512,23 @@ mod tests {
             .collect();
         let mut direct = StratifiedCalibrantHeaps::new(2, (0.0, 30.0));
         for candidate in candidates.iter().cloned() {
-            direct.push(candidate).unwrap();
+            direct.push(candidate);
         }
         let mut left = StratifiedCalibrantHeaps::new(2, (0.0, 30.0));
         let mut right = StratifiedCalibrantHeaps::new(2, (0.0, 30.0));
         for candidate in candidates[..6].iter().cloned() {
-            left.push(candidate).unwrap();
+            left.push(candidate);
         }
         for candidate in candidates[6..].iter().cloned() {
-            right.push(candidate).unwrap();
+            right.push(candidate);
         }
         left.merge_in_place(right);
 
         let scores = |heaps: &StratifiedCalibrantHeaps| {
-            let mut scores: Vec<_> = heaps.iter().map(|candidate| candidate.score).collect();
+            let mut scores: Vec<_> = heaps
+                .iter()
+                .map(|candidate| candidate.score.get())
+                .collect();
             scores.sort_unstable_by(f32::total_cmp);
             scores
         };
