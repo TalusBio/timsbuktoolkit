@@ -981,8 +981,8 @@ mod tests {
         rt: timscentroid::rt_mapping::CycleToRTMapping<timscentroid::rt_mapping::MS1CycleIndex>,
         queries: std::sync::Mutex<Vec<(f32, timsquery::PeakTolerance)>>,
         mobility_kind: timscentroid::MobilityKind,
-        /// Intensity of every fragment at a global MS1 cycle; `None` adds nothing.
-        fragment_trace: Option<fn(usize) -> f32>,
+        /// Intensity by fragment m/z and global MS1 cycle. `None` adds nothing.
+        fragment_trace: Option<fn(f64, usize) -> f32>,
     }
 
     impl timsseek::traits::MappableRTCycles for TestIndex {
@@ -1007,11 +1007,16 @@ mod tests {
                 return;
             };
             let offset = query.cycle_offset();
-            for (_, mut chromatogram) in query.iter_mut_fragments() {
+            let mut fragments_added = 0;
+            for ((_, mz), mut chromatogram) in query.iter_mut_fragments() {
                 for cycle in offset..offset + chromatogram.len() {
-                    chromatogram.add_at_index(u32::try_from(cycle).unwrap(), trace(cycle));
+                    let intensity = trace(*mz, cycle);
+                    chromatogram.add_at_index(u32::try_from(cycle).unwrap(), intensity);
+                    fragments_added += u64::from(intensity > 0.0);
                 }
             }
+            // Extraction skips a candidate whose query added no fragment peak.
+            query.n_fragment_peaks_added += fragments_added;
         }
     }
     impl timsquery::QueriableData<SpectralCollector<IonAnnot, f32>> for TestIndex {
@@ -1059,6 +1064,94 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn phase1_heap_prefers_higher_lazyscore_over_higher_apex_profile() {
+        use timsquery::models::{
+            DecoyStrategy,
+            FragmentFeatureState,
+            IsotopeStrategy,
+            Row,
+            TargetCapabilities,
+            TargetColumnsBuilder,
+        };
+        use timsseek::scoring::pipeline::ScoringWorker;
+        use timsseek::scoring::{
+            CalibrantHeap,
+            PrescoreTimings,
+        };
+
+        // Annotated fragments, three isotopes, decoys as stored.
+        let mut builder = TargetColumnsBuilder::with_capabilities(TargetCapabilities {
+            fragment_features: FragmentFeatureState::Available,
+            isotopes: IsotopeStrategy::FromComposition { n_isotopes: 3 },
+            decoys: DecoyStrategy::Stored,
+        });
+        let ion = IonAnnot::try_from("y1").unwrap();
+        for mz in [300.0, 350.0] {
+            builder.push_row(Row {
+                precursor_mz: 500.0,
+                charge: 2,
+                mobility: 1.0,
+                rt: Some(timsquery::RtCoordinate::seconds(10.0)),
+                frags: &[(ion, mz)],
+                ..Default::default()
+            });
+        }
+        let library = ReferenceLibrary::try_from(timsquery::serde::TargetTable::Mzpaf {
+            geom: builder
+                .seal(timsquery::models::capabilities::DecoyPolicy::Never)
+                .unwrap(),
+            frag_intens: Some(vec![1.0, 1.0]),
+        })
+        .unwrap();
+        // Fragment 300: flat at every cycle, the higher apex-profile value.
+        // Fragment 350: one spike, the higher lazyscore.
+        let pipeline = Scorer {
+            index: TestIndex {
+                rt: timscentroid::rt_mapping::CycleToRTMapping::new(
+                    (0..=20).map(|cycle| cycle * 1000).collect(),
+                ),
+                queries: Default::default(),
+                mobility_kind: timscentroid::MobilityKind::Absent,
+                fragment_trace: Some(|mz, cycle| {
+                    if mz < 325.0 {
+                        return 100.0;
+                    }
+                    if cycle == 10 { 150.0 } else { 0.0 }
+                }),
+            },
+            broad_tolerance: timsquery::Tolerance::default(),
+            fragmented_range: timsquery::utils::TupleRange::try_new(100.0, 1000.0).unwrap(),
+            denoise_traces: false,
+        };
+        let mut flats = library.geometry().flats();
+        let broad = flats.next().unwrap();
+        let narrow = flats.next().unwrap();
+        let mut worker = ScoringWorker::new(21, 1);
+        let mut timings = PrescoreTimings::default();
+        let (broad_location, _) = pipeline
+            .prescore(&library.item_at(broad), &mut worker, &mut timings)
+            .unwrap();
+        let (narrow_location, _) = pipeline
+            .prescore(&library.item_at(narrow), &mut worker, &mut timings)
+            .unwrap();
+        assert!(broad_location.profile_value > narrow_location.profile_value);
+
+        let candidates = pipeline.prescore_partitioned_batch(
+            &library,
+            &[broad, narrow],
+            2,
+            library.rt_range(),
+            &mut timings,
+        );
+        let mut heap = CalibrantHeap::new(1);
+        assert_eq!(candidates.iter().count(), 2);
+        for candidate in candidates.into_vec() {
+            heap.push(candidate);
+        }
+        assert_eq!(heap.iter().next().unwrap().speclib_index, narrow);
     }
 
     #[test]
@@ -1117,7 +1210,7 @@ mod tests {
                 denoise_traces: true,
             };
             let candidate = || CalibrantCandidate {
-                score: 20.0,
+                score: timsseek::scoring::RankScore::for_tests(20.0),
                 apex_rt: timsseek::rt_calibration::ObservedRTSeconds(30.0),
                 library_rt: LibraryRT(library_rt.unwrap_or(f32::NAN)),
                 speclib_index: lib.geometry().flats().next().unwrap(),
@@ -1189,7 +1282,7 @@ mod tests {
             ),
             queries: Default::default(),
             mobility_kind: timscentroid::MobilityKind::Ook0,
-            fragment_trace: Some(|cycle| if cycle == APEX { 200.0 } else { 100.0 }),
+            fragment_trace: Some(|_, cycle| if cycle == APEX { 200.0 } else { 100.0 }),
         };
         let mut builder =
             TargetColumnsBuilder::with_capabilities(TargetCapabilities::default_diann());
@@ -1271,7 +1364,7 @@ mod tests {
             vec![(0.0, fingerprint.clone()), (-20.0, fingerprint)],
         );
         let candidate = CalibrantCandidate {
-            score: 1.0,
+            score: timsseek::scoring::RankScore::for_tests(1.0),
             apex_rt: timsseek::rt_calibration::ObservedRTSeconds(120.0),
             library_rt: LibraryRT(9000.0),
             speclib_index: calibration.geometry().flats().next().unwrap(),

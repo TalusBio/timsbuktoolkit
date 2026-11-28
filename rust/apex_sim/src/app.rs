@@ -465,7 +465,11 @@ fn score_readout(ui: &mut egui::Ui, score: Option<&ScoreResult>, err: Option<&st
         };
         let ev = &p2.evidence;
         row(ui, "pass1 apex cycle", s.pass1.apex_cycle.to_string());
-        row(ui, "pass1 score", format!("{:.3e}", s.pass1.score));
+        row(
+            ui,
+            "pass1 profile value",
+            format!("{:.3e}", s.pass1.profile_value),
+        );
         row(ui, "pass2 joint apex", p2.joint_apex_cycle.to_string());
         row(ui, "pass2 score", format!("{:.3e}", p2.primary.main_score));
         row(ui, "rt (ms)", p2.retention_time_ms.to_string());

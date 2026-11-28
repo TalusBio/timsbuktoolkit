@@ -13,6 +13,7 @@ pub mod results;
 mod scores;
 mod shadow;
 pub mod skip;
+pub mod stage;
 pub mod timings;
 mod window_map;
 
@@ -36,6 +37,10 @@ pub use results::{
 pub use skip::{
     SkipCounts,
     SkipReason,
+};
+pub use stage::{
+    RankScore,
+    Stage,
 };
 pub use timings::{
     FileReport,

@@ -73,3 +73,5 @@ dashboard = ["dep:rescore_dash"]
 # assemble candidates without an arena behind them. Dev-only, so a shipped
 # build cannot mint one.
 timsquery = { path = "../timsquery", features = ["test-support"] }
+# `RankScore::for_tests` for the calibration tests.
+timsseek = { path = "../timsseek", default-features = false, features = ["test-support"] }
