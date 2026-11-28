@@ -458,8 +458,8 @@ impl RowOrder<'_> {
 
     // Ascending ordering places the highest score first.
     fn compare(&self, left: u32, right: u32) -> Ordering {
-        let left_score = self.candidates[left as usize].scoring.primary.main_score;
-        let right_score = self.candidates[right as usize].scoring.primary.main_score;
+        let left_score = self.candidates[left as usize].scoring.primary.rank();
+        let right_score = self.candidates[right as usize].scoring.primary.rank();
         right_score.total_cmp(&left_score).then_with(|| {
             let left = self.library.item_at(self.context(left).flat);
             let right = self.library.item_at(self.context(right).flat);
