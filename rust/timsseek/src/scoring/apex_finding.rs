@@ -160,6 +160,13 @@ pub struct ApexBlocks {
     pub apex_lazy: ApexLazyScores,
 }
 
+impl ApexBlocks {
+    /// The final-stage rank of these blocks; see [`PrimaryScores::rank`].
+    pub fn rank(&self) -> f32 {
+        self.primary.rank()
+    }
+}
+
 /// Assert that a slice spans the cycle axis before it is zipped with another.
 /// `zip` and the chunked loops truncate to the shortest side instead of
 /// complaining, so a mismatch would silently drop cycles from an accumulator.
@@ -671,7 +678,7 @@ impl TraceScorer {
             Stage::Final => {
                 let evidence = self.apex_evidence(scoring_ctx);
                 let blocks = self.score_at(scoring_ctx, &evidence, at.apex_cycle, at, rt_mapper)?;
-                RankScore::new(blocks.primary.main_score)
+                RankScore::new(blocks.rank())
             }
         }
     }

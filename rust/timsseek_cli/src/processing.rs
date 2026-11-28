@@ -394,9 +394,9 @@ where
     competed.sort_unstable_by(|x, y| {
         y.scoring
             .primary
-            .main_score
-            .partial_cmp(&x.scoring.primary.main_score)
-            .expect("NaN main_score should have been filtered during Phase 3 scoring")
+            .rank()
+            .partial_cmp(&x.scoring.primary.rank())
+            .expect("NaN rank should have been filtered during Phase 3 scoring")
     });
     let total_after_competition = competed.len();
     let phase4_ms = step
@@ -637,8 +637,8 @@ fn dedup_by_sequence(
             .then(
                 b.scoring
                     .primary
-                    .main_score
-                    .total_cmp(&a.scoring.primary.main_score),
+                    .rank()
+                    .total_cmp(&a.scoring.primary.rank()),
             )
             .then(
                 b.scoring
@@ -740,9 +740,9 @@ fn target_decoy_compete(
     let score_cmp = |a: &ScoredCandidate, b: &ScoredCandidate| {
         a.scoring
             .primary
-            .main_score
-            .partial_cmp(&b.scoring.primary.main_score)
-            .expect("NaN main_score should have been filtered during Phase 3 scoring")
+            .rank()
+            .partial_cmp(&b.scoring.primary.rank())
+            .expect("NaN rank should have been filtered during Phase 3 scoring")
     };
     let competition_groups =
         results.chunk_by(|a, b| a.scoring.identity.competes_with(&b.scoring.identity));
