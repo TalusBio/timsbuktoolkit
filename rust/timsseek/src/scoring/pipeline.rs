@@ -374,17 +374,18 @@ impl StratifiedCalibrantHeaps {
     }
 }
 
-/// Bounded min-heap: keeps only the top-N candidates by score.
-/// Uses Reverse so the *smallest* score is at the top (ejected first).
+/// Bounded top-N set: keeps only the best `capacity` candidates. The
+/// candidate order is total (score, then library index), so the set is always
+/// sorted and its contents and order do not depend on insertion or merge order.
 pub struct CalibrantHeap {
-    heap: std::collections::BinaryHeap<std::cmp::Reverse<CalibrantCandidate>>,
+    best: std::collections::BTreeSet<CalibrantCandidate>,
     capacity: usize,
 }
 
 impl CalibrantHeap {
     pub fn new(capacity: usize) -> Self {
         Self {
-            heap: std::collections::BinaryHeap::with_capacity(capacity + 1),
+            best: std::collections::BTreeSet::new(),
             capacity,
         }
     }
@@ -401,13 +402,13 @@ impl CalibrantHeap {
         if !candidate.score.is_finite() || candidate.score <= 0.0 {
             return Ok(());
         }
-        if self.heap.len() < self.capacity {
-            self.heap.push(std::cmp::Reverse(candidate));
-        } else if let Some(std::cmp::Reverse(min)) = self.heap.peek()
+        if self.best.len() < self.capacity {
+            self.best.insert(candidate);
+        } else if let Some(min) = self.best.first()
             && candidate > *min
         {
-            self.heap.pop();
-            self.heap.push(std::cmp::Reverse(candidate));
+            self.best.pop_first();
+            self.best.insert(candidate);
         }
         Ok(())
     }
@@ -418,26 +419,24 @@ impl CalibrantHeap {
     }
 
     pub fn merge_in_place(&mut self, other: Self) {
-        for item in other.heap {
+        for item in other.best {
             // Ignore: other heap already filtered on its own push.
-            let _ = self.push(item.0);
+            let _ = self.push(item);
         }
     }
 
+    /// Best first.
     pub fn into_vec(self) -> Vec<CalibrantCandidate> {
-        self.heap
-            .into_iter()
-            .map(|std::cmp::Reverse(c)| c)
-            .collect()
+        self.best.into_iter().rev().collect()
     }
 
     pub fn len(&self) -> usize {
-        self.heap.len()
+        self.best.len()
     }
 
-    /// Iterate over heap contents. Order is arbitrary (not sorted by score).
+    /// Best first, like [`Self::into_vec`].
     pub fn iter(&self) -> impl Iterator<Item = &CalibrantCandidate> + Clone {
-        self.heap.iter().map(|r| &r.0)
+        self.best.iter().rev()
     }
 }
 
@@ -1444,6 +1443,33 @@ mod tests {
             forward.iter().next().unwrap().speclib_index,
             reverse.iter().next().unwrap().speclib_index
         );
+    }
+
+    #[test]
+    fn calibrant_heap_order_is_independent_of_insertion_order() {
+        let lib = tiny_lazy_lib();
+        let flats: Vec<_> = lib.geometry().flats().collect();
+        let candidate = |rank: usize| CalibrantCandidate {
+            score: 1.0 + rank as f32,
+            apex_rt: ObservedRTSeconds(20.0),
+            speclib_index: flats[rank % flats.len()],
+            library_rt: LibraryRT(10.0),
+        };
+        let filled = |order: &[usize]| {
+            let mut heap = CalibrantHeap::new(4);
+            for &rank in order {
+                heap.push(candidate(rank)).unwrap();
+            }
+            heap
+        };
+        let forward = filled(&[0, 1, 2, 3, 4, 5]);
+        let shuffled = filled(&[3, 5, 0, 4, 1, 2]);
+        let expected: Vec<_> = [5, 4, 3, 2].map(candidate).to_vec();
+
+        assert!(forward.iter().eq(&expected));
+        assert!(shuffled.iter().eq(&expected));
+        assert_eq!(forward.into_vec(), expected);
+        assert_eq!(shuffled.into_vec(), expected);
     }
 
     #[test]
