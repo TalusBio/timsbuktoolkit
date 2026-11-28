@@ -407,6 +407,12 @@ impl CalibrantHeap {
             self.best.pop_first();
             self.best.insert(candidate);
         }
+        assert!(
+            self.best.len() <= self.capacity,
+            "len={} capacity={}",
+            self.best.len(),
+            self.capacity
+        );
     }
 
     pub fn merge(mut self, other: Self) -> Self {

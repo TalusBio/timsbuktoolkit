@@ -501,6 +501,8 @@ impl TraceScorer {
         rt_mapper: &dyn Fn(usize) -> u32,
         cycle_offset: usize,
     ) -> ApexLocation {
+        let cycles = self.traces.apex_profile.len();
+        assert!(cycle < cycles, "cycle={cycle} cycles={cycles}");
         let (rising_cycles, falling_cycles) = self.calculate_rise_and_fall_cycles(cycle);
         ApexLocation {
             profile_value: self.traces.apex_profile[cycle],
@@ -672,6 +674,12 @@ impl TraceScorer {
             Some(stage),
             "rank_at({stage:?}) on traces prepared for {:?}",
             self.prepared
+        );
+        let cycles = self.traces.ms2_lazyscore.len();
+        assert!(
+            at.apex_cycle < cycles,
+            "apex_cycle={} cycles={cycles}",
+            at.apex_cycle
         );
         match stage {
             Stage::Calibrant => RankScore::new(self.traces.ms2_lazyscore[at.apex_cycle]),
