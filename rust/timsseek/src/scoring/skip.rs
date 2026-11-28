@@ -37,10 +37,9 @@ pub enum SkipReason {
     ApexInsufficientData,
     /// NaN / Inf surfaced in scoring math (indicates upstream data pathology).
     ApexNonFiniteScore,
-    /// Phase 1 `find_apex_location` returned NaN for a calibrant score --
-    /// dropped before entering `CalibrantHeap` so downstream ordering stays
-    /// well-defined. Non-zero count signals pathological fragment intensities
-    /// or a divide-by-zero in the scoring math.
+    /// No longer produced: a calibrant rank is finite by construction, and a
+    /// non-finite one is counted as [`Self::ApexNonFiniteScore`]. Kept so
+    /// reports keep their columns.
     CalibrantNanScore,
     /// `finalize_results` failed to assemble the ScoredCandidate.
     FinalizeError,
