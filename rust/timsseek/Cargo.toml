@@ -46,6 +46,9 @@ instrumentation = []
 # mzML/mzdata ingest, forwarded to timsquery + timscentroid.
 # Not defaulted here (see timsseek_cli) so `--no-default-features` stays lean.
 mzdata = ["timsquery/mzdata", "timscentroid/mzdata"]
+# `RankScore::for_tests`, for tests in other crates that need a calibrant
+# candidate without a scorer. Dev-only, so a shipped build cannot mint one.
+test-support = []
 
 [lib]
 

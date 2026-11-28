@@ -16,7 +16,8 @@
 //!
 //! The scoring process has two phases:
 //!
-//! 1. **Prescore** (Phase 1): Broad extraction + `find_apex_location` -- yields calibrant candidates.
+//! 1. **Prescore** (Phase 1): Broad extraction + `find_apex_location` -- yields calibrant
+//!    candidates ranked by [`Stage::Calibrant`](super::stage::Stage::Calibrant).
 //! 2. **Calibrated scoring** (Phase 3): Narrow calibrated extraction + `find_apex` + secondary query.
 
 use crate::data_sources::reference_library::{
@@ -90,6 +91,7 @@ use super::skip::{
     apex_error_to_skip,
     finalize_error_to_skip,
 };
+use super::stage::RankScore;
 use super::timings::{
     PrescoreTimings,
     ScoreTimings,
@@ -206,6 +208,7 @@ impl ScoringWorker {
 /// Implements Ord by score (ascending) for use in BinaryHeap<Reverse<_>>.
 #[derive(Debug, Clone)]
 pub struct CalibrantCandidate {
+    /// The calibrant rank at the selected apex (`TraceScorer::rank_at`).
     pub score: f32,
     pub apex_rt: ObservedRTSeconds<f32>,
     pub speclib_index: FlatIdx,
@@ -1183,13 +1186,14 @@ impl<I: ScorerQueriable> Scorer<I> {
     }
 
     /// Phase 1: Lightweight prescore -- broad extraction + find_apex_location only.
-    /// Returns the [`ApexLocation`] the apex finder picked.
+    /// Returns the [`ApexLocation`] the apex finder picked and the calibrant
+    /// rank at it.
     pub fn prescore(
         &self,
         query: &RefQuery<'_>,
         worker: &mut ScoringWorker,
         timings: &mut PrescoreTimings,
-    ) -> Result<ApexLocation, SkipReason> {
+    ) -> Result<(ApexLocation, RankScore), SkipReason> {
         self.prescore_with_windows(
             query,
             worker,
@@ -1219,7 +1223,7 @@ impl<I: ScorerQueriable> Scorer<I> {
         timings: &mut PrescoreTimings,
         rt: Option<ResolvedRt>,
         peak_tolerance: &PeakTolerance,
-    ) -> Result<ApexLocation, SkipReason> {
+    ) -> Result<(ApexLocation, RankScore), SkipReason> {
         gate_expected_fragments(query)?;
 
         timed!(
@@ -1357,9 +1361,9 @@ impl<I: ScorerQueriable> PrescoreBatch<'_, I> {
                     }
                     t.n_passed_filter += 1;
                     match scorer.prescore_with_windows(&q, worker, &mut t, rt, &peak_tolerance) {
-                        Ok(loc) => {
+                        Ok((loc, rank)) => {
                             let cand = CalibrantCandidate {
-                                score: loc.profile_value,
+                                score: rank.get(),
                                 apex_rt: ObservedRTSeconds(loc.retention_time_ms as f32 / 1000.0),
                                 speclib_index: flat,
                                 library_rt: q.library_rt().unwrap_or(LibraryRT(f32::NAN)),
